@@ -11,7 +11,7 @@ Current plan: [`superpowers/plans/2026-10-19-phase-0-2-reverse-engineering.md`](
 | 1 — Binary retrieval (MyGlass APK, XE24 image) | ✅ done (2026-10-19), see [`sources.md`](sources.md) |
 | 2 — Reverse engineering and mapping | ✅ done (2026-10-19): [`feature-inventory.md`](feature-inventory.md), [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [`cloud-dependencies.md`](cloud-dependencies.md), [`prior-art.md`](prior-art.md) — **waiting for the owner's review of the inventory** |
 | 3 — Architecture | ✅ approved by the owner (2026-10-19): option **C (hybrid)**, [`architecture.md`](architecture.md) |
-| 4 — Android implementation | ⏳ next: plan for steps 1–2 (core, sim-glass, CompanionLink) |
+| 4 — Android implementation | 🔄 4a done: `core` (framing, transport, CompanionLink, ConnectionManager) and `tools/sim-glass`, verified hardware-free ([plan](superpowers/plans/2026-10-19-phase-4a-core-companion-link.md)); next: navigation sources and the bridge app |
 | 5 — iOS plan | ⏳ (only on request) |
 
 ## Phase 0 — Tool inventory (macOS arm64, 2026-10-19)
@@ -61,6 +61,16 @@ The similar counts across Glass apps (7 UUIDs, 4 RFCOMM files) come from a share
 - Glass natively handles timeline cards, location, navigation intents, Wi-Fi setup, screencast, touch injection, device info ([`protocol/messages.md`](protocol/messages.md)).
 - The MyGlass backend (`glass.google.com`) is gone (HTTP 404); native turn-by-turn needs `com.google.glass.maps`, which is not in the XE24 image ([`cloud-dependencies.md`](cloud-dependencies.md)).
 - Third-party apps on Glass cannot write native timeline cards, capture the screen or inject input; the companion channel can ([`glass-internals.md`](glass-internals.md)).
+
+## Hardware checklist
+
+Things verified only against `sim-glass` so far; to confirm on a real Glass XE24:
+
+- [ ] XE24 accepts our 6.10 handshake (no OTA prompt, no disconnect).
+- [ ] Real RFCOMM framing behaves like the TCP tests (partial reads, large frames).
+- [ ] `glassInfoResponseG2C` values match the device (battery, storage, name, software version, 640×360).
+- [ ] `timezoneC2G` updates the Glass clock.
+- [ ] The firmware's ping (SDP query / `PingCompanion`) triggers our reconnection.
 
 ## Decisions
 
