@@ -61,6 +61,8 @@ class LinkManager<H>(
     @Volatile private var session: LinkSession<H>? = null
     @Volatile private var stopped = false
     private val stateLock = Any()
+    /** Counts reconnectNow signals (under stateLock): a wait is skipped if one arrived after the attempt began. */
+    private var wakeGen = 0L
 
     fun start() {
         if (job?.isActive == true) return
@@ -80,9 +82,12 @@ class LinkManager<H>(
     }
 
     /** Skips the current wait (Bluetooth turned on, device back in range, firmware ping). */
-    fun reconnectNow() {
+    fun reconnectNow() = synchronized(stateLock) {
         val s = _state.value
-        if (s is LinkState.WaitingToRetry || s is LinkState.Unavailable) wake.trySend(Unit)
+        if (s is LinkState.WaitingToRetry || s is LinkState.Unavailable) {
+            wakeGen++
+            wake.trySend(Unit)
+        }
     }
 
     /** The current session while connected, for sending; null otherwise. */
@@ -97,11 +102,15 @@ class LinkManager<H>(
     private suspend fun loop() {
         var attempt = 0
         while (scope.isActive && !stopped) {
+            // Signals counted after `seen` mean something changed since this attempt began: skip the next wait.
+            // For an unavailable transport that is any signal after we asked for it (Bluetooth just turned on);
+            // for a real attempt, only signals after it started connecting (earlier ones are covered by it).
+            var seen = synchronized(stateLock) { wakeGen }
             val t = transport()
             if (t == null) {
                 setState(LinkState.Unavailable("no transport"))
             } else {
-                setState(LinkState.Connecting)
+                seen = synchronized(stateLock) { setState(LinkState.Connecting); wakeGen }
                 var channel: Channel? = null
                 var current: LinkSession<H>? = null
                 try {
@@ -135,9 +144,12 @@ class LinkManager<H>(
             if (stopped) break
             attempt++
             val delay = backoff.next()
-            wake.tryReceive()   // a reconnectNow left over from an earlier wait must not cut this one short
-            setState(LinkState.WaitingToRetry(attempt, delay))
-            withTimeoutOrNull(delay) { wake.receive() }
+            wake.tryReceive()   // a signal left over from an earlier wait must not cut this one short
+            val skip = synchronized(stateLock) {
+                setState(LinkState.WaitingToRetry(attempt, delay))
+                wakeGen != seen
+            }
+            if (!skip) withTimeoutOrNull(delay) { wake.receive() }
         }
     }
 }

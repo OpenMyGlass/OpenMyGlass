@@ -157,18 +157,33 @@ class LinkManagerTest {
 
     @Test
     fun `a reconnectNow during one wait does not shorten the next`() {
-        // Issue #14: a signal left in the conflated channel used to end the following wait at once
+        // Issue #14: signals sent while a wait is ending (state still WaitingToRetry) must not cut the next wait
         val t = FakeTransport(failures = 100)
         val m = manager({ t }, initial = 300.milliseconds, max = 300.milliseconds); m.start()
         m.await { it is LinkState.WaitingToRetry }
-        m.reconnectNow(); m.reconnectNow()
+        val spinner = Thread {
+            while (history.count { it == LinkState.Connecting } < 2) m.reconnectNow()
+        }.apply { isDaemon = true; start() }
         m.await { it == LinkState.Connecting }
         m.await { it is LinkState.WaitingToRetry }
+        spinner.join(2_000)
         val waitStarted = System.nanoTime()
         m.await { it == LinkState.Connecting }
         val waited = (System.nanoTime() - waitStarted) / 1_000_000
         m.stop()
         assertTrue(waited >= 200, "second wait lasted only $waited ms")
+    }
+
+    @Test
+    fun `a reconnectNow while unavailable is never lost`() {
+        // Review finding: Bluetooth turning on right after the transport was found unavailable must not wait 60 s
+        val available = java.util.concurrent.atomic.AtomicBoolean(false)
+        val m = manager({ if (available.get()) FakeTransport() else null }, initial = 10.seconds, max = 10.seconds); m.start()
+        m.await { it is LinkState.Unavailable }
+        available.set(true)
+        m.reconnectNow()
+        m.await(2.seconds) { it is LinkState.Connected }
+        m.stop()
     }
 
     @Test
