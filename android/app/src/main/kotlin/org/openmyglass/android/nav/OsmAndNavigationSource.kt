@@ -23,6 +23,14 @@ class OsmAndNavigationSource(private val binder: OsmAndBinder) : NavigationSourc
     private val _available = MutableStateFlow(false)
     override val available: StateFlow<Boolean> = _available.asStateFlow()
 
+    private val _needsAuthorization = MutableStateFlow(false)
+    /**
+     * True when OsmAnd refused our registration: it returns -1 until the user enables OpenMyGlass in
+     * OsmAnd (5.4: Menu → Plugins → OpenMyGlass; newer builds: the "navigation" permission group,
+     * see AndroidOsmAndBinder.permissionRequestIntent). Source: OsmandAidlServiceV2.getApi.
+     */
+    val needsAuthorization: StateFlow<Boolean> = _needsAuthorization.asStateFlow()
+
     private val _current = MutableStateFlow<NavUpdate?>(null)
     /** Latest update, `null` when OsmAnd is unavailable or not navigating. */
     val current: StateFlow<NavUpdate?> = _current.asStateFlow()
@@ -44,19 +52,28 @@ class OsmAndNavigationSource(private val binder: OsmAndBinder) : NavigationSourc
     private fun onConnected(connected: OsmAndApi) = synchronized(lock) {
         api = connected
         registrations.clear()
-        registrations += connected.registerNavigation { distanceTo, turnType ->
-            synchronized(lock) { _current.value = reducer.onDirection(distanceTo, turnType) }
-        }
-        registrations += connected.registerVoice { played ->
-            synchronized(lock) { reducer.onVoicePlayed(played)?.let { _current.value = it } }
-        }
-        _available.value = true
+        val ids = listOf(
+            connected.registerNavigation { distanceTo, turnType ->
+                synchronized(lock) { _current.value = reducer.onDirection(distanceTo, turnType) }
+            },
+            connected.registerVoice { played ->
+                synchronized(lock) { reducer.onVoicePlayed(played)?.let { _current.value = it } }
+            },
+        )
+        registrations += ids.filter { it != REFUSED }
+        _needsAuthorization.value = REFUSED in ids
+        _available.value = REFUSED !in ids
     }
 
     private fun onDisconnected() = synchronized(lock) {
         api = null
         registrations.clear()
         clear()
+    }
+
+    private companion object {
+        /** OsmAnd's return value when the calling app is not allowed to use the method. */
+        const val REFUSED = -1L
     }
 
     private fun clear() {

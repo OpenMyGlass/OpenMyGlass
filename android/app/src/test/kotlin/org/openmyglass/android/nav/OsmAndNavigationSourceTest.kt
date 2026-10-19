@@ -9,12 +9,12 @@ import org.openmyglass.core.nav.Maneuver
 
 class OsmAndNavigationSourceTest {
 
-    private class FakeApi : OsmAndApi {
+    private class FakeApi(private val navId: Long = 1, private val voiceId: Long = 2) : OsmAndApi {
         var nav: ((Int, Int) -> Unit)? = null
         var voice: ((List<String>) -> Unit)? = null
         val unregistered = mutableListOf<Long>()
-        override fun registerNavigation(callback: (distanceTo: Int, turnType: Int) -> Unit): Long { nav = callback; return 1 }
-        override fun registerVoice(callback: (played: List<String>) -> Unit): Long { voice = callback; return 2 }
+        override fun registerNavigation(callback: (distanceTo: Int, turnType: Int) -> Unit): Long { nav = callback; return navId }
+        override fun registerVoice(callback: (played: List<String>) -> Unit): Long { voice = callback; return voiceId }
         override fun unregister(id: Long) { unregistered += id }
     }
 
@@ -75,5 +75,17 @@ class OsmAndNavigationSourceTest {
         assertTrue(binder.unbound)
         assertFalse(source.available.value)
         assertNull(source.current.value)
+    }
+
+    @Test
+    fun `refused registration means not authorized`() {
+        // OsmAnd returns -1 when the app is not enabled in its "Connected apps" settings
+        val binder = FakeBinder(); val api = FakeApi(navId = -1, voiceId = -1)
+        val source = OsmAndNavigationSource(binder)
+        source.start(); binder.onConnected!!(api)
+        assertFalse(source.available.value)
+        assertTrue(source.needsAuthorization.value)
+        source.stop()
+        assertTrue(api.unregistered.isEmpty())
     }
 }

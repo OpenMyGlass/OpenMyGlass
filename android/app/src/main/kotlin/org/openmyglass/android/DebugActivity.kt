@@ -26,11 +26,22 @@ class DebugActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val osmandStatus = TextView(this)
+        val allowOsmAnd = Button(this).apply {
+            text = "Allow OpenMyGlass in OsmAnd"
+            visibility = android.view.View.GONE
+            setOnClickListener {
+                AndroidOsmAndBinder.permissionRequestIntent(this@DebugActivity)
+                    ?.let { startActivityForResult(it, REQUEST_OSMAND_PERMISSION) }
+            }
+        }
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            // targetSdk 35+ enforces edge-to-edge: keep content clear of the status and app bars
+            fitsSystemWindows = true
             setPadding(32, 32, 32, 32)
             addView(TextView(this@DebugActivity).apply { text = "OpenMyGlass — debug" })
             addView(osmandStatus)
+            addView(allowOsmAnd)
             addView(Button(this@DebugActivity).apply {
                 text = "Notification access settings"
                 setOnClickListener { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
@@ -48,14 +59,33 @@ class DebugActivity : Activity() {
         })
         osmand = OsmAndNavigationSource(AndroidOsmAndBinder(applicationContext))
         scope.launch {
-            osmand.available.combine(osmand.current) { available, update -> available to update }
-                .collect { (available, update) ->
-                    osmandStatus.text = "OsmAnd: ${if (available) "connected" else "unavailable"}\n" +
+            combine(osmand.available, osmand.needsAuthorization, osmand.current) { a, n, u -> Triple(a, n, u) }
+                .collect { (available, needsAuth, update) ->
+                    val status = when {
+                        available -> "connected"
+                        needsAuth -> "not authorized — in OsmAnd open Menu → Plugins and tap OpenMyGlass (OsmAnd ≥ 5.5: use the button below)"
+                        else -> "unavailable"
+                    }
+                    allowOsmAnd.visibility = if (needsAuth) android.view.View.VISIBLE else android.view.View.GONE
+                    osmandStatus.text = "OsmAnd: $status\n" +
                         (update?.let { "${it.maneuver} in ${it.distanceMeters ?: "?"} m\n${it.instruction.orEmpty()}" }
                             ?: "no active navigation")
                 }
         }
         osmand.start()
+    }
+
+    @Deprecated("Activity result API is enough for a debug screen")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_OSMAND_PERMISSION && resultCode == RESULT_OK) {
+            osmand.stop()
+            osmand.start()
+        }
+    }
+
+    private companion object {
+        const val REQUEST_OSMAND_PERMISSION = 1
     }
 
     override fun onDestroy() {

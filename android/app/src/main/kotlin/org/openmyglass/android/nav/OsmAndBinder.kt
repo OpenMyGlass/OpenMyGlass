@@ -56,6 +56,15 @@ class AndroidOsmAndBinder(private val context: Context) : OsmAndBinder {
         const val SERVICE_ACTION = "net.osmand.aidl.OsmandAidlServiceV2"
         /** OsmAnd+ / F-Droid build first, then the free and the nightly build. */
         val PACKAGES = listOf("net.osmand.plus", "net.osmand", "net.osmand.dev")
+
+        /**
+         * Asks OsmAnd for the "navigation" permission group (registerForNavUpdates, registerForVoiceRouterMessages).
+         * Start it with startActivityForResult; OsmAnd shows "Allow … to use OsmAnd?"
+         * (net.osmand.aidl.AidlPermissionRequestActivity).
+         */
+        fun permissionRequestIntent(context: Context): Intent? = PACKAGES
+            .map { Intent("net.osmand.aidl.REQUEST_PERMISSIONS").setPackage(it).putExtra("groups", arrayOf("navigation")) }
+            .firstOrNull { it.resolveActivity(context.packageManager) != null }
     }
 }
 
