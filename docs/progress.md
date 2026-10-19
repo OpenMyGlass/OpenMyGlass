@@ -26,6 +26,7 @@ Piano completo del progetto: [`project-prompt.md`](project-prompt.md).
 | Ghidra | ❌ | opzionale, solo per codice nativo |
 | gradle, kotlin | ❌ | arriveranno via Gradle wrapper in Fase 4 |
 | protoc | ❌ | `brew install protobuf` — se lo schema sarà protobuf |
+| REA MCP (`rea-agents` 6.7.0) | ✅ | registrato a livello di progetto (`claude mcp add --scope local`); usa JADX/Ghidra come provider |
 | GDK add-on (API 19) | ❌ | da recuperare/verificare in Fase 4 per `glass-xe/` |
 
 ## Decisioni
