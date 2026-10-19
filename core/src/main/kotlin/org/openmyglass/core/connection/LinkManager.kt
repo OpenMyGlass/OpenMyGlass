@@ -46,6 +46,8 @@ class LinkManager<H>(
     private val scope: CoroutineScope,
     private val backoff: Backoff = Backoff(),
     private val onStateChange: (LinkState<H>) -> Unit = {},
+    /** Why an attempt or session ended (for logs); the loop retries regardless. */
+    private val onError: (Throwable) -> Unit = {},
 ) {
     private val _state = MutableStateFlow<LinkState<H>>(LinkState.Disconnected)
     val state: StateFlow<LinkState<H>> = _state.asStateFlow()
@@ -107,8 +109,9 @@ class LinkManager<H>(
                     current.run()
                 } catch (e: CancellationException) {
                     throw e
-                } catch (_: Exception) {
+                } catch (e: Exception) {
                     // refused, handshake failure, framing error or dropped link: retry below
+                    onError(e)
                 } finally {
                     current?.close()
                     runCatching { channel?.close() }

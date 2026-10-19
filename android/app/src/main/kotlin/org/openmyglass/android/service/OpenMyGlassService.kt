@@ -99,6 +99,7 @@ class OpenMyGlassService : Service() {
             relay = NavigationHub.relay,
             appVersion = appVersion(),
             scope = s,
+            onError = { android.util.Log.w(TAG, "bridge link: $it") },
         ).also { this.bridge = it }
         val companionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
         if (settings.load().companionEnabled) {
@@ -115,9 +116,16 @@ class OpenMyGlassService : Service() {
             combine(bridge.state, companionState) { b, c -> b to (c is ConnectionState.Connected) }.collect { (b, companionUp) ->
                 val text = ServiceStatus.text(b, companionUp, permissionMissing = !hasBluetoothPermission(this@OpenMyGlassService))
                 getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text, ongoing = true))
-                NavigationHub.setBridgeStatus("bridge: $b" + if (companionUp) " · companion connected" else "")
+                NavigationHub.setBridgeStatus("bridge: ${describe(b)}" + if (companionUp) " · companion connected" else "")
             }
         }
+    }
+
+    private fun describe(state: LinkState<*>): String = when (state) {
+        is LinkState.Connected<*> -> "connected"
+        is LinkState.WaitingToRetry -> "not reachable, retry ${state.attempt} in ${state.delay}"
+        is LinkState.Unavailable -> "unavailable (${state.reason})"
+        else -> state.toString().lowercase()
     }
 
     private fun stopLinks() {
@@ -147,6 +155,7 @@ class OpenMyGlassService : Service() {
         runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "dev"
 
     companion object {
+        private const val TAG = "OpenMyGlassService"
         private const val CHANNEL = "links"
         private const val NOTIFICATION_ID = 1
         const val ACTION_STOP = "org.openmyglass.android.STOP"

@@ -4,7 +4,9 @@ The OpenMyGlass app that runs on Glass Explorer Edition XE24. It receives naviga
 
 ## What it does
 
-- **Bridge server** (`BridgeServer`): TCP on port **7825** for now; Bluetooth RFCOMM in plan 4e.
+- **Bridge server** (`BridgeServer`): **Bluetooth RFCOMM** (secure, UUID `8a0dcb95-c455-453f-87b5-d69ddc82b743`, SDP name `OpenMyGlass Bridge`) and **TCP port 7825** for debugging, with one session across both.
+  - If Bluetooth is turned off, the RFCOMM listener is reopened with a delay that grows from 5 s up to 60 s.
+  - The `glass` flavor starts at boot (`BootReceiver`), so the phone can connect without opening the app; the card appears only when navigation starts.
   - One session at a time: a new connection replaces the active one, because it means the phone reconnected.
   - It answers the phone's Hello with the capabilities `nav` and `icons`.
 - **Navigation card state** (`NavCardState`): applies `NavState`, `NavEnded` and `Icon` frames.
@@ -15,9 +17,9 @@ The OpenMyGlass app that runs on Glass Explorer Edition XE24. It receives naviga
   - When the maneuver is unknown (Google Maps), the card shows the maneuver icon the phone forwarded.
 - **Screen wake** (`WakePolicy`): wakes on the first card, on a maneuver change, and when the distance crosses below 200 m. The wake lock lasts 5 s. Never on small distance changes, never when navigation ends.
 
-## Security note (interim TCP bridge)
+## Security note (TCP debug port)
 
-Until Bluetooth RFCOMM lands (plan 4e, where bonding authenticates the phone), the bridge listens on **TCP port 7825 on all interfaces with no authentication**. Anyone on the same Wi-Fi or hotspot can connect.
+The phone normally uses Bluetooth RFCOMM, where pairing authenticates it. The TCP debug port **7825 listens on all interfaces with no authentication**: anyone on the same Wi-Fi or hotspot can connect.
 - A connection becomes the active session only after a valid Hello within 5 s, so a stray connection (e.g. a port scan) does not drop the phone's session.
 - A client that does send a Hello can replace the session and push cards.
 
@@ -53,8 +55,18 @@ Observed:
 - **Google Maps:** Maps' own straight-arrow icon, `Bangarten`, `ETA 23:43`.
 - The card disappears when navigation stops.
 - Found and fixed: rotating the emulator recreated the activity and dropped the bridge session (now `configChanges`).
-- Gap: the phone does not reconnect the bridge by itself yet (plan 4e: foreground service + reconnection).
+- 2026-10-20, phone foreground service (`OpenMyGlassService`, TCP mode):
+  - when the Glass app is killed and restarted, the phone reconnects by itself within the next retry (3 s in the test);
+  - when the phone process is killed during navigation, the system restarts the service (`START_STICKY`, about 2 s) and the card keeps updating;
+  - the Glass app in the background for 60 s during navigation does not stop updates.
+- Found and fixed: after a failed send, the relay dropped the session but the link stayed open, so Glass got no updates until a reconnect. A failed send now closes the link.
+- Emulator caveat: Android 36 freezes background apps, and the `emulator` flavor hosts the server in an activity. Keep the Glass emulator app in front, or start it before the phone connects; on Glass the server runs in a service.
 
 ## On real Glass (not yet verified)
 
-See the hardware checklist in [`progress.md`](progress.md): install with `adb install`, start "OpenMyGlass", connect the phone over Wi-Fi to the Glass IP on port 7825 (until RFCOMM lands), and check LiveCard publishing, wake behavior and battery.
+1. Pair Glass with the phone (Glass: Settings → Bluetooth; phone: Bluetooth settings).
+2. `adb install` the `glass` flavor; open "OpenMyGlass" once, or reboot (it starts at boot).
+3. On the phone: OpenMyGlass → Connection settings → choose the Glass among the paired devices, "Bridge over Bluetooth" → Save and connect. Grant the Bluetooth and notification permissions.
+4. Start a navigation in OsmAnd or Google Maps.
+
+See the hardware checklist in [`progress.md`](progress.md).

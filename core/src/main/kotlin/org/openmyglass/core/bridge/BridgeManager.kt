@@ -22,11 +22,13 @@ class BridgeManager(
     scope: CoroutineScope,
     backoff: Backoff = Backoff(),
     onStateChange: (LinkState<Bridge.Hello>) -> Unit = {},
+    onError: (Throwable) -> Unit = {},
 ) {
     private inner class Session(private val link: BridgeLink) : LinkSession<Bridge.Hello> {
         override suspend fun handshake(): Bridge.Hello = link.handshake()
         override suspend fun run() {
-            val attached = relay.attach(link::send)
+            // A failed send drops the relay session: close the link so LinkManager reconnects and reattaches
+            val attached = relay.attach(onFailure = link::close, send = link::send)
             try {
                 link.incoming().collect { frame ->
                     if (frame.hasIconRequest()) relay.onIconRequest(frame.iconRequest.sha256.toByteArray())
@@ -39,7 +41,7 @@ class BridgeManager(
     }
 
     private val manager = LinkManager(transport, { channel: Channel -> Session(BridgeLink(channel, appVersion)) },
-        scope, backoff, onStateChange)
+        scope, backoff, onStateChange, onError)
 
     val state: StateFlow<LinkState<Bridge.Hello>> = manager.state
 

@@ -110,4 +110,15 @@ class LinkManagerTest {
         m.await { it is LinkState.Connected && sessions.size == 2 }
         assertTrue(history.any { it is LinkState.WaitingToRetry })
     }
+
+    @Test
+    fun `failures are reported`() {
+        val errors = Collections.synchronizedList(mutableListOf<Throwable>())
+        val m = LinkManager({ FakeTransport(failures = 1) }, { FakeSession() }, scope, Backoff(50.milliseconds, 50.milliseconds),
+            onError = { errors += it })
+        m.start()
+        m.await { it is LinkState.WaitingToRetry }
+        assertEquals("refused", errors.first().message)
+        m.stop()
+    }
 }
