@@ -57,6 +57,9 @@ class BridgeLink(private val channel: Channel, private val appVersion: String) {
 
     companion object {
         const val PROTOCOL_VERSION = 1
+        /** RFCOMM service of the OpenMyGlass Glass app (secure, bonded devices only); SDP name [RFCOMM_NAME]. */
+        val RFCOMM_UUID: java.util.UUID = java.util.UUID.fromString("8a0dcb95-c455-453f-87b5-d69ddc82b743")
+        const val RFCOMM_NAME = "OpenMyGlass Bridge"
         /** Kept small for BLE (iOS path, architecture §10). */
         const val MAX_FRAME_BYTES = 64 * 1024
         val CAPABILITIES = listOf("nav", "icons")
