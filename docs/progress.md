@@ -11,7 +11,7 @@ Current plan: [`superpowers/plans/2026-10-19-phase-0-2-reverse-engineering.md`](
 | 1 — Binary retrieval (MyGlass APK, XE24 image) | ✅ done (2026-10-19), see [`sources.md`](sources.md) |
 | 2 — Reverse engineering and mapping | ✅ done (2026-10-19): [`feature-inventory.md`](feature-inventory.md), [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [`cloud-dependencies.md`](cloud-dependencies.md), [`prior-art.md`](prior-art.md) — **waiting for the owner's review of the inventory** |
 | 3 — Architecture | ✅ approved by the owner (2026-10-19): option **C (hybrid)**, [`architecture.md`](architecture.md) |
-| 4 — Android implementation | 🔄 4a done: `core` (framing, transport, CompanionLink, ConnectionManager) and `tools/sim-glass`, verified hardware-free ([plan](superpowers/plans/2026-10-19-phase-4a-core-companion-link.md)); next: navigation sources and the bridge app |
+| 4 — Android implementation | 🔄 4a done (core, CompanionLink, sim-glass); 4b done: navigation sources on the phone (OsmAnd AIDL source, notification capture), measured in [`navigation-sources.md`](navigation-sources.md); next: Maps/OsmAnd notification parsers, then bridge app + navigation card (4c) |
 | 5 — iOS plan | ⏳ (only on request) |
 
 ## Phase 0 — Tool inventory (macOS arm64, 2026-10-19)
@@ -71,6 +71,12 @@ Things verified only against `sim-glass` so far; to confirm on a real Glass XE24
 - [ ] `glassInfoResponseG2C` values match the device (battery, storage, name, software version, 640×360).
 - [ ] `timezoneC2G` updates the Glass clock.
 - [ ] The firmware's ping (SDP query / `PingCompanion`) triggers our reconnection.
+- [ ] Navigation updates keep coming while the phone projects to Android Auto in a real car (OsmAnd AIDL and Maps notification).
+
+## Later phases (agreed with the owner, 2026-10-19)
+
+- **ROM and kernel:** slim down the XE24 ROM and optimize the kernel for battery and performance. The owner asked to compare three strategies: (A) debloat stock XE24, (B) start from a community port and reinstall Google's card UI, (C) fully reverse-engineer Google's UI and hardware controls and reimplement them open source; voice commands to be forwarded to the phone for offline transcription. Research notes are in the local `_re/research/` (not versioned) and will be turned into a design. Kernel and ROM scripts go into **separate repos**, grouped with this one in a **GitHub organization** with a shared Project board (the owner creates the organization).
+- This conflicts with the architecture's "no root on Glass" anti-goal: it will be an optional, separate track, decided with the owner when it starts.
 
 ## Decisions
 
