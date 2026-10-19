@@ -38,4 +38,10 @@ expect "gradle wrapper jar accepted" 0 bash -c "cd '$TMP/r' && bash '$GUARD'"
 repo; mkdir "$TMP/r/sub"; printf 'PK' > "$TMP/r/fake.apk"; echo x > "$TMP/r/sub/x.txt"; git -C "$TMP/r" add -f fake.apk sub/x.txt
 expect "apk rejected when run from a subdirectory" 1 bash -c "cd '$TMP/r/sub' && bash '$GUARD'"
 
+repo; mkdir -p "$TMP/r/glass-xe/libs"; printf 'PK' > "$TMP/r/glass-xe/libs/gdk.jar"; git -C "$TMP/r" add -f glass-xe/libs/gdk.jar
+expect "gdk.jar rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; mkdir -p "$TMP/r/x"; printf 'PK' > "$TMP/r/x/gdk.jar"; git -C "$TMP/r" add -f x/gdk.jar
+expect "gdk.jar rejected anywhere" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
 echo "$pass passed, $fail failed"; [ $fail -eq 0 ]
