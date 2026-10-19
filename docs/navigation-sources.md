@@ -53,9 +53,16 @@ The street name ("Obergass"), the remaining distance and time, and the ETA are a
 
 ## Android Auto
 
-- The Play image ships only a **stub** of Android Auto (`com.google.android.projection.gearhead` `1.2.551000-stub`). The Desktop Head Unit (`extras;google;auto`, installed, native on Apple Silicon) needs the full Android Auto app, which comes from the Play Store and needs a Google account. **Not tested yet**: it waits for the owner to sign in on the emulator, or for a real phone.
-- Known limitation from research: OsmAnd uses the Car App Library, and Android Auto shows sideloaded (F-Droid) builds of such apps only after they are installed from Play or Internal App Sharing.
-- Open questions for the hardware/real-car checklist: do Maps keep posting the phone notification, and does OsmAnd keep firing AIDL callbacks, while projecting to the car?
+Tested on 2026-10-19 with the **Desktop Head Unit 2.0** (`extras;google;auto`, native on Apple Silicon) connected to the emulator. Steps:
+
+1. **Install the full Android Auto.** The Play image ships only a stub (`com.google.android.projection.gearhead` `1.2.551000-stub`). The full app comes from Google Play without a Google account, through **Aurora Store** (F-Droid, anonymous login) with the device profile spoofed as *Google Pixel 9a*. Installed version: `17.8.663874-release`, signed by Google (certificate SHA-1 `a60bd681f4cee6031cb6235b3e145bb1936c4e76`).
+2. **Start the head unit server.** Android Auto settings → tap "Version" 10 times → overflow menu → "Start head unit server".
+3. **Connect the head unit.** `adb forward tcp:5277 tcp:5277`, then `~/Library/Android/sdk/extras/google/auto/desktop-head-unit`.
+
+Results while projecting to the head unit:
+- **Google Maps keeps posting its phone notification**: 6 new captures during the first minute, same fields as above.
+- **OsmAnd keeps delivering AIDL navigation updates**: our debug screen showed `ROUNDABOUT in 31 m` with the voice prompt `Attenzione, Attraversamento pedonale`, in Italian after `cmd locale set-app-locales`. OsmAnd from F-Droid is not shown *on the car screen* (Car App Library apps sideloaded from outside Play are hidden), but that does not matter to us: we read OsmAnd on the phone.
+- Still to confirm in a real car: behavior with a wireless/USB head unit, and the phone screen locked.
 
 ## Recommendation
 
