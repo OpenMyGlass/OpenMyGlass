@@ -71,7 +71,7 @@ Things verified only against `sim-glass` so far; to confirm on a real Glass XE24
 - [ ] `glassInfoResponseG2C` values match the device (battery, storage, name, software version, 640×360).
 - [ ] `timezoneC2G` updates the Glass clock.
 - [ ] The firmware's ping (SDP query / `PingCompanion`) triggers our reconnection.
-- [ ] Navigation updates keep coming while the phone projects to Android Auto in a real car (OsmAnd AIDL and Maps notification).
+- [ ] Navigation updates keep coming while the phone projects to Android Auto **in a real car** (verified on the emulator with the Desktop Head Unit, 2026-10-19: both OsmAnd AIDL and the Maps notification keep working).
 
 ## Later phases (agreed with the owner, 2026-10-19)
 
