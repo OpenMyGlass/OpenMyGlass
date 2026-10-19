@@ -29,7 +29,7 @@ Use it only on trusted networks; it is meant for development.
 
 | Flavor | Renderer | Target |
 |---|---|---|
-| `glass` | GDK **LiveCard** (`NavLiveCardService`): published with REVEAL, updated with `setViews`, `navigate()` + wake lock per `WakePolicy`, `unpublish()` at the end. Started from the launcher (`StartActivity`). | Glass XE24, API 19 |
+| `glass` | GDK **LiveCard** (`BridgeService`): published with REVEAL, updated with `setViews`, `navigate()` + wake lock per `WakePolicy`, `unpublish()` at the end. Started from the launcher (`StartActivity`). | Glass XE24, API 19 |
 | `emulator` | `EmulatorCardActivity`: the same layout in the largest 16:9 area of the screen, with the bridge server inside the activity. | Any Android emulator (API 21+) |
 
 ## GDK and licensing
