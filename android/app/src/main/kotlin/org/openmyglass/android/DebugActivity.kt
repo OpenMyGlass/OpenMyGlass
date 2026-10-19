@@ -49,6 +49,14 @@ class DebugActivity : Activity() {
             addView(bridgeStatus)
             addView(bridgeAddress)
             addView(Button(this@DebugActivity).apply {
+                text = "Preset: Glass app on this device (127.0.0.1:7825)"
+                setOnClickListener { bridgeAddress.setText("127.0.0.1:7825") }
+            })
+            addView(Button(this@DebugActivity).apply {
+                text = "Preset: sim-glass on the host (10.0.2.2:7824)"
+                setOnClickListener { bridgeAddress.setText("10.0.2.2:7824") }
+            })
+            addView(Button(this@DebugActivity).apply {
                 text = "Connect bridge (debug TCP)"
                 setOnClickListener {
                     val (host, port) = bridgeAddress.text.toString().split(":").let { it[0] to (it.getOrNull(1)?.toIntOrNull() ?: 7824) }

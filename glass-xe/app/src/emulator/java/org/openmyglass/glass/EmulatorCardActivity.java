@@ -42,8 +42,7 @@ public final class EmulatorCardActivity extends Activity {
         idle.setTextColor(Color.WHITE);
         idle.setGravity(Gravity.CENTER);
         cardArea.addView(idle);
-        int width = getResources().getDisplayMetrics().widthPixels;
-        root.addView(cardArea, new FrameLayout.LayoutParams(width, width * 9 / 16, Gravity.CENTER));
+        root.addView(cardArea, cardLayoutParams());
         setContentView(root);
 
         NavCardState state = new NavCardState(new IconCache(64), new NavCardState.Listener() {
@@ -56,6 +55,20 @@ public final class EmulatorCardActivity extends Activity {
         }, new HandlerScheduler(main), 30_000);
         server = new BridgeServer(PORT, state);
         server.start();
+    }
+
+    /** Largest 16:9 area that fits the screen (Glass is 640×360). */
+    private FrameLayout.LayoutParams cardLayoutParams() {
+        int w = getResources().getDisplayMetrics().widthPixels;
+        int h = getResources().getDisplayMetrics().heightPixels;
+        int width = Math.min(w, h * 16 / 9);
+        return new FrameLayout.LayoutParams(width, width * 9 / 16, Gravity.CENTER);
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        cardArea.setLayoutParams(cardLayoutParams());
     }
 
     private void show(NavCardState.Card card) {

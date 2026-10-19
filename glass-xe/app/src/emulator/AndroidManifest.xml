@@ -3,6 +3,7 @@
     <application>
         <activity
             android:name=".EmulatorCardActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:exported="true"
             android:label="OpenMyGlass (emulator)">
             <intent-filter>
