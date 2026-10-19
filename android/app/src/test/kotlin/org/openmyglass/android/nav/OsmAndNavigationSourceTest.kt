@@ -20,10 +20,11 @@ class OsmAndNavigationSourceTest {
 
     private class FakeBinder(private val bindResult: Boolean = true) : OsmAndBinder {
         var onConnected: ((OsmAndApi) -> Unit)? = null
-        var onDisconnected: (() -> Unit)? = null
+        var onDisconnected: ((Boolean) -> Unit)? = null
         var unbound = false
-        override fun bind(onConnected: (OsmAndApi) -> Unit, onDisconnected: () -> Unit): Boolean {
-            this.onConnected = onConnected; this.onDisconnected = onDisconnected
+        var binds = 0
+        override fun bind(onConnected: (OsmAndApi) -> Unit, onDisconnected: (bindingDied: Boolean) -> Unit): Boolean {
+            this.onConnected = onConnected; this.onDisconnected = onDisconnected; binds++
             return bindResult
         }
         override fun unbind() { unbound = true }
@@ -57,7 +58,7 @@ class OsmAndNavigationSourceTest {
         val binder = FakeBinder(); val api1 = FakeApi(); val api2 = FakeApi()
         val source = OsmAndNavigationSource(binder)
         source.start(); binder.onConnected!!(api1); api1.nav!!(100, 2)
-        binder.onDisconnected!!()
+        binder.onDisconnected!!(false)
         assertFalse(source.available.value)
         assertNull(source.current.value)
         binder.onConnected!!(api2)
@@ -87,5 +88,51 @@ class OsmAndNavigationSourceTest {
         assertTrue(source.needsAuthorization.value)
         source.stop()
         assertTrue(api.unregistered.isEmpty())
+    }
+
+    @Test
+    fun `a dead OsmAnd does not crash stop or connect`() {
+        val binder = FakeBinder()
+        val dead = object : OsmAndApi {
+            override fun registerNavigation(callback: (distanceTo: Int, turnType: Int) -> Unit): Long = throw IllegalStateException("DeadObjectException")
+            override fun registerVoice(callback: (played: List<String>) -> Unit): Long = throw IllegalStateException("DeadObjectException")
+            override fun unregister(id: Long) = throw IllegalStateException("DeadObjectException")
+        }
+        val source = OsmAndNavigationSource(binder)
+        source.start(); binder.onConnected!!(dead)
+        assertFalse(source.available.value)
+        source.stop()
+        assertTrue(binder.unbound)
+    }
+
+    @Test
+    fun `binding death triggers a rebind`() {
+        val binder = FakeBinder(); val api = FakeApi()
+        val source = OsmAndNavigationSource(binder)
+        source.start(); binder.onConnected!!(api)
+        binder.onDisconnected!!(true)
+        assertTrue(binder.unbound)
+        assertEquals(2, binder.binds)
+        assertFalse(source.available.value)
+    }
+
+    @Test
+    fun `callbacks during registration do not deadlock`() {
+        // OsmAnd may invoke our callback on a binder thread while our register call is still in progress
+        val binder = FakeBinder()
+        val api = object : OsmAndApi {
+            override fun registerNavigation(callback: (distanceTo: Int, turnType: Int) -> Unit): Long {
+                val t = kotlin.concurrent.thread { callback(100, 2) }
+                t.join(1_000)
+                check(!t.isAlive) { "callback thread blocked: deadlock" }
+                return 1
+            }
+            override fun registerVoice(callback: (played: List<String>) -> Unit): Long = 2
+            override fun unregister(id: Long) = Unit
+        }
+        val source = OsmAndNavigationSource(binder)
+        source.start(); binder.onConnected!!(api)
+        assertTrue(source.available.value)
+        assertEquals(100, source.current.value?.distanceMeters)
     }
 }

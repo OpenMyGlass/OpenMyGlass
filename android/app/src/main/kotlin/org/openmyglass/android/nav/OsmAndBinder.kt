@@ -21,19 +21,21 @@ interface OsmAndApi {
 
 /** Binds OsmAnd's AIDL service; [bind] returns false if no OsmAnd build is installed. */
 interface OsmAndBinder {
-    fun bind(onConnected: (OsmAndApi) -> Unit, onDisconnected: () -> Unit): Boolean
+    /** [onDisconnected] gets `bindingDied = true` when Android will not reconnect this binding by itself. */
+    fun bind(onConnected: (OsmAndApi) -> Unit, onDisconnected: (bindingDied: Boolean) -> Unit): Boolean
     fun unbind()
 }
 
 class AndroidOsmAndBinder(private val context: Context) : OsmAndBinder {
     private var connection: ServiceConnection? = null
 
-    override fun bind(onConnected: (OsmAndApi) -> Unit, onDisconnected: () -> Unit): Boolean {
+    override fun bind(onConnected: (OsmAndApi) -> Unit, onDisconnected: (bindingDied: Boolean) -> Unit): Boolean {
         val conn = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName, service: IBinder) =
                 onConnected(AidlOsmAndApi(IOsmAndAidlInterface.Stub.asInterface(service)))
-            override fun onServiceDisconnected(name: ComponentName) = onDisconnected()
-            override fun onBindingDied(name: ComponentName) = onDisconnected()
+            override fun onServiceDisconnected(name: ComponentName) = onDisconnected(false)
+            override fun onBindingDied(name: ComponentName) = onDisconnected(true)
+            override fun onNullBinding(name: ComponentName) = onDisconnected(true)
         }
         for (pkg in PACKAGES) {
             val intent = Intent(SERVICE_ACTION).setPackage(pkg)

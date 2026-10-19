@@ -31,24 +31,40 @@ class OpenMyGlassNotificationListener : NotificationListenerService() {
                 hasCustomBigView = n.bigContentView != null,
             )
         )
-        captureFile(this).appendText(line + "\n")
+        runCatching { captureFile(this).appendText(line + "\n") }
     }
 
+    /** One extra at a time: a value that cannot be read (e.g. a custom Parcelable) becomes a placeholder. */
     private fun Bundle.toMap(): Map<String, Any?> = keySet().associateWith { key ->
-        @Suppress("DEPRECATION")
-        when (val v = get(key)) {
-            is Bitmap -> imageMeta(v)
-            is Icon -> mapOf("type" to "icon", "iconType" to v.type)
-            is Bundle -> v.toMap()
-            is Array<*> -> v.map { if (it is Bundle) it.toMap() else it }
-            else -> v
-        }
+        runCatching { convert(@Suppress("DEPRECATION") get(key)) }
+            .getOrElse { mapOf("type" to "unreadable", "error" to it::class.java.simpleName) }
     }
 
+    private fun convert(v: Any?): Any? = when (v) {
+        is Bitmap -> imageMeta(v)
+        is Icon -> iconMeta(v)
+        is Bundle -> v.toMap()
+        is Array<*> -> v.map(::convert)
+        is List<*> -> v.map(::convert)
+        else -> v
+    }
+
+    /** Only metadata and a hash leave the device: icons from other apps are never stored as images. */
     private fun imageMeta(bitmap: Bitmap): Map<String, Any?> {
-        val buffer = ByteBuffer.allocate(bitmap.byteCount).also { bitmap.copyPixelsToBuffer(it) }
-        val sha = MessageDigest.getInstance("SHA-256").digest(buffer.array()).joinToString("") { "%02x".format(it) }
-        return mapOf("type" to "image", "width" to bitmap.width, "height" to bitmap.height, "sha256" to sha)
+        val meta = mapOf("type" to "image", "width" to bitmap.width, "height" to bitmap.height)
+        val sha = runCatching {
+            val readable = if (bitmap.config == Bitmap.Config.HARDWARE) bitmap.copy(Bitmap.Config.ARGB_8888, false) else bitmap
+            val buffer = ByteBuffer.allocate(readable.byteCount).also { readable.copyPixelsToBuffer(it) }
+            MessageDigest.getInstance("SHA-256").digest(buffer.array()).joinToString("") { "%02x".format(it) }
+        }.getOrNull()
+        return if (sha != null) meta + ("sha256" to sha) else meta
+    }
+
+    /** Bitmap icons (e.g. Google Maps' maneuver arrows) get the same hash as bitmaps, so they can be recognized. */
+    private fun iconMeta(icon: Icon): Map<String, Any?> {
+        val drawable = runCatching { icon.loadDrawable(this) }.getOrNull()
+        val bitmap = (drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap
+        return mapOf("type" to "icon", "iconType" to icon.type) + (bitmap?.let { imageMeta(it) - "type" } ?: emptyMap())
     }
 
     companion object {
@@ -63,8 +79,10 @@ class OpenMyGlassNotificationListener : NotificationListenerService() {
             context.getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_ENABLED, enabled).apply()
 
         /** `adb pull /sdcard/Android/data/org.openmyglass.android/files/captures/` */
-        fun captureFile(context: android.content.Context): File =
-            File(context.getExternalFilesDir("captures"), "navigation-notifications.jsonl")
+        fun captureFile(context: android.content.Context): File {
+            val dir = context.getExternalFilesDir("captures") ?: File(context.filesDir, "captures").apply { mkdirs() }
+            return File(dir, "navigation-notifications.jsonl")
+        }
     }
 }
 
