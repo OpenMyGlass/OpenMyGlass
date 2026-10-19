@@ -34,3 +34,4 @@ captures/
 
 # Python bytecode
 __pycache__/
+.kotlin/
