@@ -3,6 +3,7 @@ package org.openmyglass.core.bridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
 import org.openmyglass.core.connection.Backoff
+import org.openmyglass.core.notif.NotificationRelay
 import org.openmyglass.core.connection.LinkManager
 import org.openmyglass.core.connection.LinkSession
 import org.openmyglass.core.connection.LinkState
@@ -24,18 +25,29 @@ class BridgeManager(
     onStateChange: (LinkState<Bridge.Hello>) -> Unit = {},
     onError: (Throwable) -> Unit = {},
     stableAfter: kotlin.time.Duration = kotlin.time.Duration.parse("30s"),
+    private val notifications: NotificationRelay? = null,
 ) {
     private inner class Session(private val link: BridgeLink) : LinkSession<Bridge.Hello> {
         override suspend fun handshake(): Bridge.Hello = link.handshake()
         override suspend fun run() {
             // A failed send drops the relay session: close the link so LinkManager reconnects and reattaches
             val attached = relay.attach(onFailure = link::close, send = link::send)
+            val attachedNotifications = notifications?.attach(onFailure = link::close, send = link::send)
             try {
                 link.incoming().collect { frame ->
-                    if (frame.hasIconRequest()) relay.onIconRequest(frame.iconRequest.sha256.toByteArray())
+                    when {
+                        frame.hasIconRequest() -> {
+                            // Maneuver and app icons live in different stores; each relay answers for its own
+                            val sha = frame.iconRequest.sha256.toByteArray()
+                            relay.onIconRequest(sha)
+                            notifications?.onIconRequest(sha)
+                        }
+                        frame.hasNotificationAction() -> notifications?.onAction(frame.notificationAction)
+                    }
                 }
             } finally {
                 relay.detach(attached)
+                attachedNotifications?.let { notifications?.detach(it) }
             }
         }
         override fun close() = link.close()
