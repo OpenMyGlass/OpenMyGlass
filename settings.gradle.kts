@@ -1,10 +1,10 @@
 rootProject.name = "openmyglass"
 
 dependencyResolutionManagement {
-    repositories { mavenCentral() }
+    repositories { google(); mavenCentral() }
 }
 pluginManagement {
-    repositories { gradlePluginPortal(); mavenCentral() }
+    repositories { google(); gradlePluginPortal(); mavenCentral() }
 }
 
-include(":protocol", ":core", ":tools:sim-glass")
+include(":protocol", ":core", ":tools:sim-glass", ":android:app", ":android:osmand-api")
