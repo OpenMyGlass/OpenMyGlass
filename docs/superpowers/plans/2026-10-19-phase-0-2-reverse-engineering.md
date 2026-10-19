@@ -1,83 +1,84 @@
-# Fasi 0–2: strumenti, recupero binari, reverse engineering — Piano
+# Phases 0–2: tools, binary retrieval, reverse engineering — Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Arrivare all'inventario completo delle funzionalità di MyGlass (`docs/feature-inventory.md`) con specifica del protocollo, API interne di Glass, dipendenze cloud e prior art documentati, senza hardware Glass.
+**Goal:** Reach the complete MyGlass feature inventory (`docs/feature-inventory.md`) with the protocol specification, Glass internal APIs, cloud dependencies and prior art documented, without Glass hardware.
 
-**Architecture:** Lavoro di analisi, non di prodotto. I binari e il codice decompilato vivono solo in `_re/` (gitignored); nella repo entrano documentazione, `.proto` ricostruiti e piccoli script di supporto in `tools/`. Senza occhiali, la verifica avviene sul codice decompilato e, se fattibile, su un emulatore che esegue l'immagine XE24.
+**Architecture:** Analysis work, not product work. Binaries and decompiled code live only in `_re/` (git-ignored); the repo receives documentation, reconstructed `.proto` files and small helper scripts in `tools/`. Without glasses, verification happens on the decompiled code and, if feasible, on an emulator running the XE24 image.
 
-**Tech Stack:** REA MCP (`rea-agents`, registrato in locale; usare i suoi strumenti per l'analisi assistita sopra jadx), jadx, apktool, apksigner (Android build-tools), protobuf (`protoc`), e2fsprogs/simg2img per l'immagine di sistema, Android Emulator, bash, Python 3.
+**Tech Stack:** REA MCP (`rea-agents`, registered locally; use its tools for assisted analysis on top of jadx), jadx, apktool, apksigner (Android build-tools), protobuf (`protoc`), e2fsprogs/simg2img for the system image, Android Emulator, bash, Python 3.
 
-**Spec:** [`docs/project-prompt.md`](../../project-prompt.md) (Passo 0, Fasi 1–2) + vincolo "nessun hardware" in [`docs/progress.md`](../../progress.md).
+**Spec:** [`docs/project-brief.md`](../../project-brief.md) (Step 0, Phases 1–2) + the "no hardware" constraint in [`docs/progress.md`](../../progress.md).
 
 ## Global Constraints
 
 - Target: Glass Explorer Edition XE-C, firmware **XE24** (Android 4.4.2 / API 19, GDK).
-- Package atteso di MyGlass: `com.google.glass.companion` — **da verificare**, non assumere.
-- Versione MyGlass: **l'ultima disponibile (2017 o successiva)**; opzionale una del 2014 per confronto.
-- Immagine XE24: solo dalla pagina ufficiale Google for Developers "System and Kernel Downloads".
-- **Mai committare** APK, immagini di sistema, `.dex`, `.jar`, codice decompilato. Tutto in `_re/`.
-- Documentazione, non copia di codice: descrivere classi/messaggi, non incollarne il corpo.
-- Non inventare UUID, campi protobuf, intent o formati: ogni affermazione cita classe/file in `_re/` da cui deriva, oppure è marcata **[non verificato]**.
-- Nessun hardware Glass: niente test su dispositivo in queste fasi.
-- Aggiornare `docs/progress.md` alla fine di ogni task; commit frequenti.
-- **Stop obbligatorio** dopo il Task 10: mostrare l'inventario all'utente, non iniziare la Fase 3.
+- Expected MyGlass package: `com.google.glass.companion` — **verify**, do not assume.
+- MyGlass version: **the latest available (2017 or later)**; optionally a 2014 one for comparison.
+- XE24 image: only from the official Google for Developers "System and Kernel Downloads" page.
+- **Never commit** APKs, system images, `.dex`, `.jar`, decompiled code. Everything in `_re/`.
+- Documentation, not copied code: describe classes/messages, do not paste their bodies.
+- Do not invent UUIDs, protobuf fields, intents or formats: every statement cites the class/file in `_re/` it comes from, or is marked **[unverified]**.
+- No Glass hardware: no on-device tests in these phases.
+- Update `docs/progress.md` at the end of each task; commit often.
+- **Mandatory stop** after Task 10: show the inventory to the user, do not start Phase 3.
+- (Added 2026-10-19 at the user's request) All repo content in **English**.
 
 ## Review Focus
 
-1. **Commit accidentale di materiale Google** (APK, dex, sorgenti decompilati incollati in `docs/`): ci si aspetta che il controllo clean-room lo blocchi prima del push → test nel Task 1.
-2. **APK da mirror con firma non Google o repackaged**: ci si aspetta che venga scartato, non analizzato → controllo del certificato nel Task 2.
-3. **APK distribuito come split/bundle (`.apks`/`.xapk`)**: ci si aspetta che venga riconosciuto e ricomposto o rifiutato con un messaggio chiaro → caso gestito nello script del Task 2.
-4. **Immagine di sistema in formato sparse o con partizioni annidate**: ci si aspetta una conversione documentata, non un'estrazione silenziosamente vuota → verifica del numero di APK estratti nel Task 3.
-5. **Nomi offuscati (ProGuard) diversi tra versioni**: ogni riferimento a una classe nei documenti deve indicare la versione dell'APK da cui proviene → regola di citazione nei Task 6–10.
+1. **Accidental commit of Google material** (APKs, dex, decompiled sources pasted into `docs/`): the clean-room check is expected to block it before push → test in Task 1.
+2. **Mirror APK with a non-Google or repackaged signature**: expected to be discarded, not analyzed → certificate check in Task 2.
+3. **APK distributed as split/bundle (`.apks`/`.xapk`)**: expected to be recognized and rebuilt, or rejected with a clear message → handled in the Task 2 script.
+4. **System image in sparse format or with nested partitions**: expected a documented conversion, not a silently empty extraction → check of the number of extracted APKs in Task 3.
+5. **Obfuscated (ProGuard) names that differ between versions**: every class reference in the docs must name the APK version it comes from → citation rule in Tasks 6–10.
 
 ---
 
 ## File Structure
 
-| File | Responsabilità |
+| File | Responsibility |
 |---|---|
-| `tools/check-tools.sh` | Verifica la presenza e la versione degli strumenti richiesti |
-| `tools/check-clean-room.sh` | Fallisce se file tracciati da git contengono binari o codice Google |
-| `tools/re/apk-info.sh` | Stampa package, versione, SHA-256 del file e del certificato di un APK |
-| `docs/sources.md` | Provenienza, versioni, hash e firme di tutti i binari analizzati |
-| `docs/emulator-feasibility.md` | Esito dello spike sull'emulazione XE24 e strategia di test senza hardware |
-| `docs/protocol/README.md` | Indice della specifica del protocollo |
-| `docs/protocol/transport.md` | Trasporto, UUID/SDP, pairing, framing, keep-alive, riconnessione |
-| `docs/protocol/handshake.md` | Handshake, autenticazione, requisiti account/token, comportamento XE24 |
-| `docs/protocol/messages.md` | Catalogo messaggi e sequenze per feature |
-| `docs/protocol/proto/*.proto` | Schemi ricostruiti dalle classi generate |
-| `docs/glass-internals.md` | Intent, broadcast, provider, servizi lato Glass e loro raggiungibilità |
-| `docs/cloud-dependencies.md` | Cosa passava dai server Google e come sostituirlo |
-| `docs/prior-art.md` | Analisi dei progetti esistenti e delle loro licenze |
-| `docs/feature-inventory.md` | Inventario funzionalità (deliverable dello stop) |
+| `tools/check-tools.sh` | Checks the required tools and their versions |
+| `tools/check-clean-room.sh` | Fails if git-tracked files contain Google binaries or code |
+| `tools/re/apk-info.sh` | Prints package, version, SHA-256 of file and certificate of an APK |
+| `docs/sources.md` | Provenance, versions, hashes and signatures of all analyzed binaries |
+| `docs/emulator-feasibility.md` | Result of the XE24 emulation spike and hardware-free test strategy |
+| `docs/protocol/README.md` | Protocol specification index |
+| `docs/protocol/transport.md` | Transport, UUID/SDP, pairing, framing, keep-alive, reconnection |
+| `docs/protocol/handshake.md` | Handshake, authentication, account/token requirements, XE24 behavior |
+| `docs/protocol/messages.md` | Message catalog and per-feature sequences |
+| `docs/protocol/proto/*.proto` | Schemas reconstructed from the generated classes |
+| `docs/glass-internals.md` | Glass-side intents, broadcasts, providers, services and their reachability |
+| `docs/cloud-dependencies.md` | What went through Google servers and how to replace it |
+| `docs/prior-art.md` | Analysis of existing projects and their licenses |
+| `docs/feature-inventory.md` | Feature inventory (the stop-gate deliverable) |
 
 ---
 
-### Task 1: Strumenti e guardia clean-room
+### Task 1: Tools and clean-room guard
 
 **Files:**
 - Create: `tools/check-tools.sh`, `tools/check-clean-room.sh`
-- Modify: `docs/progress.md` (tabella Fase 0)
+- Modify: `docs/progress.md` (Phase 0 table)
 
 **Interfaces:**
-- Produces: `tools/check-tools.sh` (exit 0 se tutto presente), `tools/check-clean-room.sh` (exit 1 se trova violazioni; usato dai task successivi prima di ogni commit).
+- Produces: `tools/check-tools.sh` (exit 0 if everything is present), `tools/check-clean-room.sh` (exit 1 on violations; used by later tasks before every commit).
 
-- [ ] **Step 1: Installare gli strumenti**
+- [ ] **Step 1: Install the tools**
 
 ```bash
 brew install jadx apktool protobuf e2fsprogs simg2img p7zip
 export ANDROID_HOME="$HOME/Library/Android/sdk"
-ls "$ANDROID_HOME/build-tools"   # annotare la versione più recente
+ls "$ANDROID_HOME/build-tools"   # note the latest version
 ```
 
-Se `simg2img` non è disponibile in brew, annotarlo in `docs/progress.md` e usare `brew install android-platform-tools` + alternativa documentata nel Task 3.
+If `simg2img` is not available in brew, record it in `docs/progress.md` and use `brew install android-platform-tools` + an alternative documented in Task 3.
 
-- [ ] **Step 2: Scrivere `tools/check-tools.sh`**
+- [ ] **Step 2: Write `tools/check-tools.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# Verifica gli strumenti necessari alle Fasi 0–2.
+# Checks the tools required by phases 0–2.
 set -u
 SDK="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 BT="$(ls -d "$SDK"/build-tools/* 2>/dev/null | sort -V | tail -1)"
@@ -95,12 +96,12 @@ check emulator "$SDK/emulator/emulator"
 exit $missing
 ```
 
-- [ ] **Step 3: Eseguirlo**
+- [ ] **Step 3: Run it**
 
 Run: `bash tools/check-tools.sh`
-Expected: tutte le righe `ok`, exit 0. Ogni `MISS` va risolto o documentato prima di proseguire.
+Expected: all lines `ok`, exit 0. Every `MISS` must be fixed or documented before continuing.
 
-- [ ] **Step 4: Scrivere il test della guardia clean-room (deve fallire)**
+- [ ] **Step 4: Write the clean-room guard test (must fail)**
 
 ```bash
 mkdir -p /tmp/cr-test && cd /tmp/cr-test && git init -q
@@ -109,33 +110,33 @@ git add -f fake.apk Leak.java
 bash /Users/giorgio/Documents/google-glass-project/tools/check-clean-room.sh; echo "exit=$?"
 ```
 
-Expected (prima dell'implementazione): `No such file` → il test fallisce.
+Expected (before implementation): `No such file` → the test fails.
 
-- [ ] **Step 5: Scrivere `tools/check-clean-room.sh`**
+- [ ] **Step 5: Write `tools/check-clean-room.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# Fallisce se i file tracciati (o in stage) contengono binari o codice Google.
+# Fails if tracked (or staged) files contain Google binaries or Google source code.
 set -u
 fail=0
 files="$(git ls-files --cached)"
 bad_ext="$(printf '%s\n' "$files" | grep -Ei '\.(apk|apks|xapk|dex|odex|img|jar)$' | grep -v 'gradle-wrapper.jar' || true)"
-if [ -n "$bad_ext" ]; then echo "Binari tracciati:"; echo "$bad_ext"; fail=1; fi
+if [ -n "$bad_ext" ]; then echo "Tracked binaries:"; echo "$bad_ext"; fail=1; fi
 leaks="$(printf '%s\n' "$files" | grep -E '\.(java|smali|kt)$' | xargs -I{} grep -lE '^(package|\.class .*L)com/?\.?google' {} 2>/dev/null || true)"
-if [ -n "$leaks" ]; then echo "Sorgenti con package Google:"; echo "$leaks"; fail=1; fi
-if printf '%s\n' "$files" | grep -q '^_re/'; then echo "_re/ è tracciata"; fail=1; fi
+if [ -n "$leaks" ]; then echo "Sources with a Google package:"; echo "$leaks"; fail=1; fi
+if printf '%s\n' "$files" | grep -q '^_re/'; then echo "_re/ is tracked"; fail=1; fi
 [ $fail -eq 0 ] && echo "clean-room ok"
 exit $fail
 ```
 
-- [ ] **Step 6: Rieseguire il test**
+- [ ] **Step 6: Run the test again**
 
-Run: lo stesso comando dello Step 4.
-Expected: elenca `fake.apk` e `Leak.java`, `exit=1`. Poi, nella repo: `bash tools/check-clean-room.sh` → `clean-room ok`, exit 0.
+Run: the same command as Step 4.
+Expected: lists `fake.apk` and `Leak.java`, `exit=1`. Then, in the repo: `bash tools/check-clean-room.sh` → `clean-room ok`, exit 0.
 
-- [ ] **Step 7: Aggiornare `docs/progress.md` e committare**
+- [ ] **Step 7: Update `docs/progress.md` and commit**
 
-Aggiornare la tabella della Fase 0 con le versioni reali (`jadx --version`, `apktool --version`, `protoc --version`).
+Update the Phase 0 table with the real versions (`jadx --version`, `apktool --version`, `protoc --version`).
 
 ```bash
 chmod +x tools/*.sh
@@ -144,50 +145,50 @@ bash tools/check-clean-room.sh && git add tools docs/progress.md && git commit -
 
 ---
 
-### Task 2: Recupero e verifica dell'APK MyGlass
+### Task 2: Retrieve and verify the MyGlass APK
 
 **Files:**
 - Create: `tools/re/apk-info.sh`, `docs/sources.md`
 - Local only: `_re/apk/`
 
 **Interfaces:**
-- Consumes: `apksigner` dal Task 1.
-- Produces: `_re/apk/myglass-<versionName>.apk` (ultima), opzionale `_re/apk/myglass-2014-<versionName>.apk`; `tools/re/apk-info.sh <apk>`.
+- Consumes: `apksigner` from Task 1.
+- Produces: `_re/apk/myglass-<versionName>.apk` (latest), optionally `_re/apk/myglass-2014-<versionName>.apk`; `tools/re/apk-info.sh <apk>`.
 
-- [ ] **Step 1: Scrivere `tools/re/apk-info.sh`**
+- [ ] **Step 1: Write `tools/re/apk-info.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# Uso: apk-info.sh <file.apk> — stampa package, versione, hash del file e del certificato.
+# Usage: apk-info.sh <file.apk> — prints package, version, file hash and signing certificate.
 set -eu
 apk="$1"
-case "$apk" in *.apks|*.xapk) echo "ERRORE: bundle split ($apk). Estrarre base.apk con 7z e rieseguire." >&2; exit 2;; esac
+case "$apk" in *.apks|*.xapk) echo "ERROR: split bundle ($apk). Extract base.apk with 7z and run again." >&2; exit 2;; esac
 SDK="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 BT="$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)"
-"$BT/aapt" dump badging "$apk" | grep -E "^package:" 
+"$BT/aapt" dump badging "$apk" | grep -E "^package:"
 echo "file_sha256: $(shasum -a 256 "$apk" | cut -d' ' -f1)"
 "$BT/apksigner" verify --print-certs "$apk" | grep -E 'Signer #1 certificate (DN|SHA-256)'
 ```
 
-- [ ] **Step 2: Provarlo su un APK noto**
+- [ ] **Step 2: Try it on known inputs**
 
 Run: `touch /tmp/x.xapk && bash tools/re/apk-info.sh /tmp/x.xapk; echo "exit=$?"`
-Expected: messaggio "bundle split", `exit=2`.
-Run: `bash tools/re/apk-info.sh "$(ls ~/Library/Android/sdk/system-images/*/*/*/system.img 2>/dev/null | head -0; ls ~/.android/avd 2>/dev/null >/dev/null; echo /nonexistent.apk)"; echo "exit=$?"`
-Expected: errore di `aapt` su file inesistente, exit ≠ 0.
+Expected: "split bundle" message, `exit=2`.
+Run: `bash tools/re/apk-info.sh /nonexistent.apk; echo "exit=$?"`
+Expected: `aapt` error on a missing file, exit ≠ 0.
 
-- [ ] **Step 3: Scaricare l'APK**
+- [ ] **Step 3: Download the APK**
 
-Cercare MyGlass su APKMirror (fonte preferita: verifica la firma originale) e, in alternativa, archive.org. Salvare in `_re/apk/`. Scegliere l'ultima versione (≥2017); se disponibile, una del 2014.
+Look for MyGlass on APKMirror (preferred source: it verifies the original signature) and, as an alternative, archive.org. Save it in `_re/apk/`. Pick the latest version (≥2017); if available, also a 2014 one.
 
-- [ ] **Step 4: Verificare**
+- [ ] **Step 4: Verify**
 
 Run: `bash tools/re/apk-info.sh _re/apk/<file>.apk`
-Expected: `package: name='...'` (annotare il valore reale), certificato con DN Google (`O=Google Inc.` o simile). **Se il DN non è Google, scartare l'APK** e annotarlo.
+Expected: `package: name='...'` (record the real value), certificate with a Google DN (`O=Google Inc.` or similar). **If the DN is not Google, discard the APK** and record it.
 
-- [ ] **Step 5: Scrivere `docs/sources.md`**
+- [ ] **Step 5: Write `docs/sources.md`**
 
-Per ogni binario: nome, URL esatto della fonte, data di download, package, versionName/versionCode, SHA-256 file, DN e SHA-256 del certificato, eventuali note.
+For each binary: name, exact source URL, download date, package, versionName/versionCode, file SHA-256, certificate DN and SHA-256, notes.
 
 - [ ] **Step 6: Commit**
 
@@ -197,44 +198,44 @@ bash tools/check-clean-room.sh && git add tools/re docs/sources.md && git commit
 
 ---
 
-### Task 3: Recupero ed estrazione dell'immagine XE24
+### Task 3: Retrieve and extract the XE24 image
 
 **Files:**
 - Modify: `docs/sources.md`
 - Local only: `_re/xe24/`
 
 **Interfaces:**
-- Produces: `_re/xe24/system/` (filesystem estratto), `_re/xe24/apk-list.txt` (elenco APK di sistema con path).
+- Produces: `_re/xe24/system/` (extracted filesystem), `_re/xe24/apk-list.txt` (system APK list with paths).
 
-- [ ] **Step 1: Scaricare l'immagine**
+- [ ] **Step 1: Download the image**
 
-Dalla pagina Google for Developers "System and Kernel Downloads" (Glass Explorer Edition) scaricare l'immagine di sistema **XE24** in `_re/xe24/`. Annotare URL, nome file, SHA-256 (`shasum -a 256`) e, se la pagina li pubblica, confrontare con gli hash ufficiali.
+From the Google for Developers "System and Kernel Downloads" page (Glass Explorer Edition), download the **XE24** system image into `_re/xe24/`. Record URL, file name, SHA-256 (`shasum -a 256`) and, if the page publishes them, compare with the official hashes.
 
-- [ ] **Step 2: Estrarre l'archivio e identificare `system.img`**
+- [ ] **Step 2: Extract the archive and identify `system.img`**
 
 ```bash
-cd _re/xe24 && 7z x <archivio> && file *.img
+cd _re/xe24 && 7z x <archive> && file *.img
 ```
 
-Expected: `system.img` descritto come "Android sparse image" o "Linux ext4 filesystem".
+Expected: `system.img` described as "Android sparse image" or "Linux ext4 filesystem".
 
-- [ ] **Step 3: Convertire ed estrarre**
+- [ ] **Step 3: Convert and extract**
 
 ```bash
-simg2img system.img system.raw.img   # solo se sparse
+simg2img system.img system.raw.img   # only if sparse
 mkdir -p system && "$(brew --prefix e2fsprogs)/sbin/debugfs" -R "rdump / system" system.raw.img
 find system -name '*.apk' > apk-list.txt && wc -l apk-list.txt
 ```
 
-Expected: decine di APK (un risultato di 0 indica estrazione fallita: fermarsi e diagnosticare).
+Expected: dozens of APKs (0 means extraction failed: stop and diagnose).
 
-- [ ] **Step 4: Individuare il lato companion**
+- [ ] **Step 4: Identify the companion side**
 
 ```bash
 grep -iE 'companion|bluetooth|setup|home|nav|notif|screencast|sync|glass' apk-list.txt
 ```
 
-Annotare in `docs/sources.md` gli APK candidati con package (via `apk-info.sh`) e motivo della scelta.
+Record the candidate APKs in `docs/sources.md` with package (via `apk-info.sh`) and why they were picked.
 
 - [ ] **Step 5: Commit**
 
@@ -244,37 +245,37 @@ bash tools/check-clean-room.sh && git add docs/sources.md && git commit -m "docs
 
 ---
 
-### Task 4: Spike — emulatore XE24 e strategia di test senza hardware
+### Task 4: Spike — XE24 emulator and hardware-free test strategy
 
 **Files:**
 - Create: `docs/emulator-feasibility.md`
 - Modify: `docs/progress.md`
 
 **Interfaces:**
-- Consumes: `_re/xe24/` dal Task 3.
-- Produces: raccomandazione su come testare il lato occhiali in Fase 4 (letta dal Task 10 e dalla Fase 3).
+- Consumes: `_re/xe24/` from Task 3.
+- Produces: a recommendation on how to test the Glass side in Phase 4 (read by Task 10 and Phase 3).
 
-Timebox: **2 ore**. Lo spike è un'indagine: il materiale prodotto è usa e getta e resta in `_re/emulator/`.
+Timebox: **2 hours**. The spike is an investigation: what it produces is throwaway and stays in `_re/emulator/`.
 
-- [ ] **Step 1: Cercare lavori esistenti**
+- [ ] **Step 1: Look for existing work**
 
-Cercare progetti che abbiano avviato immagini Glass XE in emulatore (es. "Glass emulator XE system image", "GDK emulator"). Annotare link e stato, senza assumere che funzionino.
+Search for projects that booted Glass XE images in an emulator (e.g. "Glass emulator XE system image", "GDK emulator"). Record links and status, without assuming they work.
 
-- [ ] **Step 2: Prova A — immagine XE24 su AVD API 19**
+- [ ] **Step 2: Try A — XE24 image on an API 19 AVD**
 
-Valutare se l'emulatore su Apple Silicon può eseguire un'immagine ARMv7 API 19 (`sdkmanager --list | grep 'android-19'`). Se sì, provare ad avviare un AVD API 19 sostituendo `system.img` con quello XE24. Annotare i passi e il risultato (boot sì/no, log di `emulator -verbose -show-kernel`).
+Check whether the emulator on Apple Silicon can run an ARMv7 API 19 image (`sdkmanager --list | grep 'android-19'`). If so, try booting an API 19 AVD with `system.img` replaced by the XE24 one. Record the steps and the result (boot yes/no, `emulator -verbose -show-kernel` logs).
 
-- [ ] **Step 3: Prova B — APK di sistema Glass su AVD API 19 stock**
+- [ ] **Step 3: Try B — Glass system APKs on a stock API 19 AVD**
 
-Se la Prova A fallisce: installare gli APK companion lato Glass (Task 3) su un AVD API 19 stock con il GDK add-on, se recuperabile. Annotare quali partono e quali falliscono per dipendenze di sistema.
+If Try A fails: install the Glass-side companion APKs (Task 3) on a stock API 19 AVD with the GDK add-on, if available. Record which ones start and which fail because of system dependencies.
 
-- [ ] **Step 4: Bluetooth in emulatore**
+- [ ] **Step 4: Bluetooth in the emulator**
 
-Verificare e documentare che l'emulatore non espone Bluetooth Classic reale; annotare l'alternativa per i test (trasporto TCP via `adb forward`/`adb reverse` verso un peer simulato in `tools/`).
+Check and document that the emulator does not expose real Bluetooth Classic; record the test alternative (TCP transport via `adb forward`/`adb reverse` to a simulated peer in `tools/`).
 
-- [ ] **Step 5: Scrivere `docs/emulator-feasibility.md`**
+- [ ] **Step 5: Write `docs/emulator-feasibility.md`**
 
-Sezioni: domanda, cosa è stato provato, risultato di ciascuna prova, raccomandazione (es. "peer simulato in Python + AVD API 19 per l'app ponte" oppure "XE24 in emulatore funziona per X ma non per Y").
+Sections: question, what was tried, result of each try, recommendation (e.g. "Python simulated peer + API 19 AVD for the bridge app" or "XE24 in the emulator works for X but not Y").
 
 - [ ] **Step 6: Commit**
 
@@ -284,28 +285,28 @@ bash tools/check-clean-room.sh && git add docs/emulator-feasibility.md docs/prog
 
 ---
 
-### Task 5: Decompilazione e indice delle classi
+### Task 5: Decompilation and class index
 
 **Files:**
-- Local only: `_re/jadx/<nome>/`, `_re/apktool/<nome>/`, `_re/index/<nome>.txt`
+- Local only: `_re/jadx/<name>/`, `_re/apktool/<name>/`, `_re/index/<name>.txt`
 
 **Interfaces:**
-- Produces: sorgenti decompilati per l'APK MyGlass e per ogni APK companion lato Glass; indici di stringhe chiave usati nei Task 6–10.
+- Produces: decompiled sources for the MyGlass APK and for every Glass-side companion APK; indexes of key strings used by Tasks 6–10.
 
-- [ ] **Step 1: Decompilare**
+- [ ] **Step 1: Decompile**
 
 ```bash
-for apk in _re/apk/*.apk <apk lato Glass dal Task 3>; do n=$(basename "$apk" .apk)
+for apk in _re/apk/*.apk <Glass-side APKs from Task 3>; do n=$(basename "$apk" .apk)
   jadx -d "_re/jadx/$n" --show-bad-code "$apk"
   apktool d -f -o "_re/apktool/$n" "$apk"
 done
 ```
 
-Expected: ogni cartella `_re/jadx/<n>/sources` non vuota.
+Expected: every `_re/jadx/<n>/sources` folder is non-empty.
 
-- [ ] **Step 1b: Analisi assistita con REA** — puntare gli strumenti dell'MCP `rea` agli APK in `_re/apk/` e lato Glass per una prima mappa di componenti, punti di ingresso Bluetooth e classi protobuf; usarla per orientare gli indici sotto, verificando ogni risultato sul codice jadx. Se REA non supporta un APK, annotarlo e proseguire con jadx.
+- [ ] **Step 1b: Assisted analysis with REA** — point the `rea` MCP tools at the APKs in `_re/apk/` and on the Glass side for a first map of components, Bluetooth entry points and protobuf classes; use it to steer the indexes below, verifying every result against the jadx code. If REA does not support an APK, record it and continue with jadx.
 
-- [ ] **Step 2: Costruire gli indici**
+- [ ] **Step 2: Build the indexes**
 
 ```bash
 mkdir -p _re/index
@@ -319,31 +320,31 @@ done
 wc -l _re/index/*
 ```
 
-- [ ] **Step 3: Annotare in `docs/progress.md`** il riepilogo dei conteggi (non i contenuti) e committare solo `docs/progress.md`.
+- [ ] **Step 3: Record in `docs/progress.md`** the summary of the counts (not the contents) and commit only `docs/progress.md`.
 
 ---
 
-### Task 6: Specifica del protocollo
+### Task 6: Protocol specification
 
 **Files:**
 - Create: `docs/protocol/transport.md`, `docs/protocol/handshake.md`, `docs/protocol/messages.md`, `docs/protocol/proto/*.proto`
 - Modify: `docs/protocol/README.md`
 
 **Interfaces:**
-- Consumes: indici `_re/index/*` dal Task 5.
-- Produces: `.proto` compilabili, usati dalla Fase 3 per decidere tra le opzioni A/B/C.
+- Consumes: `_re/index/*` indexes from Task 5.
+- Produces: compilable `.proto` files, used by Phase 3 to choose between options A/B/C.
 
-Regola di citazione: ogni affermazione indica `APK@versione → classe (nome offuscato e, se ricostruibile, ruolo)`.
+Citation rule: every statement names `APK@version → class (obfuscated name and, if recoverable, role)`.
 
-- [ ] **Step 1: Trasporto** — partendo da `*.rfcomm.txt` e `*.uuids.txt`, documentare in `transport.md`: tipo di socket, UUID e nome del servizio SDP (lato Glass server o client?), pairing, framing (lunghezza/delimitatori, endianness), keep-alive, timeout, riconnessione.
-- [ ] **Step 2: Handshake** — in `handshake.md`: sequenza iniziale, campi scambiati, presenza di token/account Google, controlli su firma o identità del companion, comportamento di XE24 dopo l'aggiornamento che ha rimosso l'obbligo dell'account (citare il codice che lo prova).
-- [ ] **Step 3: Ricostruire i `.proto`** — dalle classi in `*.protos.txt` ricavare messaggi, numeri di campo, tipi ed enum in `docs/protocol/proto/`. Campi dubbi marcati con commento `// [non verificato]`.
-- [ ] **Step 4: Verificare che compilino**
+- [ ] **Step 1: Transport** — starting from `*.rfcomm.txt` and `*.uuids.txt`, document in `transport.md`: socket type, SDP UUID and service name (is Glass server or client?), pairing, framing (length/delimiters, endianness), keep-alive, timeouts, reconnection.
+- [ ] **Step 2: Handshake** — in `handshake.md`: initial sequence, exchanged fields, presence of Google tokens/accounts, signature or identity checks on the companion, XE24 behavior after the update that removed the account requirement (cite the code that proves it).
+- [ ] **Step 3: Rebuild the `.proto` files** — from the classes in `*.protos.txt` recover messages, field numbers, types and enums into `docs/protocol/proto/`. Doubtful fields get a `// [unverified]` comment.
+- [ ] **Step 4: Check they compile**
 
 Run: `protoc -I docs/protocol/proto --descriptor_set_out=/dev/null docs/protocol/proto/*.proto`
-Expected: nessun output, exit 0.
+Expected: no output, exit 0.
 
-- [ ] **Step 5: Messaggi e sequenze** — in `messages.md`, per ogni feature la sequenza di messaggi (diagramma testuale) e la gestione degli errori.
+- [ ] **Step 5: Messages and sequences** — in `messages.md`, for each feature the message sequence (text diagram) and the error handling.
 - [ ] **Step 6: Commit**
 
 ```bash
@@ -352,25 +353,25 @@ bash tools/check-clean-room.sh && git add docs/protocol && git commit -m "docs: 
 
 ---
 
-### Task 7: API interne lato Glass
+### Task 7: Glass-side internal APIs
 
 **Files:**
 - Create: `docs/glass-internals.md`
 
-- [ ] **Step 1:** Dai `AndroidManifest.xml` in `_re/apktool/<apk Glass>/` elencare activity, service, receiver e provider esportati, con permessi richiesti (`android:permission`, `protectionLevel`).
-- [ ] **Step 2:** Incrociare con `*.intents.txt` per individuare intent/broadcast usati dal companion per navigazione, timeline, notifiche, posizione, screencast.
-- [ ] **Step 3:** Per ciascuno, una tabella: nome, scopo, chi lo invia, permesso, **raggiungibile da app di terze parti? (sì / signature|system / root)**, prova (file + riga del manifest).
+- [ ] **Step 1:** From the `AndroidManifest.xml` files in `_re/apktool/<Glass APK>/`, list exported activities, services, receivers and providers, with the required permissions (`android:permission`, `protectionLevel`).
+- [ ] **Step 2:** Cross-check with `*.intents.txt` to find intents/broadcasts the companion used for navigation, timeline, notifications, location, screencast.
+- [ ] **Step 3:** For each, one table row: name, purpose, sender, permission, **reachable by third-party apps? (yes / signature|system / root)**, evidence (file + manifest line).
 - [ ] **Step 4:** Commit: `bash tools/check-clean-room.sh && git add docs/glass-internals.md && git commit -m "docs: Glass-side internal APIs"`.
 
 ---
 
-### Task 8: Dipendenze cloud
+### Task 8: Cloud dependencies
 
 **Files:**
 - Create: `docs/cloud-dependencies.md`
 
-- [ ] **Step 1:** Da `*.urls.txt` e dalle classi che li usano, classificare ogni endpoint: funzione (auth, timeline/Mirror, Glassware install, routing nav, contatti, sync media, telemetria), lato (telefono/occhiali).
-- [ ] **Step 2:** Per ciascuno: cosa succede oggi se il server non risponde (dal codice), e sostituzione locale proposta o "non sostituibile" con motivo.
+- [ ] **Step 1:** From `*.urls.txt` and the classes using them, classify every endpoint: function (auth, timeline/Mirror, Glassware install, nav routing, contacts, media sync, telemetry), side (phone/glasses).
+- [ ] **Step 2:** For each: what happens today if the server does not answer (from the code), and the proposed local replacement, or "not replaceable" with the reason.
 - [ ] **Step 3:** Commit: `bash tools/check-clean-room.sh && git add docs/cloud-dependencies.md && git commit -m "docs: Google cloud dependencies and local replacements"`.
 
 ---
@@ -381,33 +382,33 @@ bash tools/check-clean-room.sh && git add docs/protocol && git commit -m "docs: 
 - Create: `docs/prior-art.md`
 - Local only: `_re/prior-art/`
 
-- [ ] **Step 1: Clonare**
+- [ ] **Step 1: Clone**
 
 ```bash
 mkdir -p _re/prior-art && cd _re/prior-art
 for r in thorikawa/GlassBluetoothProtocol thorikawa/GlassRemote thalmiclabs/myo-glass-companion inckie/AnotherGlass; do git clone --depth 1 "https://github.com/$r.git"; done
-git clone --depth 1 https://code.nym.sh/kennethnym/aris-old.git || echo "aris-old non clonabile: annotare"
-for d in */; do echo "$d: $(ls "$d" | grep -iE '^(license|copying)' || echo 'NESSUNA LICENZA')"; done
+git clone --depth 1 https://code.nym.sh/kennethnym/aris-old.git || echo "aris-old not clonable: record it"
+for d in */; do echo "$d: $(ls "$d" | grep -iE '^(license|copying)' || echo 'NO LICENSE')"; done
 ```
 
-- [ ] **Step 2:** Per ogni progetto: licenza (e compatibilità con GPL-3.0), cosa copre, ultimo commit, se è coerente con la nostra specifica del Task 6 (confermare/contraddire i nostri UUID e messaggi), cosa manca, cosa è riusabile.
+- [ ] **Step 2:** For each project: license (and GPL-3.0 compatibility), what it covers, last commit, whether it agrees with our Task 6 spec (confirm/contradict our UUIDs and messages), what is missing, what is reusable.
 - [ ] **Step 3:** Commit: `bash tools/check-clean-room.sh && git add docs/prior-art.md && git commit -m "docs: prior art analysis"`.
 
 ---
 
-### Task 10: Inventario funzionalità e STOP
+### Task 10: Feature inventory and STOP
 
 **Files:**
 - Create: `docs/feature-inventory.md`
 - Modify: `docs/progress.md`
 
-- [ ] **Step 1:** Elencare **tutte** le feature di MyGlass trovate (almeno: setup/pairing, Wi-Fi, screencast, batteria/info, impostazioni, contatti, foto/video sync, Glassware, GPS, navigazione, notifiche/SMS/chiamate, timeline). Per ciascuna: cosa faceva; classi lato telefono e lato Glass (`APK@versione → classe`); messaggi (link a `docs/protocol/messages.md`); dipendenza cloud (sì/no, link a `cloud-dependencies.md`); come la ricostruiamo (protocollo originale / app ponte / non ricostruibile + alternativa).
-- [ ] **Step 2:** Aggiungere una sezione "Verificabilità senza hardware": per ogni feature, se è verificabile con l'approccio del Task 4.
-- [ ] **Step 3:** Aggiornare `docs/progress.md`: Fasi 1–2 completate, problemi aperti.
-- [ ] **Step 4:** Commit e push
+- [ ] **Step 1:** List **all** MyGlass features found (at least: setup/pairing, Wi-Fi, screencast, battery/info, settings, contacts, photo/video sync, Glassware, GPS, navigation, notifications/SMS/calls, timeline). For each: what it did; phone-side and Glass-side classes (`APK@version → class`); messages (link to `docs/protocol/messages.md`); cloud dependency (yes/no, link to `cloud-dependencies.md`); how we rebuild it (original protocol / bridge app / not rebuildable + alternative).
+- [ ] **Step 2:** Add a "Verifiability without hardware" section: for each feature, whether it can be verified with the Task 4 approach.
+- [ ] **Step 3:** Update `docs/progress.md`: Phases 1–2 done, open issues.
+- [ ] **Step 4:** Commit and push
 
 ```bash
 bash tools/check-clean-room.sh && git add docs && git commit -m "docs: MyGlass feature inventory (phase 2 complete)" && git push
 ```
 
-- [ ] **Step 5: STOP.** Presentare all'utente il riepilogo di `docs/feature-inventory.md` e attendere conferma prima della Fase 3.
+- [ ] **Step 5: STOP.** Present the summary of `docs/feature-inventory.md` to the user and wait for confirmation before Phase 3.
