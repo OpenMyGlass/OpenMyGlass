@@ -21,18 +21,22 @@ SCALARS = {
 DECL_RE = re.compile(r"\b(class|interface)\s+(\w+)(\s+extends\s+([\w.]+))?[^{;]*\{")
 FIELD_RE = re.compile(r"(?:public|private|protected)\s+(?!static\b)(?:final\s+)?([\w.]+(?:\[\])?)\s+(\w+)\s*(?:=[^;]*)?;")
 CONST_RE = re.compile(r"static\s+final\s+int\s+(\w+)\s*=\s*(-?(?:0x[0-9a-fA-F]+|\d+))\s*;")
-FOREACH_RE = re.compile(r"for\s*\(\s*([\w.]+)\s+(\w+)\s*:\s*this\.(\w+)\s*\)")
-INDEXVAR_RE = re.compile(r"([\w.]+)\s+(\w+)\s*=\s*this\.(\w+)\[\w+\]\s*;")
+FOREACH_RE = re.compile(r"for\s*\(\s*([\w.]+(?:\[\])*)\s+(\w+)\s*:\s*this\.(\w+)\s*\)")
+INDEXVAR_RE = re.compile(r"([\w.]+(?:\[\])*)\s+(\w+)\s*=\s*this\.(\w+)\[\w+\]\s*;")
 WRITE_RE = re.compile(r"\b\w+\.write(\w+?)(NoTag)?\(\s*(?:(\d+)\s*,\s*)?([^;]*?)\)\s*;")
 
 
+LITERAL_RE = re.compile(r"""/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'""", re.S)
+
+
 def strip_literals(src):
-    """Drops comments and empties string/char literals so braces inside literals do not confuse the parser."""
-    src = re.sub(r"/\*.*?\*/", " ", src, flags=re.S)
-    src = re.sub(r"//[^\n]*", " ", src)
-    src = re.sub(r'"(?:\\.|[^"\\])*"', '""', src)
-    src = re.sub(r"'(?:\\.|[^'\\])'", "' '", src)
-    return src
+    """Drops comments and empties string/char literals so braces inside literals do not confuse the parser.
+
+    Single pass, so "//" inside a string is not taken for a comment and quotes inside comments are ignored."""
+    def repl(m):
+        t = m.group(0)
+        return '""' if t[0] == '"' else "' '" if t[0] == "'" else " "
+    return LITERAL_RE.sub(repl, src)
 
 
 def match_brace(text, open_idx):
@@ -122,8 +126,9 @@ def parse_write_to(body):
             continue
         if notag:
             fm = re.match(r"this\.(\w+)(\[\w+\])?$", arg)
-            if pending_packed is not None and fm and wtype in SCALARS:
-                fields.append(dict(num=pending_packed, wtype=wtype, field=fm.group(1), repeated=True, packed=True, vtype=None))
+            field = fm.group(1) if fm else var_field.get(arg, (None,))[0]
+            if pending_packed is not None and field and wtype in SCALARS:
+                fields.append(dict(num=pending_packed, wtype=wtype, field=field, repeated=True, packed=True, vtype=None))
                 pending_packed = None
             continue
         if num is None:
@@ -135,6 +140,7 @@ def parse_write_to(body):
         elif arg in var_field:
             (field, vtype), repeated = var_field[arg], True
         else:
+            print(f"warning: field {num} dropped, unrecognized argument: write{wtype}({num}, {arg})", file=sys.stderr)
             continue
         fields.append(dict(num=int(num), wtype=wtype, field=field, repeated=repeated, packed=False, vtype=vtype))
     seen, out = set(), []
@@ -181,6 +187,15 @@ def render_type(f, msg, outer, registry, outers, imports):
         return f".{pkg(t_outer)}.{t_path}", ""
     if t_path.startswith(msg.path + "."):
         return t_path[len(msg.path) + 1:], ""
+    # protoc resolves the first component from the innermost scope outwards: qualify the name if a
+    # nested type with that name would shadow the intended one
+    first, scope = t_path.split(".")[0], msg.path.split(".")
+    for i in range(len(scope), -1, -1):
+        prefix = ".".join(scope[:i])
+        if (outer, f"{prefix}.{first}" if prefix else first) in registry:
+            if prefix:
+                return f".{pkg(outer)}.{t_path}", ""
+            break
     return t_path, ""
 
 
