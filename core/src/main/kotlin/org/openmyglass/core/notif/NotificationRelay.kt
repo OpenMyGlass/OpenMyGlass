@@ -45,6 +45,27 @@ class NotificationRelay(
         if (items.remove(key) != null) sendRemoval(key)
     }
 
+    /**
+     * Replaces the set with [current] (the phone's active notifications) under the current filter: what is gone or
+     * now filtered is removed from Glass, the rest is sent if Glass lacks it. Used when settings change and when the
+     * listener reconnects (removals may have been missed meanwhile). Never wakes.
+     */
+    suspend fun sync(current: List<NotificationItem>) = lock.withLock {
+        val f = filter()
+        val accepted = current.filter { f.accept(it) }
+        val keep = accepted.map { it.key }.toSet()
+        for (key in items.keys.toList()) {
+            if (key !in keep) {
+                items.remove(key)
+                sendRemoval(key)
+            }
+        }
+        for (item in accepted) {
+            items[item.key] = item
+            send(item, wake = false)
+        }
+    }
+
     /** Removes every notification (e.g. the owner turned notifications off). */
     suspend fun clear() = lock.withLock {
         for (key in items.keys.toList()) {
@@ -87,7 +108,8 @@ class NotificationRelay(
 
     private suspend fun send(item: NotificationItem, wake: Boolean) {
         val proto = item.toProto(wake)
-        if (sent[item.key]?.toBuilder()?.setWake(wake)?.build() == proto) return   // same content: nothing to do
+        // Same content: nothing to do. Wake and post time are not content (Android bumps postTime on every notify)
+        if (sent[item.key]?.toBuilder()?.setWake(wake)?.setPostedAtMs(proto.postedAtMs)?.build() == proto) return
         item.iconSha256?.let { hex ->
             if (hex !in sentIcons) icons(hex)?.let { png -> if (deliver(iconFrame(hex, png))) sentIcons += hex }
         }

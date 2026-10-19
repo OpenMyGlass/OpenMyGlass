@@ -98,7 +98,8 @@ class SettingsActivity : Activity() {
             isChecked = prefs.enabled
             setOnCheckedChangeListener { _, on ->
                 store.save(store.load().copy(enabled = on))
-                if (!on) PhoneHub.notificationsDisabled()
+                if (on) org.openmyglass.android.notifications.OpenMyGlassNotificationListener.instance?.resync()
+                else PhoneHub.notificationsDisabled()
             }
         })
         content.addView(CheckBox(this).apply {
@@ -114,6 +115,8 @@ class SettingsActivity : Activity() {
                 setOnCheckedChangeListener { _, muted ->
                     val now = store.load()
                     store.save(now.copy(muted = if (muted) now.muted + pkg else now.muted - pkg))
+                    // Apply to what Glass shows now, not only to the next notifications
+                    org.openmyglass.android.notifications.OpenMyGlassNotificationListener.instance?.resync()
                 }
             })
         }

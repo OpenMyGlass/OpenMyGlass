@@ -80,7 +80,17 @@ public final class NotificationState implements BridgeServer.FrameHandler {
     }
 
     @Override
-    public synchronized void onFrame(Bridge.Frame frame) {
+    public void onFrame(Bridge.Frame frame) {
+        Bridge.Frame request;
+        synchronized (this) {
+            request = apply(frame);
+        }
+        if (request != null) sendQuietly(request);   // outside the lock: a stalled write must not block items()
+    }
+
+    /** Applies a frame; returns an icon request to send, if any. */
+    private Bridge.Frame apply(Bridge.Frame frame) {
+        Bridge.Frame request = null;
         if (frame.hasNotification()) {
             Bridge.Notification n = frame.getNotification().getNotification();
             int at = indexOf(n.getKey());
@@ -90,7 +100,7 @@ public final class NotificationState implements BridgeServer.FrameHandler {
                 protos.add(0, n);
                 while (protos.size() > cap) protos.remove(protos.size() - 1);
             }
-            requestIconIfMissing(n);
+            request = iconRequestIfMissing(n);
             changed();
             if (at < 0) listener.onNew(item(n), n.getWake());
         } else if (frame.hasNotificationRemoved()) {
@@ -109,6 +119,7 @@ public final class NotificationState implements BridgeServer.FrameHandler {
                 }
             }
         }
+        return request;
     }
 
     @Override
@@ -116,19 +127,34 @@ public final class NotificationState implements BridgeServer.FrameHandler {
         if (ended == sender) sender = null;
     }
 
-    /** Asks the phone to run one of the notification's actions; false if it is gone or there is no session. */
-    public synchronized boolean requestAction(String key, int index) {
-        if (indexOf(key) < 0) return false;
-        return send(Bridge.NotificationAction.newBuilder().setKey(key).setActionIndex(index).build());
+    /**
+     * Asks the phone to run one of the notification's actions; false if it is gone or there is no session.
+     * Blocks on the bridge write: call off the main thread (NotificationCommands).
+     */
+    public boolean requestAction(String key, int index) {
+        BridgeServer.Sender s;
+        synchronized (this) {
+            if (indexOf(key) < 0) return false;
+            s = sender;
+        }
+        return send(s, Bridge.NotificationAction.newBuilder().setKey(key).setActionIndex(index).build());
     }
 
     /** Dismisses on the phone (and here right away); false if it is gone or there is no session. */
-    public synchronized boolean dismiss(String key) {
-        int at = indexOf(key);
-        if (at < 0) return false;
-        if (!send(Bridge.NotificationAction.newBuilder().setKey(key).setDismiss(true).build())) return false;
-        protos.remove(at);
-        changed();
+    public boolean dismiss(String key) {
+        BridgeServer.Sender s;
+        synchronized (this) {
+            if (indexOf(key) < 0) return false;
+            s = sender;
+        }
+        if (!send(s, Bridge.NotificationAction.newBuilder().setKey(key).setDismiss(true).build())) return false;
+        synchronized (this) {
+            int at = indexOf(key);
+            if (at >= 0) {
+                protos.remove(at);
+                changed();
+            }
+        }
         return true;
     }
 
@@ -138,25 +164,34 @@ public final class NotificationState implements BridgeServer.FrameHandler {
         return list;
     }
 
-    private boolean send(Bridge.NotificationAction action) {
-        if (sender == null) return false;
+    private static boolean send(BridgeServer.Sender s, Bridge.NotificationAction action) {
+        if (s == null) return false;
         try {
-            sender.send(Bridge.Frame.newBuilder().setNotificationAction(action).build());
+            s.send(Bridge.Frame.newBuilder().setNotificationAction(action).build());
             return true;
         } catch (IOException e) {
             return false;
         }
     }
 
-    private void requestIconIfMissing(Bridge.Notification n) {
-        if (!n.hasIconSha256() || sender == null) return;
-        String hex = hex(n.getIconSha256().toByteArray());
-        if (icons.get(hex) != null || !icons.markRequested(hex)) return;
+    private void sendQuietly(Bridge.Frame frame) {
+        BridgeServer.Sender s;
+        synchronized (this) {
+            s = sender;
+        }
+        if (s == null) return;
         try {
-            sender.send(Bridge.Frame.newBuilder().setIconRequest(Bridge.IconRequest.newBuilder().setSha256(n.getIconSha256())).build());
+            s.send(frame);
         } catch (IOException e) {
             // the session is ending; the next one resends everything
         }
+    }
+
+    private Bridge.Frame iconRequestIfMissing(Bridge.Notification n) {
+        if (!n.hasIconSha256() || sender == null) return null;
+        String hex = hex(n.getIconSha256().toByteArray());
+        if (icons.get(hex) != null || !icons.markRequested(hex)) return null;
+        return Bridge.Frame.newBuilder().setIconRequest(Bridge.IconRequest.newBuilder().setSha256(n.getIconSha256())).build();
     }
 
     private void changed() {

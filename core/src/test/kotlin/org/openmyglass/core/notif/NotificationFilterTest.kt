@@ -27,6 +27,10 @@ class NotificationFilterTest {
     }
 
     @Test
+    fun `progress notifications are filtered even when not ongoing`() =
+        assertFalse(filter.accept(item(category = NotificationItem.CATEGORY_PROGRESS)))
+
+    @Test
     fun `muted apps are filtered`() = assertFalse(filter.accept(item(pkg = "com.spammy")))
 
     @Test

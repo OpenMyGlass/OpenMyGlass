@@ -92,6 +92,12 @@ object PhoneHub {
         notificationEvents.trySend { notifications.posted(item) }
     }
 
+    /** The phone's active notifications, after the listener reconnected or settings changed. */
+    fun notificationsSync(current: List<NotificationItem>) {
+        current.forEach { seenApps[it.packageName] = it.appName }
+        notificationEvents.trySend { notifications.sync(current) }
+    }
+
     fun notificationsDisabled() {
         notificationEvents.trySend { notifications.clear() }
     }

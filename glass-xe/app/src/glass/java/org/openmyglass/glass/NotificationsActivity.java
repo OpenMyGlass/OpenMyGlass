@@ -11,6 +11,7 @@ import java.util.List;
 
 import org.openmyglass.glass.notif.NotificationCards;
 import org.openmyglass.glass.notif.NotificationCommands;
+import org.openmyglass.glass.notif.NotificationCursor;
 import org.openmyglass.glass.notif.NotificationState;
 
 /**
@@ -22,7 +23,10 @@ public final class NotificationsActivity extends Activity {
     private static final int DISMISS = -1;
 
     private FrameLayout frame;
-    private int position;
+    /** Selection by key: arrivals and removals never move it to another notification. */
+    private final NotificationCursor cursor = new NotificationCursor();
+    /** The notification the open menu was built for: its items act on this key only. */
+    private String menuKey;
     private final Runnable refresh = new Runnable() {
         @Override public void run() { render(); }
     };
@@ -52,32 +56,44 @@ public final class NotificationsActivity extends Activity {
         return state == null ? java.util.Collections.<NotificationState.Item>emptyList() : state.items();
     }
 
+    private static List<String> keys(List<NotificationState.Item> items) {
+        List<String> keys = new java.util.ArrayList<String>(items.size());
+        for (NotificationState.Item i : items) keys.add(i.key);
+        return keys;
+    }
+
+    private NotificationState.Item find(String key) {
+        for (NotificationState.Item i : items()) if (i.key.equals(key)) return i;
+        return null;
+    }
+
     private void render() {
         List<NotificationState.Item> items = items();
-        if (items.isEmpty()) {
+        int at = cursor.index(keys(items));
+        if (at < 0) {
             finish();
             return;
         }
-        position = Math.max(0, Math.min(position, items.size() - 1));
         frame.removeAllViews();
-        frame.addView(NotificationCards.bind(getPackageName(), items.get(position), position + 1, items.size(), "tap for actions")
+        frame.addView(NotificationCards.bind(getPackageName(), items.get(at), at + 1, items.size(), "tap for actions")
                 .apply(this, frame));
     }
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         boolean back = event.isShiftPressed();
+        List<String> keys = keys(items());
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                position++;
+                cursor.next(keys);
                 render();
                 return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                position--;
+                cursor.previous(keys);
                 render();
                 return true;
             case KeyEvent.KEYCODE_TAB:
-                position += back ? -1 : 1;
+                if (back) cursor.previous(keys); else cursor.next(keys);
                 render();
                 return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
@@ -97,9 +113,10 @@ public final class NotificationsActivity extends Activity {
     @Override
     public boolean onPrepareOptionsMenu(Menu menu) {
         menu.clear();
-        List<NotificationState.Item> items = items();
-        if (items.isEmpty()) return false;
-        NotificationState.Item item = items.get(Math.min(position, items.size() - 1));
+        cursor.index(keys(items()));
+        NotificationState.Item item = cursor.key() == null ? null : find(cursor.key());
+        if (item == null) return false;
+        menuKey = item.key;
         int order = 0;
         for (NotificationState.Action a : item.actions) {
             if (!a.reply) menu.add(Menu.NONE, a.index, order++, a.title);
@@ -111,11 +128,10 @@ public final class NotificationsActivity extends Activity {
     @Override
     public boolean onOptionsItemSelected(MenuItem menuItem) {
         NotificationState state = BridgeService.notifications();
-        List<NotificationState.Item> items = items();
-        if (state == null || items.isEmpty()) return true;
-        String key = items.get(Math.min(position, items.size() - 1)).key;
-        if (menuItem.getItemId() == DISMISS) NotificationCommands.dismiss(state, key);
-        else NotificationCommands.action(state, key, menuItem.getItemId());
+        if (state == null || menuKey == null) return true;
+        // Acts on the notification the menu was built for; if it is gone meanwhile, the state ignores it
+        if (menuItem.getItemId() == DISMISS) NotificationCommands.dismiss(state, menuKey);
+        else NotificationCommands.action(state, menuKey, menuItem.getItemId());
         return true;
     }
 }

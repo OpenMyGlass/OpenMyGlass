@@ -107,4 +107,26 @@ class NotificationRelayTest {
         sent.clear(); attach()
         assertEquals(0, sent.size)
     }
+
+    @Test
+    fun `a re-post with the same content but a new post time is not resent`() {
+        // Review finding: Android updates postTime on every notify()
+        runBlocking {
+            attach()
+            relay.posted(item("k1")); relay.posted(item("k1").copy(postedAt = 99L))
+            assertEquals(1, sent.count { it.hasNotification() })
+        }
+    }
+
+    @Test
+    fun `sync replaces the set and applies the current filter`() = runBlocking {
+        // Settings changed (an app muted) or the listener reconnected after missing removals
+        attach()
+        relay.posted(item("k1")); relay.posted(item("k2"))
+        sent.clear()
+        relay.sync(listOf(item("k2"), item("k3", ongoing = true), item("k4")))
+        assertEquals(listOf("k1"), sent.filter { it.hasNotificationRemoved() }.map { it.notificationRemoved.key })
+        assertEquals(listOf("k4"), sent.filter { it.hasNotification() }.map { it.notification.notification.key })
+        assertTrue(sent.filter { it.hasNotification() }.none { it.notification.notification.wake })
+    }
 }

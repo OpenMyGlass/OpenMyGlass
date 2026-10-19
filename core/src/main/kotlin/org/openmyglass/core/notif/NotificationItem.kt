@@ -53,6 +53,7 @@ data class NotificationItem(
         const val CATEGORY_CALL = "call"
         const val CATEGORY_ALARM = "alarm"
         const val CATEGORY_REMINDER = "reminder"
+        const val CATEGORY_PROGRESS = "progress"
 
         /** At most [max] code points (never splits a surrogate pair); an ellipsis marks the cut. */
         internal fun String.clip(max: Int): String {

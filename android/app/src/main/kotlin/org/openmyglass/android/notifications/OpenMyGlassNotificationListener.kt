@@ -22,8 +22,8 @@ class OpenMyGlassNotificationListener : NotificationListenerService() {
     override fun onListenerConnected() {
         instance = this
         PhoneHub.init(applicationContext)
-        // The notifications already in the shade when access starts (or the process restarts)
-        runCatching { activeNotifications }.getOrNull().orEmpty().forEach { feedNotifications(it) }
+        // The shade when access starts or resumes: removals may have been missed while unbound
+        resync()
     }
 
     override fun onListenerDisconnected() {
@@ -60,6 +60,16 @@ class OpenMyGlassNotificationListener : NotificationListenerService() {
         if (sbn.packageName !in CAPTURED_PACKAGES || sbn.notification.category != Notification.CATEGORY_NAVIGATION) return
         PhoneHub.init(applicationContext)
         if (sbn.packageName == MAPS) PhoneHub.maps.onRemoved() else PhoneHub.osmand.onNavigationNotificationRemoved()
+    }
+
+    /** Sends the whole active set through the relay (reconnect, settings change). */
+    fun resync() {
+        if (!NotificationSettings(this).load().enabled) return
+        val ranking = runCatching { currentRanking }.getOrNull()
+        val items = runCatching { activeNotifications }.getOrNull().orEmpty().mapNotNull { sbn ->
+            runCatching { NotificationMapper.map(AndroidNotifications.fields(this, sbn, ranking)) }.getOrNull()
+        }
+        PhoneHub.notificationsSync(items)
     }
 
     private fun feedNotifications(sbn: StatusBarNotification) {

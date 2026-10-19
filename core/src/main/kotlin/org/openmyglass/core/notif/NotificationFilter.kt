@@ -15,7 +15,7 @@ class NotificationFilter(
     ),
 ) {
     fun accept(item: NotificationItem): Boolean {
-        if (item.ongoing || item.groupSummary) return false
+        if (item.ongoing || item.groupSummary || item.category == NotificationItem.CATEGORY_PROGRESS) return false
         if (item.packageName in muted) return false
         if (item.packageName == ownPackage && item.channelId != TEST_CHANNEL) return false
         if (item.title.isNullOrBlank() && item.text.isNullOrBlank()) return false

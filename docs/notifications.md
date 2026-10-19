@@ -45,7 +45,7 @@ Phone notifications appear on Glass. You can read them, dismiss them in sync bot
 
 ## Privacy
 
-Notification content leaves the phone only over the bridge to the owner's Glass. The relay neither logs nor stores it. The debug capture tool is opt-in and records navigation notifications only.
+Notification content leaves the phone only over the bridge to the owner's Glass. The relay neither logs nor stores it. The debug capture tool is opt-in and records only notifications from Google Maps and OsmAnd (to study navigation), all of them, not only the navigation ones; delete its file after use.
 
 ## Bridge messages (`openmyglass.v1`, additive)
 
