@@ -161,4 +161,16 @@ class OsmAndNavigationSourceTest {
         assertNull(source.current.value)
         assertTrue(source.available.value)
     }
+
+    @Test
+    fun `notification instruction is dropped when the maneuver changes`() {
+        val binder = FakeBinder(); val api = FakeApi()
+        val source = OsmAndNavigationSource(binder)
+        source.start(); binder.onConnected!!(api)
+        api.nav!!(60, 5)
+        source.onNotification(org.openmyglass.core.nav.OsmAndNotificationParser.Extra("Turn right and go Obergass", "8:17 PM"))
+        api.nav!!(300, 2)   // turn passed: next maneuver is a left, the notification is not updated yet
+        assertEquals(null, source.current.value!!.instruction)
+        assertEquals("8:17 PM", source.current.value!!.eta)
+    }
 }

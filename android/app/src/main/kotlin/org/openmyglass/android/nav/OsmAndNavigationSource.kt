@@ -27,6 +27,8 @@ class OsmAndNavigationSource(private val binder: OsmAndBinder) : NavigationSourc
     private var started = false
     /** Instruction (with street) and ETA from OsmAnd's own notification, which its AIDL API lacks. */
     private var extra = OsmAndNotificationParser.Extra(null, null)
+    /** The maneuver the notification text describes; its instruction is stale once AIDL reports another maneuver. */
+    private var extraManeuver: org.openmyglass.core.nav.Maneuver? = null
 
     private val _available = MutableStateFlow(false)
     override val available: StateFlow<Boolean> = _available.asStateFlow()
@@ -101,17 +103,19 @@ class OsmAndNavigationSource(private val binder: OsmAndBinder) : NavigationSourc
     /** Called by the notification listener for OsmAnd's navigation notification. */
     fun onNotification(update: OsmAndNotificationParser.Extra) = synchronized(lock) {
         extra = update
+        extraManeuver = reducer.current?.maneuver
         _current.value = merged(reducer.current)
     }
 
     /** OsmAnd sends no final callback when navigation stops; the removal of its navigation notification is the signal. */
     fun onNavigationNotificationRemoved() = synchronized(lock) {
         extra = OsmAndNotificationParser.Extra(null, null)
+        extraManeuver = null
         _current.value = reducer.onNavigationStopped()
     }
 
     private fun merged(update: NavUpdate?): NavUpdate? = update?.copy(
-        instruction = extra.instruction ?: update.instruction,
+        instruction = (if (update.maneuver == extraManeuver) extra.instruction else null) ?: update.instruction,
         eta = extra.eta ?: update.eta,
     )
 
@@ -139,6 +143,7 @@ class OsmAndNavigationSource(private val binder: OsmAndBinder) : NavigationSourc
 
     private fun clear() {
         extra = OsmAndNotificationParser.Extra(null, null)
+        extraManeuver = null
         _available.value = false
         _current.value = reducer.onNavigationStopped()
     }

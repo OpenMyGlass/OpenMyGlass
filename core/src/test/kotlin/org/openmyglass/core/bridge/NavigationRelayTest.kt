@@ -1,5 +1,6 @@
 package org.openmyglass.core.bridge
 
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,8 +27,10 @@ class NavigationRelayTest {
     private val iconHash = "ab".repeat(32)
     private val iconBytes = byteArrayOf(1, 2, 3)
     private val sent = mutableListOf<Frame>()
+    private val errors = mutableListOf<Throwable>()
     private val relay = NavigationRelay(listOf(osmand, gmaps), icons = { if (it == iconHash) iconBytes else null },
-        scope = CoroutineScope(Dispatchers.Unconfined)).also { r -> r.attach { sent += it } }
+        scope = CoroutineScope(Dispatchers.Unconfined + CoroutineExceptionHandler { _, e -> errors += e }))
+    private val session = runBlocking { relay.attach { sent += it } }
 
     private fun nav(distance: Int, source: String = "osmand", icon: String? = null) =
         NavUpdate(Maneuver.LEFT, distance, null, "Via Roma", "8:33 PM", source, icon)
@@ -83,9 +86,9 @@ class NavigationRelayTest {
     @Test
     fun `resends state and icon after reattach`() {
         osmand.flow.value = nav(200, icon = iconHash)
-        relay.detach()
+        runBlocking { relay.detach(session) }
         sent.clear()
-        relay.attach { sent += it }
+        runBlocking { relay.attach { sent += it } }
         assertEquals(1, sent.count { it.hasIcon() })
         assertEquals(listOf(200), navFrames().map { it.distanceM })
     }
@@ -102,5 +105,29 @@ class NavigationRelayTest {
             val expected = if (m == Maneuver.UNKNOWN) "MANEUVER_UNKNOWN" else m.name
             assertEquals(expected, NavigationRelay.toProto(m).name)
         }
+    }
+
+    @Test
+    fun `a failing send ends the session instead of crashing`() {
+        runBlocking { relay.detach(session) }
+        var calls = 0
+        runBlocking { relay.attach { calls++; if (calls >= 2) throw java.io.IOException("broken pipe") } }
+        osmand.flow.value = nav(200)
+        osmand.flow.value = nav(150)   // this send throws
+        osmand.flow.value = nav(100)   // must not be attempted on the dead session
+        assertEquals(emptyList<Throwable>(), errors)
+        assertEquals(2, calls)
+        val later = mutableListOf<Frame>()
+        runBlocking { relay.attach { later += it } }
+        assertEquals(listOf(100), later.filter { it.hasNav() }.map { it.nav.distanceM })
+    }
+
+    @Test
+    fun `a stale detach does not affect a newer session`() {
+        val newer = mutableListOf<Frame>()
+        runBlocking { relay.attach { newer += it } }
+        runBlocking { relay.detach(session) }   // the old session's late cleanup
+        osmand.flow.value = nav(200)
+        assertEquals(listOf(200), newer.filter { it.hasNav() }.map { it.nav.distanceM })
     }
 }

@@ -4,6 +4,7 @@ import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,7 +38,9 @@ object NavigationHub {
 
     private val _bridgeStatus = MutableStateFlow("bridge: disconnected")
     val bridgeStatus: StateFlow<String> = _bridgeStatus.asStateFlow()
-    private var bridgeJob: Job? = null
+    // Only the UI thread calls connectBridge; @Volatile because the session coroutine reads currentLink.
+    @Volatile private var bridgeJob: Job? = null
+    @Volatile private var currentLink: BridgeLink? = null
 
     @Synchronized
     fun init(context: Context) {
@@ -53,18 +56,20 @@ object NavigationHub {
 
     /** Debug: one bridge session over TCP to the bridge app or `sim-glass --bridge`. */
     fun connectBridge(host: String, port: Int, appVersion: String) {
+        // Closing the old link unblocks its read so its cleanup runs now; its detach only ends its own session.
+        currentLink?.close()
         bridgeJob?.cancel()
         bridgeJob = scope.launch {
             _bridgeStatus.value = "bridge: connecting to $host:$port"
             val link = try {
                 val channel = withContext(Dispatchers.IO) { TcpTransport(host, port).connect() }
-                BridgeLink(channel, appVersion).also { it.handshake() }
+                BridgeLink(channel, appVersion).also { it.handshake(); currentLink = it }
             } catch (e: Exception) {
                 _bridgeStatus.value = "bridge: failed (${e.message})"
                 return@launch
             }
             var frames = 0
-            relay.attach { frame ->
+            val session = relay.attach { frame ->
                 link.send(frame)
                 frames++
                 _bridgeStatus.value = "bridge: connected, $frames frames sent (last: ${frame.bodyCase})"
@@ -76,8 +81,9 @@ object NavigationHub {
             } catch (e: Exception) {
                 _bridgeStatus.value = "bridge: lost (${e.message})"
             } finally {
-                relay.detach()
+                withContext(NonCancellable) { relay.detach(session) }
                 link.close()
+                if (currentLink === link) currentLink = null
             }
         }
     }

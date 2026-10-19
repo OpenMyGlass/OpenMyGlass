@@ -1,6 +1,7 @@
 package org.openmyglass.core.bridge
 
 import com.google.protobuf.ByteString
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -25,7 +26,7 @@ class NavigationRelay(
     private val scope: CoroutineScope,
 ) {
     private val lock = Mutex()
-    private var send: (suspend (Frame) -> Unit)? = null
+    private var active: Session? = null
     private var current: NavUpdate? = null
     private var lastSent: Bridge.NavState? = null
     private val sentIcons = mutableSetOf<String>()
@@ -38,43 +39,61 @@ class NavigationRelay(
         }
     }
 
-    /** Starts a bridge session: the current state (and its icon) is sent right away. */
-    fun attach(send: suspend (Frame) -> Unit) {
-        scope.launch {
-            lock.withLock {
-                this@NavigationRelay.send = send
-                lastSent = null
-                sentIcons.clear()
-                push()
-            }
-        }
+    /** A bridge session; [detach] only ends the session it is given (a late cleanup cannot end a newer one). */
+    class Session internal constructor(internal val send: suspend (Frame) -> Unit)
+
+    /** Starts a bridge session, replacing any previous one: the current state (and its icon) is sent right away. */
+    suspend fun attach(send: suspend (Frame) -> Unit): Session = lock.withLock {
+        val session = Session(send)
+        active = session
+        lastSent = null
+        sentIcons.clear()
+        push()
+        session
     }
 
-    fun detach() {
-        scope.launch { lock.withLock { send = null } }
+    suspend fun detach(session: Session) = lock.withLock {
+        if (active === session) active = null
     }
 
     suspend fun onIconRequest(sha256: ByteArray) = lock.withLock {
         val hex = sha256.toHex()
-        icons(hex)?.let { png -> send?.invoke(iconFrame(sha256, png)); sentIcons += hex }
+        icons(hex)?.let { png -> if (deliver(iconFrame(sha256, png))) sentIcons += hex }
         Unit
     }
 
     private suspend fun push() {
-        val out = send ?: return
+        if (active == null) return
         val update = current
         if (update == null) {
-            if (lastSent != null) out(Frame.newBuilder().setNavEnded(Bridge.NavEnded.getDefaultInstance()).build())
+            if (lastSent != null) deliver(Frame.newBuilder().setNavEnded(Bridge.NavEnded.getDefaultInstance()).build())
             lastSent = null
             return
         }
         val state = update.toProto()
         if (state == lastSent) return
         update.iconSha256?.let { hex ->
-            if (hex !in sentIcons) icons(hex)?.let { png -> out(iconFrame(hex.hexToBytes(), png)); sentIcons += hex }
+            if (hex !in sentIcons) icons(hex)?.let { png -> if (deliver(iconFrame(hex.hexToBytes(), png))) sentIcons += hex }
         }
-        out(Frame.newBuilder().setNav(state).build())
-        lastSent = state
+        if (deliver(Frame.newBuilder().setNav(state).build())) lastSent = state
+    }
+
+    /**
+     * Sends on the active session. A failed send (link dropped, frame rejected) ends that session instead of
+     * propagating: the collector must survive, and the next [attach] resends the current state.
+     */
+    private suspend fun deliver(frame: Frame): Boolean {
+        val session = active ?: return false
+        return try {
+            session.send(frame)
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            if (active === session) active = null
+            lastSent = null
+            false
+        }
     }
 
     private fun iconFrame(sha256: ByteArray, png: ByteArray) = Frame.newBuilder()
