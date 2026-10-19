@@ -26,7 +26,8 @@ public final class BridgeServer implements Closeable {
     public interface FrameHandler {
         void onSessionStarted(Sender sender);
         void onFrame(Bridge.Frame frame);
-        void onSessionEnded();
+        /** {@code sender} identifies the session that ended: a late end of a replaced session can be ignored. */
+        void onSessionEnded(Sender sender);
     }
 
     public static final int PROTOCOL_VERSION = 1;
@@ -68,9 +69,8 @@ public final class BridgeServer implements Closeable {
     }
 
     /**
-     * Starts listening on every channel and returns the port of the first TCP channel (-1 if none).
-     * A channel that cannot open now (Bluetooth off) is retried in the background; a TCP port that cannot be
-     * bound fails here.
+     * Starts listening on every channel and returns the port of the first TCP channel (-1 if none or not bound yet).
+     * A channel that cannot open now (Bluetooth off, port still held) is retried in the background.
      */
     public int start() {
         int port = -1;
@@ -79,8 +79,7 @@ public final class BridgeServer implements Closeable {
             try {
                 channel.open();
             } catch (IOException e) {
-                if (channel instanceof TcpServerChannel) throw new IllegalStateException("cannot listen", e);
-                opened = false;
+                opened = false;   // Bluetooth off, or a TCP port still held: retried in the background
             }
             if (port < 0 && channel instanceof TcpServerChannel) port = ((TcpServerChannel) channel).localPort();
             final boolean ready = opened;
@@ -109,6 +108,10 @@ public final class BridgeServer implements Closeable {
                     Thread.sleep(delay);
                     if (closed) return;
                     channel.open();
+                    if (closed) {   // close() ran while we were reopening
+                        channel.close();
+                        return;
+                    }
                     opened = true;
                 } catch (InterruptedException e) {
                     return;
@@ -135,8 +138,15 @@ public final class BridgeServer implements Closeable {
         }
     }
 
-    /** Ends the active session (its onSessionEnded runs before the new session can start). */
-    private synchronized void replaceSession(ServerChannel.Connection connection, Thread thread) {
+    /**
+     * Ends the active session (its onSessionEnded runs before the new session can start). Returns false, and closes
+     * {@code connection}, if the server is already closed.
+     */
+    private synchronized boolean replaceSession(ServerChannel.Connection connection, Thread thread) {
+        if (closed && connection != null) {
+            closeQuietly(connection);
+            return false;
+        }
         if (activeConnection != null) {
             closeQuietly(activeConnection);
             try {
@@ -147,10 +157,11 @@ public final class BridgeServer implements Closeable {
         }
         activeConnection = connection;
         activeThread = thread;
+        return true;
     }
 
     private void serve(final ServerChannel.Connection connection) {
-        boolean started = false;
+        Sender started = null;
         // RFCOMM sockets have no read timeout: close the connection if no Hello arrives in time
         TimerTask helloDeadline = new TimerTask() {
             @Override public void run() { closeQuietly(connection); }
@@ -163,7 +174,8 @@ public final class BridgeServer implements Closeable {
             }
             Bridge.Frame first = read(connection);
             if (first == null || !first.hasHello() || !helloDeadline.cancel()) return;
-            replaceSession(connection, Thread.currentThread());
+            if (first.getHello().getProtocolVersion() != PROTOCOL_VERSION) return;   // incompatible phone
+            if (!replaceSession(connection, Thread.currentThread())) return;
             final Object writeLock = new Object();
             Sender sender = new Sender() {
                 @Override public void send(Bridge.Frame frame) throws IOException {
@@ -176,7 +188,7 @@ public final class BridgeServer implements Closeable {
                     .setProtocolVersion(PROTOCOL_VERSION).setAppVersion("glass-bridge")
                     .addCapabilities("nav").addCapabilities("icons")).build());
             handler.onSessionStarted(sender);
-            started = true;
+            started = sender;
             Bridge.Frame frame;
             while ((frame = read(connection)) != null) handler.onFrame(frame);
         } catch (IOException e) {
@@ -184,7 +196,7 @@ public final class BridgeServer implements Closeable {
         } finally {
             helloDeadline.cancel();
             closeQuietly(connection);
-            if (started) handler.onSessionEnded();
+            if (started != null) handler.onSessionEnded(started);
         }
     }
 

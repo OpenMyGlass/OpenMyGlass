@@ -27,6 +27,11 @@ public final class IconCache {
         requested.remove(hex);
     }
 
+    /** Forgets pending requests: a new session asks again for icons whose request was lost with the old one. */
+    public synchronized void clearRequested() {
+        requested.clear();
+    }
+
     /** True if the icon is neither cached nor already requested: the caller should request it now. */
     public synchronized boolean markRequested(String hex) {
         return !icons.containsKey(hex) && requested.add(hex);

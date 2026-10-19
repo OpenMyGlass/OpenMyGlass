@@ -68,7 +68,7 @@ class NavCardStateTest {
     fun `reconnect without nav ended replaces the state`() {
         state.onSessionStarted(sender)
         state.onFrame(nav(200))
-        state.onSessionEnded()
+        state.onSessionEnded(sender)
         state.onSessionStarted(sender)
         state.onFrame(nav(120))
         pending.toList().forEach { it.run() }   // a cancelled grace timer must not fire
@@ -80,9 +80,33 @@ class NavCardStateTest {
     fun `session loss ends the card after the grace period`() {
         state.onSessionStarted(sender)
         state.onFrame(nav(200))
-        state.onSessionEnded()
+        state.onSessionEnded(sender)
         assertEquals(0, ended)
         pending.toList().forEach { it.run() }
         assertEquals(1, ended)
+    }
+
+    @Test
+    fun `a stale session end does not touch the new session`() {
+        // Issue #20: the old session's end can arrive after the new session started
+        val newer = BridgeServer.Sender { sent += it }
+        state.onSessionStarted(sender)
+        state.onFrame(nav(200))
+        state.onSessionStarted(newer)
+        state.onSessionEnded(sender)
+        assertEquals(0, pending.size)          // no grace timer armed
+        state.onFrame(nav(150, icon = sha))
+        assertEquals(1, sent.count { it.hasIconRequest() })   // the newer session still sends
+    }
+
+    @Test
+    fun `icons are requested again in a new session`() {
+        // Issue #25: a request lost with its session must not block the icon forever
+        state.onSessionStarted(sender)
+        state.onFrame(nav(200, icon = sha))
+        state.onSessionEnded(sender)
+        state.onSessionStarted(sender)
+        state.onFrame(nav(190, icon = sha))
+        assertEquals(2, sent.count { it.hasIconRequest() })
     }
 }

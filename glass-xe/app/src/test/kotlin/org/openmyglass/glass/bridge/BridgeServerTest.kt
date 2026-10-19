@@ -18,7 +18,7 @@ class BridgeServerTest {
     private val server = BridgeServer(0, object : BridgeServer.FrameHandler {
         override fun onSessionStarted(sender: BridgeServer.Sender) { events += "started" }
         override fun onFrame(frame: Bridge.Frame) { frames += frame }
-        override fun onSessionEnded() { events += "ended" }
+        override fun onSessionEnded(sender: BridgeServer.Sender) { events += "ended" }
     })
     private val port = server.start()
 
@@ -99,7 +99,7 @@ class BridgeServerTest {
         val quick = BridgeServer(0, object : BridgeServer.FrameHandler {
             override fun onSessionStarted(sender: BridgeServer.Sender) {}
             override fun onFrame(frame: Bridge.Frame) {}
-            override fun onSessionEnded() {}
+            override fun onSessionEnded(sender: BridgeServer.Sender) {}
         }, 300)
         val p = quick.start()
         try {
@@ -120,7 +120,7 @@ class BridgeServerTest {
         val multi = BridgeServer(listOf(a, b), object : BridgeServer.FrameHandler {
             override fun onSessionStarted(sender: BridgeServer.Sender) { log += "started" }
             override fun onFrame(frame: Bridge.Frame) {}
-            override fun onSessionEnded() { log += "ended" }
+            override fun onSessionEnded(sender: BridgeServer.Sender) { log += "ended" }
         }, BridgeServer.DEFAULT_HELLO_TIMEOUT_MS)
         multi.start()
         try {
@@ -149,7 +149,7 @@ class BridgeServerTest {
         val retrying = BridgeServer(listOf(flaky), object : BridgeServer.FrameHandler {
             override fun onSessionStarted(sender: BridgeServer.Sender) { log += "started" }
             override fun onFrame(frame: Bridge.Frame) {}
-            override fun onSessionEnded() {}
+            override fun onSessionEnded(sender: BridgeServer.Sender) {}
         }, BridgeServer.DEFAULT_HELLO_TIMEOUT_MS, 50)
         retrying.start()
         try {
@@ -157,5 +157,84 @@ class BridgeServerTest {
             BridgeLink(TcpTransport("127.0.0.1", tcp.localPort()).connect(), "test").handshake()
             await { log.size == 1 }
         } finally { retrying.close() }
+    }
+
+    private fun rawHello(version: Int) = java.io.ByteArrayOutputStream().also {
+        org.openmyglass.core.framing.DelimitedFraming.writeFrame(it, Bridge.Frame.newBuilder()
+            .setHello(Bridge.Hello.newBuilder().setProtocolVersion(version)).build().toByteArray())
+    }.toByteArray()
+
+    private fun closedByPeer(socket: Socket): Boolean {
+        socket.soTimeout = 3_000
+        return try { socket.getInputStream().read() == -1 } catch (_: java.net.SocketException) { true }
+    }
+
+    @Test
+    fun `a hello with an unknown protocol version is rejected`() {
+        // Issue #26
+        Socket("127.0.0.1", port).use { s ->
+            s.getOutputStream().write(rawHello(2)); s.getOutputStream().flush()
+            assertTrue(closedByPeer(s))
+        }
+        Thread.sleep(200)
+        assertEquals(emptyList<String>(), events.toList())
+    }
+
+    @Test
+    fun `a hello completing after close does not start a session`() {
+        // Issue #21: a zombie session on a closed server would keep the phone "connected" to nothing
+        Socket("127.0.0.1", port).use { s ->
+            Thread.sleep(200)                       // accepted, waiting for the Hello
+            server.close()
+            s.getOutputStream().write(rawHello(1)); s.getOutputStream().flush()
+            assertTrue(closedByPeer(s))
+        }
+        assertEquals(emptyList<String>(), events.toList())
+    }
+
+    @Test
+    fun `a channel reopened while closing is closed again`() {
+        // Issue #22: close() racing a reopen must not leave the channel listening
+        val tcp = TcpServerChannel(0)
+        lateinit var racing: BridgeServer
+        val channel = object : ServerChannel {
+            var opens = 0
+            var failures = 1
+            override fun open() { if (++opens == 2) racing.close(); tcp.open() }   // close() lands just before the reopen
+            override fun accept(): ServerChannel.Connection {
+                if (failures-- > 0) throw java.io.IOException("adapter off")
+                return tcp.accept()
+            }
+            override fun close() = tcp.close()
+        }
+        racing = BridgeServer(listOf(channel), object : BridgeServer.FrameHandler {
+            override fun onSessionStarted(sender: BridgeServer.Sender) {}
+            override fun onFrame(frame: Bridge.Frame) {}
+            override fun onSessionEnded(sender: BridgeServer.Sender) {}
+        }, BridgeServer.DEFAULT_HELLO_TIMEOUT_MS, 20)
+        racing.start()
+        await { channel.opens >= 2 }
+        Thread.sleep(200)
+        val stillListening = try { Socket("127.0.0.1", tcp.localPort()).close(); true } catch (_: java.io.IOException) { false }
+        assertTrue("channel still listening after close", !stillListening)
+    }
+
+    @Test
+    fun `a busy tcp port is retried instead of failing`() {
+        // Issue #24: a port still held (e.g. by the previous service instance) must not crash the app
+        val holder = java.net.ServerSocket(0)
+        val busyPort = holder.localPort
+        val log = Collections.synchronizedList(mutableListOf<String>())
+        val retrying = BridgeServer(listOf<ServerChannel>(TcpServerChannel(busyPort)), object : BridgeServer.FrameHandler {
+            override fun onSessionStarted(sender: BridgeServer.Sender) { log += "started" }
+            override fun onFrame(frame: Bridge.Frame) {}
+            override fun onSessionEnded(sender: BridgeServer.Sender) {}
+        }, BridgeServer.DEFAULT_HELLO_TIMEOUT_MS, 50)
+        try {
+            assertEquals(-1, retrying.start())
+            holder.close()
+            await { runCatching { runBlocking { BridgeLink(TcpTransport("127.0.0.1", busyPort).connect(), "test").handshake() } }.isSuccess }
+            await { log.size == 1 }
+        } finally { retrying.close(); holder.close() }
     }
 }
