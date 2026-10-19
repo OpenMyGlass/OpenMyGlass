@@ -17,10 +17,12 @@ import org.openmyglass.glass.notif.NotificationState;
 /**
  * Immersion with one card per notification, newest first. Swipe (D-pad left/right, as the touchpad reports it
  * to plain activities) moves between cards; tap opens the menu with the notification's own actions and Dismiss.
- * Replies (actions with a RemoteInput) are not offered until dictation lands (plan 5b).
+ * Reply actions (with a RemoteInput) open {@link org.openmyglass.glass.dictation.DictationActivity}.
  */
 public final class NotificationsActivity extends Activity {
     private static final int DISMISS = -1;
+    /** Menu ids for reply actions: REPLY_BASE + the action's phone index. */
+    private static final int REPLY_BASE = 10_000;
 
     private FrameLayout frame;
     /** Selection by key: arrivals and removals never move it to another notification. */
@@ -119,7 +121,8 @@ public final class NotificationsActivity extends Activity {
         menuKey = item.key;
         int order = 0;
         for (NotificationState.Action a : item.actions) {
-            if (!a.reply) menu.add(Menu.NONE, a.index, order++, a.title);
+            if (a.reply) menu.add(Menu.NONE, REPLY_BASE + a.index, order++, a.title.length() > 0 ? a.title : "Reply");
+            else menu.add(Menu.NONE, a.index, order++, a.title);
         }
         menu.add(Menu.NONE, DISMISS, order, "Dismiss");
         return true;
@@ -130,7 +133,11 @@ public final class NotificationsActivity extends Activity {
         NotificationState state = BridgeService.notifications();
         if (state == null || menuKey == null) return true;
         // Acts on the notification the menu was built for; if it is gone meanwhile, the state ignores it
-        if (menuItem.getItemId() == DISMISS) NotificationCommands.dismiss(state, menuKey);
+        if (menuItem.getItemId() >= REPLY_BASE) {
+            startActivity(new android.content.Intent(this, org.openmyglass.glass.dictation.DictationActivity.class)
+                    .putExtra(org.openmyglass.glass.dictation.DictationActivity.EXTRA_KEY, menuKey)
+                    .putExtra(org.openmyglass.glass.dictation.DictationActivity.EXTRA_ACTION, menuItem.getItemId() - REPLY_BASE));
+        } else if (menuItem.getItemId() == DISMISS) NotificationCommands.dismiss(state, menuKey);
         else NotificationCommands.action(state, menuKey, menuItem.getItemId());
         return true;
     }

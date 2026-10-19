@@ -18,6 +18,8 @@ import java.util.List;
 
 import org.openmyglass.glass.bridge.BridgeServer;
 import org.openmyglass.glass.bridge.FanOutHandler;
+import org.openmyglass.glass.dictation.DictationActivity;
+import org.openmyglass.glass.dictation.DictationHost;
 import org.openmyglass.glass.notif.NotificationCards;
 import org.openmyglass.glass.notif.NotificationCommands;
 import org.openmyglass.glass.notif.NotificationState;
@@ -81,7 +83,11 @@ public final class EmulatorCardActivity extends Activity {
                 main.post(new Runnable() { @Override public void run() { selected = 0; render(); } });
             }
         }, 20);
-        server = new BridgeServer(PORT, new FanOutHandler(Arrays.<BridgeServer.FrameHandler>asList(state, notifications)));
+        server = new BridgeServer(PORT, new FanOutHandler(Arrays.<BridgeServer.FrameHandler>asList(state, notifications, DictationHost.CLIENT)));
+        if (android.os.Build.VERSION.SDK_INT >= 23
+                && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] {android.Manifest.permission.RECORD_AUDIO}, 1);
+        }
         server.start();
     }
 
@@ -115,9 +121,11 @@ public final class EmulatorCardActivity extends Activity {
         final NotificationState.Item item = items.get(selected);
         cardArea.addView(NotificationCards.bind(getPackageName(), item, selected + 1, items.size(), null).apply(this, cardArea));
         for (final NotificationState.Action a : item.actions) {
-            if (a.reply) continue;   // dictated replies: plan 5b
             menuBar.addView(button(a.title, new Runnable() {
-                @Override public void run() { NotificationCommands.action(notifications, item.key, a.index); }
+                @Override public void run() {
+                    if (a.reply) dictate(item.key, a.index);
+                    else NotificationCommands.action(notifications, item.key, a.index);
+                }
             }));
         }
         menuBar.addView(button("Dismiss", new Runnable() {
@@ -126,6 +134,17 @@ public final class EmulatorCardActivity extends Activity {
         if (items.size() > 1) menuBar.addView(button("Next", new Runnable() {
             @Override public void run() { selected = (selected + 1) % items.size(); render(); }
         }));
+    }
+
+    /** Reply: dictates from the test clip if one was pushed (adb), else from the emulator's microphone. */
+    private void dictate(String key, int actionIndex) {
+        android.content.Intent i = new android.content.Intent(this, DictationActivity.class)
+                .putExtra(DictationActivity.EXTRA_KEY, key)
+                .putExtra(DictationActivity.EXTRA_ACTION, actionIndex)
+                .putExtra(DictationActivity.EXTRA_BUTTONS, true);
+        java.io.File clip = new java.io.File(getExternalFilesDir(null), "test-clip.wav");
+        if (clip.isFile()) i.putExtra(DictationActivity.EXTRA_CLIP, clip.getAbsolutePath());
+        startActivity(i);
     }
 
     private Button button(String label, final Runnable onClick) {
