@@ -28,3 +28,6 @@ captures/
 .DS_Store
 *.swp
 .vscode/
+
+# superpowers execution workspace
+.superpowers/

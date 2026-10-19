@@ -6,7 +6,7 @@ Piano completo del progetto: [`project-prompt.md`](project-prompt.md).
 
 | Fase | Stato |
 |---|---|
-| 0 — Inventario strumenti e impostazione repo | ✅ completata (2026-10-19) |
+| 0 — Inventario strumenti e impostazione repo | ✅ completata (2026-10-19); `tools/check-tools.sh` verifica, `tools/check-clean-room.sh` blocca materiale Google |
 | 1 — Recupero binari (MyGlass APK, immagine XE24) | ⏳ da pianificare |
 | 2 — Reverse engineering e mappatura | ⏳ — **stop: revisione inventario funzionalità** |
 | 3 — Architettura | ⏳ — **stop: approvazione architettura** |
@@ -20,12 +20,14 @@ Piano completo del progetto: [`project-prompt.md`](project-prompt.md).
 | git, gh | ✅ | gh autenticato |
 | Java (OpenJDK 21) | ✅ | |
 | Python 3, Homebrew | ✅ | |
-| Android SDK | ✅ | `~/Library/Android/sdk` (platform-tools, build-tools, emulator, system-images); `adb` non nel PATH |
-| jadx | ❌ | `brew install jadx` — necessario in Fase 2 |
-| apktool | ❌ | `brew install apktool` — necessario in Fase 2 |
+| Android SDK | ✅ | `~/Library/Android/sdk` (platform-tools, build-tools, emulator, system-images); `adb` non nel PATH (gli script usano il path completo) |
+| jadx | ✅ 1.5.6 | brew |
+| apktool | ✅ 3.0.3 | brew |
 | Ghidra | ❌ | opzionale, solo per codice nativo |
 | gradle, kotlin | ❌ | arriveranno via Gradle wrapper in Fase 4 |
-| protoc | ❌ | `brew install protobuf` — se lo schema sarà protobuf |
+| protoc | ✅ libprotoc 36.2 | brew `protobuf` |
+| e2fsprogs (debugfs), simg2img, 7z | ✅ | brew; per estrarre l'immagine XE24 |
+| apksigner, aapt | ✅ | build-tools 37.0.0 |
 | REA MCP (`rea-agents` 6.7.0) | ✅ | registrato a livello di progetto (`claude mcp add --scope local`); usa JADX/Ghidra come provider |
 | GDK add-on (API 19) | ❌ | da recuperare/verificare in Fase 4 per `glass-xe/` |
 
