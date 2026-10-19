@@ -1,3 +1,3 @@
 # protocol
 
-Vuoto fino all'approvazione dell'architettura (Fase 3). Vedi [`docs/progress.md`](../docs/progress.md).
+Empty until the architecture is approved (Phase 3). See [`docs/progress.md`](../docs/progress.md).
