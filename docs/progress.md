@@ -9,7 +9,7 @@ Current plan: [`superpowers/plans/2026-10-19-phase-0-2-reverse-engineering.md`](
 |---|---|
 | 0 — Tool inventory and repo setup | ✅ done (2026-10-19); `tools/check-tools.sh` checks tools, `tools/check-clean-room.sh` blocks Google material |
 | 1 — Binary retrieval (MyGlass APK, XE24 image) | ✅ done (2026-10-19), see [`sources.md`](sources.md) |
-| 2 — Reverse engineering and mapping | 🔄 in progress — protocol spec done ([`protocol/`](protocol/)); **stop: feature inventory review** |
+| 2 — Reverse engineering and mapping | ✅ done (2026-10-19): [`feature-inventory.md`](feature-inventory.md), [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [`cloud-dependencies.md`](cloud-dependencies.md), [`prior-art.md`](prior-art.md) — **waiting for the owner's review of the inventory** |
 | 3 — Architecture | ⏳ — **stop: architecture approval** |
 | 4 — Android implementation | ⏳ |
 | 5 — iOS plan | ⏳ (only on request) |
@@ -59,6 +59,8 @@ The similar counts across Glass apps (7 UUIDs, 4 RFCOMM files) come from a share
 - Companion channel: RFCOMM secure, Glass is server, UUID `F15CC914-…`, varint-delimited protobuf `Envelope`s ([`protocol/transport.md`](protocol/transport.md)).
 - **No application-level authentication and no Google account needed** on XE24 ([`protocol/handshake.md`](protocol/handshake.md)).
 - Glass natively handles timeline cards, location, navigation intents, Wi-Fi setup, screencast, touch injection, device info ([`protocol/messages.md`](protocol/messages.md)).
+- The MyGlass backend (`glass.google.com`) is gone (HTTP 404); native turn-by-turn needs `com.google.glass.maps`, which is not in the XE24 image ([`cloud-dependencies.md`](cloud-dependencies.md)).
+- Third-party apps on Glass cannot write native timeline cards, capture the screen or inject input; the companion channel can ([`glass-internals.md`](glass-internals.md)).
 
 ## Decisions
 
@@ -73,3 +75,5 @@ The similar counts across Glass apps (7 UUIDs, 4 RFCOMM files) come from a share
 - GDK add-on missing from the official SDK repository: to be sourced for Phase 4.
 - `MyGlassWear.apk` (Glass side) runs an Android Wear node through GmsCore: a second, Google-Play-services-based channel next to the companion RFCOMM channel. Its role and whether it still works is to be assessed in the feature inventory.
 - `Envelope.notificationC2G` (field 45) is received by XE24 but no consumer was found in the decompiled APKs; odex-only APKs (e.g. GlassSystemUI) not checked yet.
+- Glass Proxy (`fafbdd20-…`) stream format and SMS reply path not analyzed yet.
+- `gdk.jar` redistribution status to check before Phase 4.
