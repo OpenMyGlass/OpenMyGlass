@@ -40,3 +40,29 @@ browser. Opzionale secondo il piano; da recuperare manualmente se l'analisi dell
 | SHA-256 | `76a9d3822077e993bba62c586e5e7cbb1217a81171d78033ff7c06ba285f2363` |
 | Boot image | https://storage.googleapis.com/glass_gfw/glass_1-img-5585826/boot.img — il download restituisce 391 byte (non è un'immagine; SHA-1 non coincide con l'ufficiale `4e582d8d…`). Si usa il `boot.img` contenuto nella factory image. |
 | Sorgenti kernel | https://android.googlesource.com/kernel/omap/+/glass-omap-xrr02 |
+
+### Contenuto dell'immagine
+
+- `system.img` è in formato **Android sparse**: convertito con `simg2img` in ext4 ed estratto con `debugfs -R "rdump / system"`.
+- `boot.img` della factory image: SHA-1 `d9794236c2fbd1ecb020b9d71b3a85db3c91a960`. È diverso dal `boot.img` scaricabile a parte (`4e582d8d…`), che la pagina ufficiale associa alla procedura di root.
+- **Build:** `Google/glass_1/glass-1:4.4.4/XRH35/5585826:user/release-keys`, quindi **Android 4.4.4** (API 19), non 4.4.2. Le app Glass riportano versionName `XE22.0`, ma l'immagine è quella ufficiale XE24.
+- 47 APK in `system/app`, `system/priv-app` e `system/framework`. Gli APK Glass hanno il `classes.dex` nell'APK; alcune app AOSP sono solo odex.
+
+### APK di interesse per il lato occhiali
+
+L'integrità è garantita dallo SHA-1 ufficiale dell'immagine. `apksigner` non stampa certificati per questi APK, da indagare nel Task 5.
+
+| APK | Package | SHA-256 (prefisso) | Ruolo presunto, da verificare |
+|---|---|---|---|
+| `priv-app/MyGlassWear.apk` | `com.google.glass.companion` | `b66c9de34432cad4` | lato occhiali del protocollo companion |
+| `priv-app/GlassBluetooth.apk` | `com.google.glass.bluetooth` | `b621f843709abff9` | servizi Bluetooth |
+| `priv-app/GlassHome.apk` | `com.google.glass.home` | `41d0b6bc418eddf8` | timeline, home, navigazione |
+| `priv-app/GlassLiteSetup.apk` | `com.google.glass.litesetup` | `b199acde10a861a6` | setup senza account |
+| `priv-app/GlassSync.apk` | `com.google.glass.sync` | `b03f3b763a558633` | sincronizzazione (timeline/media) |
+| `priv-app/GlassPhone.apk` | `com.google.glass.phone` | `89613adb6d0b188e` | chiamate e SMS via telefono |
+| `priv-app/GlassRemoteIme.apk` | `com.google.glass.remoteime` | `15f083280d2eb697` | input remoto dal telefono |
+| `priv-app/GlassSettings.apk` | `com.google.glass.settings.ui` | `85cc5247b1ee32b5` | impostazioni, Wi-Fi |
+| `priv-app/GlassVoice.apk` | `com.google.glass.voice` | `68519445fea45c6d` | dettatura e comandi vocali |
+| `priv-app/GlassCamera.apk` | `com.google.glass.camera` | `72ec3959e16cb11f` | foto/video |
+| `framework/glass-core.jar` | — | `9715b1e44bf46e75` | libreria Glass condivisa (probabili protobuf) |
+| `framework/glass-services.jar` | — | `28d5011501eaa556` | servizi di sistema Glass |
