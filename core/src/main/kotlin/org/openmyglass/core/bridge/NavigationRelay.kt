@@ -48,6 +48,8 @@ class NavigationRelay(
         active = session
         lastSent = null
         sentIcons.clear()
+        // Glass may still show a card from before the reconnect: say explicitly that nothing is navigating.
+        if (current == null) deliver(Frame.newBuilder().setNavEnded(Bridge.NavEnded.getDefaultInstance()).build())
         push()
         session
     }

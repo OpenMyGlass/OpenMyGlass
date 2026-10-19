@@ -38,4 +38,25 @@ expect "gradle wrapper jar accepted" 0 bash -c "cd '$TMP/r' && bash '$GUARD'"
 repo; mkdir "$TMP/r/sub"; printf 'PK' > "$TMP/r/fake.apk"; echo x > "$TMP/r/sub/x.txt"; git -C "$TMP/r" add -f fake.apk sub/x.txt
 expect "apk rejected when run from a subdirectory" 1 bash -c "cd '$TMP/r/sub' && bash '$GUARD'"
 
+repo; mkdir -p "$TMP/r/glass-xe/libs"; printf 'PK' > "$TMP/r/glass-xe/libs/gdk.jar"; git -C "$TMP/r" add -f glass-xe/libs/gdk.jar
+expect "gdk.jar rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; mkdir -p "$TMP/r/x"; printf 'PK' > "$TMP/r/x/gdk.jar"; git -C "$TMP/r" add -f x/gdk.jar
+expect "gdk.jar rejected anywhere" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; mkdir -p "$TMP/r/glass-xe/gdk-stubs/src/main/java/com/google/android/glass"; printf '/** Compile-only stub, written by OpenMyGlass from the public GDK reference */\npackage com.google.android.glass;\n' > "$TMP/r/glass-xe/gdk-stubs/src/main/java/com/google/android/glass/A.java"; git -C "$TMP/r" add glass-xe
+expect "own GDK stub with provenance accepted" 0 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; mkdir -p "$TMP/r/glass-xe/gdk-stubs/src/main/java/com/google/android/glass"; printf 'package com.google.android.glass;\n' > "$TMP/r/glass-xe/gdk-stubs/src/main/java/com/google/android/glass/B.java"; git -C "$TMP/r" add glass-xe
+expect "stub without provenance rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; mkdir -p "$TMP/r/src/com/google"; printf '/** Compile-only stub, written by OpenMyGlass */\npackage com.google.foo;\n' > "$TMP/r/src/com/google/C.java"; git -C "$TMP/r" add src
+expect "provenance outside gdk-stubs rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; printf 'x' > "$TMP/r/java_pid1.hprof"; git -C "$TMP/r" add -f java_pid1.hprof
+expect "heap dump rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; dd if=/dev/zero of="$TMP/r/big.bin" bs=1048576 count=51 2>/dev/null; git -C "$TMP/r" add -f big.bin
+expect "file over 50 MB rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
 echo "$pass passed, $fail failed"; [ $fail -eq 0 ]

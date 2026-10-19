@@ -11,7 +11,7 @@ Current plan: [`superpowers/plans/2026-10-19-phase-0-2-reverse-engineering.md`](
 | 1 — Binary retrieval (MyGlass APK, XE24 image) | ✅ done (2026-10-19), see [`sources.md`](sources.md) |
 | 2 — Reverse engineering and mapping | ✅ done (2026-10-19): [`feature-inventory.md`](feature-inventory.md), [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [`cloud-dependencies.md`](cloud-dependencies.md), [`prior-art.md`](prior-art.md) — **waiting for the owner's review of the inventory** |
 | 3 — Architecture | ✅ approved by the owner (2026-10-19): option **C (hybrid)**, [`architecture.md`](architecture.md) |
-| 4 — Android implementation | 🔄 4a done (core, CompanionLink, sim-glass); 4b done: navigation sources on the phone (OsmAnd AIDL source, notification capture), measured in [`navigation-sources.md`](navigation-sources.md); 4c done: notification parsers, bridge protocol `openmyglass.v1`, `BridgeLink`, `NavigationRelay`, phone relay verified end to end against `sim-glass --bridge`; next: Glass bridge app + navigation card (4d) |
+| 4 — Android implementation | 🔄 4a done (core, CompanionLink, sim-glass); 4b done: navigation sources on the phone (OsmAnd AIDL source, notification capture), measured in [`navigation-sources.md`](navigation-sources.md); 4c done: notification parsers, bridge protocol `openmyglass.v1`, `BridgeLink`, `NavigationRelay`, phone relay verified end to end against `sim-glass --bridge`; 4d done: Glass bridge app (`glass-xe/`, flavors `glass` LiveCard and `emulator`), verified end to end on the emulator ([`glass-app.md`](glass-app.md)); next: Bluetooth RFCOMM bridge + phone foreground service with reconnection (4e) |
 | 5 — iOS plan | ⏳ (only on request) |
 
 ## Phase 0 — Tool inventory (macOS arm64, 2026-10-19)
@@ -71,6 +71,8 @@ Things verified only against `sim-glass` so far; to confirm on a real Glass XE24
 - [ ] `glassInfoResponseG2C` values match the device (battery, storage, name, software version, 640×360).
 - [ ] `timezoneC2G` updates the Glass clock.
 - [ ] The firmware's ping (SDP query / `PingCompanion`) triggers our reconnection.
+- [ ] The Glass bridge app installs and starts on XE24; the LiveCard publishes, updates and unpublishes.
+- [ ] Screen wake near maneuvers works on XE24 (wake lock + `LiveCard.navigate()`), and battery cost of one hour of navigation.
 - [ ] Navigation updates keep coming while the phone projects to Android Auto **in a real car** (verified on the emulator with the Desktop Head Unit, 2026-10-19: both OsmAnd AIDL and the Maps notification keep working).
 
 ## Later phases (agreed with the owner, 2026-10-19)

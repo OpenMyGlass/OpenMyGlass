@@ -32,6 +32,10 @@ class NavigationRelayTest {
         scope = CoroutineScope(Dispatchers.Unconfined + CoroutineExceptionHandler { _, e -> errors += e }))
     private val session = runBlocking { relay.attach { sent += it } }
 
+    init {
+        sent.clear()   // drop the idle NavEnded announced on attach; tests count what follows
+    }
+
     private fun nav(distance: Int, source: String = "osmand", icon: String? = null) =
         NavUpdate(Maneuver.LEFT, distance, null, "Via Roma", "8:33 PM", source, icon)
 
@@ -129,5 +133,14 @@ class NavigationRelayTest {
         runBlocking { relay.detach(session) }   // the old session's late cleanup
         osmand.flow.value = nav(200)
         assertEquals(listOf(200), newer.filter { it.hasNav() }.map { it.nav.distanceM })
+    }
+
+    @Test
+    fun `attaching while idle tells glass there is no navigation`() {
+        // Stale-card guard: Glass may still show a card from before a reconnect
+        val fresh = mutableListOf<Frame>()
+        runBlocking { relay.attach { fresh += it } }
+        assertEquals(1, fresh.count { it.hasNavEnded() })
+        assertEquals(0, fresh.count { it.hasNav() })
     }
 }

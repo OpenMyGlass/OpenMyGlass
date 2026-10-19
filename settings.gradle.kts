@@ -7,4 +7,4 @@ pluginManagement {
     repositories { google(); gradlePluginPortal(); mavenCentral() }
 }
 
-include(":protocol", ":core", ":tools:sim-glass", ":android:app", ":android:osmand-api")
+include(":protocol", ":core", ":tools:sim-glass", ":android:app", ":android:osmand-api", ":glass-xe:app", ":glass-xe:gdk-stubs")
