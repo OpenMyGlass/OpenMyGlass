@@ -1,0 +1,122 @@
+package org.openmyglass.core.bridge
+
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
+import org.openmyglass.core.connection.Backoff
+import org.openmyglass.core.connection.LinkState
+import org.openmyglass.core.framing.DelimitedFraming
+import org.openmyglass.core.nav.Maneuver
+import org.openmyglass.core.nav.NavUpdate
+import org.openmyglass.core.nav.NavigationSource
+import org.openmyglass.core.transport.TcpTransport
+import org.openmyglass.protocol.v1.Bridge
+import org.openmyglass.protocol.v1.Bridge.Frame
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
+
+class BridgeManagerTest {
+
+    private class FakeSource : NavigationSource {
+        override val name = "osmand"
+        val flow = MutableStateFlow<NavUpdate?>(null)
+        override val updates = flow
+        override val available: StateFlow<Boolean> = MutableStateFlow(true)
+    }
+
+    /** Glass side of the bridge on a real TCP port: answers Hello, records every frame it receives. */
+    private class GlassPeer : AutoCloseable {
+        val server = ServerSocket(0)
+        val port get() = server.localPort
+        val frames = LinkedBlockingQueue<Frame>()
+        @Volatile var socket: Socket? = null
+        private val thread = Thread {
+            while (!server.isClosed) {
+                val s = runCatching { server.accept() }.getOrNull() ?: break
+                socket = s
+                runCatching {
+                    while (true) {
+                        val bytes = DelimitedFraming.readFrame(s.getInputStream()) ?: break
+                        val frame = Frame.parseFrom(bytes)
+                        if (frame.hasHello()) DelimitedFraming.writeFrame(s.getOutputStream(), Frame.newBuilder()
+                            .setHello(Bridge.Hello.newBuilder().setProtocolVersion(1).addCapabilities("nav")).build().toByteArray())
+                        else frames += frame
+                    }
+                }
+                runCatching { s.close() }
+            }
+        }.apply { isDaemon = true; start() }
+        fun next(): Frame? = frames.poll(3, TimeUnit.SECONDS)
+        fun dropConnection() = socket?.close()
+        override fun close() = server.close()
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val source = FakeSource()
+    private val relay = NavigationRelay(listOf(source), icons = { null }, scope = scope)
+
+    private fun manager(port: Int, backoff: Backoff = Backoff(50.milliseconds, 200.milliseconds)) =
+        BridgeManager({ TcpTransport("127.0.0.1", port) }, relay, appVersion = "test", scope = scope, backoff = backoff)
+
+    private fun BridgeManager.await(timeout: Duration = 3.seconds, p: (LinkState<Bridge.Hello>) -> Boolean) =
+        runBlocking { withTimeout(timeout) { state.first(p) } }
+
+    private fun nav(d: Int) = NavUpdate(Maneuver.LEFT, d, null, "Via Roma", "20:33", "osmand", null)
+
+    @AfterEach
+    fun tearDown() = scope.cancel()
+
+    @Test
+    fun `connects and relays navigation`() {
+        GlassPeer().use { glass ->
+            val m = manager(glass.port); m.start()
+            m.await { it is LinkState.Connected }
+            assertTrue(glass.next()!!.hasNavEnded())   // idle announcement on attach
+            source.flow.value = nav(120)
+            assertEquals(120, glass.next()!!.nav.distanceM)
+            m.stop()
+        }
+    }
+
+    @Test
+    fun `retries when the bridge app is missing`() {
+        val closedPort = ServerSocket(0).use { it.localPort }
+        val m = manager(closedPort, Backoff(20.milliseconds, 80.milliseconds)); m.start()
+        val waits = mutableListOf<LinkState.WaitingToRetry>()
+        runBlocking {
+            withTimeout(3.seconds) {
+                m.state.first { s -> if (s is LinkState.WaitingToRetry && waits.lastOrNull() != s) waits += s; waits.size >= 4 }
+            }
+        }
+        assertTrue(waits.all { it.delay <= 80.milliseconds })
+        m.stop()
+    }
+
+    @Test
+    fun `reattaches after a drop`() {
+        GlassPeer().use { glass ->
+            source.flow.value = nav(500)
+            val m = manager(glass.port); m.start()
+            assertEquals(500, glass.next()!!.nav.distanceM)
+            glass.dropConnection()
+            // after reconnecting, the current state is sent again on the new session
+            assertEquals(500, glass.next()!!.nav.distanceM)
+            m.stop()
+        }
+    }
+}
