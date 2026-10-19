@@ -39,4 +39,6 @@ Piano completo del progetto: [`project-prompt.md`](project-prompt.md).
 
 ## Problemi aperti
 
-- Fattibilità di un emulatore Glass XE24 (avvio dell'immagine di sistema in AVD/QEMU, Bluetooth emulato assente → serve un trasporto alternativo per i test, es. TCP).
+- Emulatore Glass XE24 **non fattibile** su questo Mac (vedi [`emulator-feasibility.md`](emulator-feasibility.md)). Test senza hardware tramite peer simulato su TCP e AVD arm64 con stub GDK.
+- GDK add-on assente dal repository SDK ufficiale: da recuperare per la Fase 4.
+- `MyGlassWear.apk` (lato occhiali) è costruito sul framework Android Wear/clockwork: verificare nel Task 6 quanto il protocollo dipenda da Google Play services Wearable.
