@@ -15,6 +15,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import org.openmyglass.android.nav.AndroidOsmAndBinder
+import org.openmyglass.android.nav.NavigationHub
 import org.openmyglass.android.nav.OsmAndNavigationSource
 import org.openmyglass.android.notifications.OpenMyGlassNotificationListener
 
@@ -26,6 +27,9 @@ class DebugActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val osmandStatus = TextView(this)
+        val bridgeStatus = TextView(this)
+        // Default: the host machine as seen from the Android emulator, where `sim-glass --bridge` listens.
+        val bridgeAddress = android.widget.EditText(this).apply { setText("10.0.2.2:7824"); isSingleLine = true }
         val allowOsmAnd = Button(this).apply {
             text = "Allow OpenMyGlass in OsmAnd"
             visibility = android.view.View.GONE
@@ -42,6 +46,15 @@ class DebugActivity : Activity() {
             addView(TextView(this@DebugActivity).apply { text = "OpenMyGlass — debug" })
             addView(osmandStatus)
             addView(allowOsmAnd)
+            addView(bridgeStatus)
+            addView(bridgeAddress)
+            addView(Button(this@DebugActivity).apply {
+                text = "Connect bridge (debug TCP)"
+                setOnClickListener {
+                    val (host, port) = bridgeAddress.text.toString().split(":").let { it[0] to (it.getOrNull(1)?.toIntOrNull() ?: 7824) }
+                    NavigationHub.connectBridge(host, port, appVersion = "debug")
+                }
+            })
             addView(Button(this@DebugActivity).apply {
                 text = "Notification access settings"
                 setOnClickListener { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
@@ -57,7 +70,8 @@ class DebugActivity : Activity() {
                 text = "Captures: " + OpenMyGlassNotificationListener.captureFile(this@DebugActivity).absolutePath
             })
         })
-        osmand = OsmAndNavigationSource(AndroidOsmAndBinder(applicationContext))
+        NavigationHub.init(applicationContext)
+        osmand = NavigationHub.osmand
         scope.launch {
             combine(osmand.available, osmand.needsAuthorization, osmand.current) { a, n, u -> Triple(a, n, u) }
                 .collect { (available, needsAuth, update) ->
@@ -72,7 +86,7 @@ class DebugActivity : Activity() {
                             ?: "no active navigation")
                 }
         }
-        osmand.start()
+        scope.launch { NavigationHub.bridgeStatus.collect { bridgeStatus.text = it } }
     }
 
     @Deprecated("Activity result API is enough for a debug screen")
@@ -89,7 +103,6 @@ class DebugActivity : Activity() {
     }
 
     override fun onDestroy() {
-        osmand.stop()
         scope.cancel()
         super.onDestroy()
     }

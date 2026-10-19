@@ -64,6 +64,15 @@ Results while projecting to the head unit:
 - **OsmAnd keeps delivering AIDL navigation updates**: our debug screen showed `ROUNDABOUT in 31 m` with the voice prompt `Attenzione, Attraversamento pedonale`, in Italian after `cmd locale set-app-locales`. OsmAnd from F-Droid is not shown *on the car screen* (Car App Library apps sideloaded from outside Play are hidden), but that does not matter to us: we read OsmAnd on the phone.
 - Still to confirm in a real car: behavior with a wireless/USB head unit, and the phone screen locked.
 
+## Relay to Glass (phase 4c, emulator, 2026-10-19)
+
+The phone app relays navigation over the bridge protocol (`openmyglass.v1`) to `tools/sim-glass --bridge`. Connection: debug TCP from the emulator to `10.0.2.2:7824`.
+- **OsmAnd:** complete states with maneuver and distance from AIDL, and instruction (with street) and ETA from its notification, e.g. `ROUNDABOUT 218 m | Prendere la 2 uscita e proseguire Herrengasse verso Feldkirch, Schaan | eta 22:26`. No duplicate consecutive states.
+- **Google Maps:** distance, road and ETA. Maneuver icons (126×126, sent as ≤128 px PNG of 1–2 KiB) go **once per hash, before the first state that uses them**. The maneuver stays `MANEUVER_UNKNOWN` until more icon hashes are labeled; Glass can show the icon itself.
+- **End of navigation:** OsmAnd sends **no final callback** when navigation is stopped. The removal of its navigation notification is the signal (`OsmAndNavigationSource.onNavigationNotificationRemoved`). Maps likewise ends when its notification is removed. `NavEnded` is sent once in both cases.
+- **Notification format near the destination:** OsmAnd's notification keeps only the stats line (`100 m • <1 min • 22:23 • 0 km/h`); the parser now recognizes it.
+- **Permissions:** the app needs `INTERNET` for the TCP bridge (the first attempt failed with `EPERM`).
+
 ## Recommendation
 
 1. **Primary source: OsmAnd**, combining AIDL (maneuver and distance) with its notification (street, ETA). The user must enable OpenMyGlass once in OsmAnd (Plugins).

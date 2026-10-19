@@ -18,6 +18,8 @@ data class NavUpdate(
     val eta: String?,
     /** `"osmand"` or `"gmaps"`. */
     val source: String,
+    /** SHA-256 (hex) of the maneuver icon to show on Glass, when the source provides one. */
+    val iconSha256: String? = null,
 )
 
 /** A phone-side source of navigation updates. [updates] emits `null` when no navigation is active. */

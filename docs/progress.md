@@ -11,7 +11,7 @@ Current plan: [`superpowers/plans/2026-10-19-phase-0-2-reverse-engineering.md`](
 | 1 — Binary retrieval (MyGlass APK, XE24 image) | ✅ done (2026-10-19), see [`sources.md`](sources.md) |
 | 2 — Reverse engineering and mapping | ✅ done (2026-10-19): [`feature-inventory.md`](feature-inventory.md), [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [`cloud-dependencies.md`](cloud-dependencies.md), [`prior-art.md`](prior-art.md) — **waiting for the owner's review of the inventory** |
 | 3 — Architecture | ✅ approved by the owner (2026-10-19): option **C (hybrid)**, [`architecture.md`](architecture.md) |
-| 4 — Android implementation | 🔄 4a done (core, CompanionLink, sim-glass); 4b done: navigation sources on the phone (OsmAnd AIDL source, notification capture), measured in [`navigation-sources.md`](navigation-sources.md); next: Maps/OsmAnd notification parsers, then bridge app + navigation card (4c) |
+| 4 — Android implementation | 🔄 4a done (core, CompanionLink, sim-glass); 4b done: navigation sources on the phone (OsmAnd AIDL source, notification capture), measured in [`navigation-sources.md`](navigation-sources.md); 4c done: notification parsers, bridge protocol `openmyglass.v1`, `BridgeLink`, `NavigationRelay`, phone relay verified end to end against `sim-glass --bridge`; next: Glass bridge app + navigation card (4d) |
 | 5 — iOS plan | ⏳ (only on request) |
 
 ## Phase 0 — Tool inventory (macOS arm64, 2026-10-19)

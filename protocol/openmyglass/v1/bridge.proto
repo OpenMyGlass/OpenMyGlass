@@ -1,0 +1,66 @@
+// OpenMyGlass bridge protocol, version 1: phone <-> OpenMyGlass bridge app on Glass.
+// Framing: varint32 length + one Frame (same as the companion link). Used over RFCOMM, TCP and, later, BLE,
+// so messages stay small (icons are sent once per hash, frames are capped at 64 KiB by the sender).
+syntax = "proto3";
+
+package openmyglass.v1;
+
+option java_package = "org.openmyglass.protocol.v1";
+option java_outer_classname = "Bridge";
+
+message Frame {
+  oneof body {
+    Hello hello = 1;               // both directions, first frame each way
+    NavState nav = 2;              // phone -> glass: current navigation state (absent fields = unknown)
+    NavEnded nav_ended = 3;        // phone -> glass: navigation ended, remove the card
+    Icon icon = 4;                 // phone -> glass: icon bytes for a hash
+    IconRequest icon_request = 5;  // glass -> phone: icon hash not in the Glass cache
+  }
+}
+
+message Hello {
+  uint32 protocol_version = 1;     // 1
+  string app_version = 2;
+  repeated string capabilities = 3;
+}
+
+// Same numbering as org.openmyglass.core.nav.Maneuver (ordinal + 1, UNKNOWN = 0).
+enum Maneuver {
+  MANEUVER_UNKNOWN = 0;
+  STRAIGHT = 1;
+  LEFT = 2;
+  SLIGHT_LEFT = 3;
+  SHARP_LEFT = 4;
+  RIGHT = 5;
+  SLIGHT_RIGHT = 6;
+  SHARP_RIGHT = 7;
+  KEEP_LEFT = 8;
+  KEEP_RIGHT = 9;
+  U_TURN_LEFT = 10;
+  U_TURN_RIGHT = 11;
+  OFF_ROUTE = 12;
+  ROUNDABOUT = 13;
+  ROUNDABOUT_LEFT = 14;
+  ARRIVE = 15;
+}
+
+message NavState {
+  Maneuver maneuver = 1;
+  optional int32 distance_m = 2;
+  optional string instruction = 3;
+  optional string street = 4;
+  optional string eta = 5;
+  string source = 6;               // "osmand" or "gmaps"
+  optional bytes icon_sha256 = 7;  // maneuver icon, sent separately as Icon
+}
+
+message NavEnded {}
+
+message Icon {
+  bytes sha256 = 1;
+  bytes png = 2;
+}
+
+message IconRequest {
+  bytes sha256 = 1;
+}
