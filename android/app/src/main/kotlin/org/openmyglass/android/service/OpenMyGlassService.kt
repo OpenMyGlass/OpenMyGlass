@@ -117,6 +117,7 @@ class OpenMyGlassService : Service() {
             scope = s,
             onError = { android.util.Log.w(TAG, "bridge link: $it") },
             notifications = PhoneHub.notifications,
+            dictation = PhoneHub.dictation,
         ).also { this.bridge = it }
         val companionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
         if (settings.load().companionEnabled) {

@@ -83,6 +83,7 @@ class SettingsActivity : Activity() {
                 setOnClickListener { OpenMyGlassService.stop(this@SettingsActivity) }
             })
             addNotificationSettings(this)
+            addSpeechSettings(this)
         }
         setContentView(ScrollView(this).apply { fitsSystemWindows = true; addView(content) })
         scope.launch { PhoneHub.bridgeStatus.collect { status.text = it } }
@@ -120,6 +121,50 @@ class SettingsActivity : Activity() {
                 }
             })
         }
+    }
+
+    /** Dictated replies: language and the one-time model download (the only network use of dictation). */
+    private fun addSpeechSettings(content: LinearLayout) {
+        val speech = org.openmyglass.android.speech.SpeechSettings(this)
+        val store = org.openmyglass.android.speech.ModelStore(this)
+        val status = TextView(this)
+        fun refresh() {
+            val m = org.openmyglass.android.speech.ModelCatalog.forLanguage(speech.language)
+            status.text = if (store.isInstalled(m)) "Speech model ${m.name}: installed (offline)"
+            else "Speech model ${m.name}: not downloaded (${m.sizeMb} MB)"
+        }
+        content.addView(TextView(this).apply { text = "Dictated replies (transcribed offline on this phone):" })
+        content.addView(RadioGroup(this).apply {
+            listOf("it" to "Italiano", "en" to "English").forEachIndexed { i, (code, label) ->
+                addView(RadioButton(this@SettingsActivity).apply {
+                    id = 100 + i
+                    text = label
+                    isChecked = speech.language == code
+                    setOnClickListener { speech.language = code; refresh() }
+                })
+            }
+        })
+        content.addView(status)
+        content.addView(Button(this).apply {
+            text = "Download speech model"
+            setOnClickListener {
+                val m = org.openmyglass.android.speech.ModelCatalog.forLanguage(speech.language)
+                isEnabled = false
+                scope.launch {
+                    val result = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        runCatching {
+                            store.download(m) { done, total ->
+                                if (total > 0) runOnUiThread { status.text = "Downloading ${m.name}: ${done * 100 / total}%" }
+                            }
+                        }
+                    }
+                    isEnabled = true
+                    refresh()
+                    result.exceptionOrNull()?.let { status.text = "Download failed: ${it.message}" }
+                }
+            }
+        })
+        refresh()
     }
 
     override fun onResume() {

@@ -25,6 +25,7 @@ dependencies {
     implementation(project(":core"))
     implementation(project(":android:osmand-api"))
     implementation(libs.coroutines.android)
+    implementation(libs.vosk.android)
     testImplementation(libs.junit4)
     testImplementation(libs.coroutines.test)
 }

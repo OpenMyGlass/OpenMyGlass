@@ -40,7 +40,19 @@ object TestNotification {
 class TestActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val id = intent.getIntExtra("id", -1)
-        Log.i("TestNotification", "test action fired for $id")
-        Toast.makeText(context, "Glass action: Ping $id", Toast.LENGTH_SHORT).show()
+        val reply = RemoteInput.getResultsFromIntent(intent)?.getCharSequence("reply")
+        if (reply == null) {
+            Log.i("TestNotification", "test action fired for $id")
+            Toast.makeText(context, "Glass action: Ping $id", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // Like a messaging app: show the reply in the notification (debug channel only; nothing is logged)
+        val nm = context.getSystemService(NotificationManager::class.java)
+        nm.notify(id, Notification.Builder(context, NotificationFilter.TEST_CHANNEL)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setContentTitle("Test $id")
+            .setContentText("Replied: $reply")
+            .setOnlyAlertOnce(true)
+            .build())
     }
 }
