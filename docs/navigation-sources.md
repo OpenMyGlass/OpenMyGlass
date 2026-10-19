@@ -46,7 +46,7 @@ The street name ("Obergass"), the remaining distance and time, and the ETA are a
 | `android.largeIcon` | maneuver icon (`Icon`, bitmap type) | same |
 
 - **The maneuver type is not in any text field: only the icon shows it.** To recover it we can:
-  1. recognize the icon with a table of icon hashes → maneuver, built from captures (the capture tool now hashes `Icon` bitmaps too, since the review fixes; not yet re-run on the emulator);
+  1. recognize the icon with a table of icon hashes → maneuver, built from captures (the capture tool hashes `Icon` bitmaps: verified on the emulator, each maneuver icon is 126×126 with a distinct SHA-256 — see `gmaps-car-it-icons.jsonl`; some maneuvers also appear as text, e.g. `Fai una inversione a U`, and rerouting shows `Rielaborazione percorso...` with no icon);
   2. forward the icon image itself to Glass at runtime, never committed;
   3. or both: recognized maneuver when known, raw icon otherwise.
 - The numbers use the locale's format (`1.3` vs `1,6`), the ETA label is localized (`ETA` vs `Arrivo`), and the separator is ` · `. The distance uses a non-breaking space (`200 m`).
