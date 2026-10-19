@@ -32,7 +32,8 @@ Piano completo del progetto: [`project-prompt.md`](project-prompt.md).
 
 - 2026-10-19 — Licenza **GPL-3.0**.
 - 2026-10-19 — Repo pubblica; workspace di reverse in `_re/` escluso da git.
+- 2026-10-19 — **Nessun hardware Glass disponibile per ora.** Si parte con emulatore/simulatore: valutare se l'immagine XE24 è avviabile in un emulatore Android (API 19) e, in ogni caso, peer simulati lato occhiali in `tools/`. I test con hardware (adb, HCI snoop) restano pianificati ma rinviati.
 
 ## Problemi aperti
 
-- Nessuno.
+- Fattibilità di un emulatore Glass XE24 (avvio dell'immagine di sistema in AVD/QEMU, Bluetooth emulato assente → serve un trasporto alternativo per i test, es. TCP).
