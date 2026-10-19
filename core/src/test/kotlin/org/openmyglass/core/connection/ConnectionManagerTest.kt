@@ -52,14 +52,17 @@ class ConnectionManagerTest {
     private val transport = ScriptedTransport()
     private val history = Collections.synchronizedList(mutableListOf<ConnectionState>(ConnectionState.Disconnected))
 
-    private fun manager(initial: Duration = 50.milliseconds, max: Duration = 200.milliseconds) =
+    private fun manager(initial: Duration = 50.milliseconds, max: Duration = 200.milliseconds, stableAfter: Duration = Duration.ZERO) =
         ConnectionManager(
             transport, { phone }, scope, Backoff(initial, max), handshakeTimeout = 300.milliseconds,
-            onStateChange = { history += it },
+            onStateChange = { history += it }, stableAfter = stableAfter,
         )
 
+    private val cursor = HistoryCursor(history)
+
+    @Suppress("UnusedReceiverParameter")
     private fun ConnectionManager.await(timeout: Duration = 3.seconds, predicate: (ConnectionState) -> Boolean) =
-        runBlocking { withTimeout(timeout) { state.first(predicate) } }
+        cursor.await(timeout, predicate)
 
     /** A Glass that handshakes, then keeps reading until the phone or the test closes the link. */
     private val goodGlass: (FakeGlass) -> Unit = { g ->

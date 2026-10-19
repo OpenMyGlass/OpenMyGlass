@@ -40,6 +40,7 @@ class ConnectionManager(
     private val linkFactory: (Channel) -> CompanionLink = { CompanionLink(it, phone) },
     /** Called synchronously on every transition (unlike [state], which may skip short-lived states). */
     private val onStateChange: (ConnectionState) -> Unit = {},
+    stableAfter: Duration = 30.seconds,
 ) {
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -69,6 +70,7 @@ class ConnectionManager(
         scope = scope,
         backoff = backoff,
         onStateChange = { s -> map(s).let { onStateChange(it); _state.value = it } },
+        stableAfter = stableAfter,
     )
 
     fun start() = manager.start()
