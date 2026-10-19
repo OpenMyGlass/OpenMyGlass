@@ -1,0 +1,14 @@
+// Generato da tools/re/nano2proto.py from AttachmentGetRequest.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.attachmentgetrequest;
+
+message AttachmentGetRequest {
+  optional string attachmentId = 1;
+  optional ScreenDimensions screenDimensions = 2;
+
+  message ScreenDimensions {
+    optional int32 widthPixels = 1;
+    optional int32 heightPixels = 2;
+  }
+}

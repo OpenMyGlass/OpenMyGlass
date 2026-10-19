@@ -1,0 +1,27 @@
+// Generato da tools/re/nano2proto.py from MessagingPersona.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.messagingpersona;
+
+message MessagingPersona {
+  optional string source = 1;
+  optional string personaId = 2;
+  optional bool isDefault = 3;
+  repeated string acceptType = 4;
+  repeated int32 sharingFeature = 5;
+  optional string displayId = 6;
+  optional string phoneNumber = 7;
+  optional PhoneNumberPersona phoneNumberPersona = 8;
+  optional DisplayMetadata displayMetadata = 9;
+
+  message DisplayMetadata {
+    optional string profileEmail = 1;
+  }
+
+  message PhoneNumberPersona {
+    optional string phoneNumber = 1;
+    optional int32 label = 2;
+    optional bool primary = 3;
+    optional uint64 phoneCallUsageTimestampMs = 4;
+  }
+}

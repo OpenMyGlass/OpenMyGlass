@@ -1,0 +1,61 @@
+// Generato da tools/re/nano2proto.py from MenuItem.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.menuitem;
+
+import "Entity.proto";
+import "MenuValue.proto";
+
+message MenuItem {
+  optional string id = 1;
+  optional int32 action = 2;  // enum? Action [unverified]
+  repeated .glass.menuvalue.MenuValue value = 3;
+  optional string broadcastAction = 5;
+  optional bool removeWhenSelected = 7;
+  optional int32 travelMode = 8;  // enum? TravelMode [unverified]
+  optional .glass.entity.Entity recipient = 9;
+  optional string payload = 10;
+  optional string voiceCommand = 11;
+
+  enum Action {
+    BROADCAST = 7;
+    CUSTOM = 0;
+    DELETE = 3;
+    GET_MEDIA_INPUT = 22;
+    HANGOUT = 14;
+    MUTE_MIC = 11;
+    NAVIGATE = 9;
+    OPEN_URI = 13;
+    PLAY_AUDIO = 25;
+    PLAY_VIDEO = 17;
+    READ_ALOUD = 5;
+    READ_MORE = 16;
+    REPLY = 2;
+    REPLY_ALL = 6;
+    RETRY = 24;
+    SEARCH = 10;
+    SEND = 21;
+    SEND_MESSAGE = 18;
+    SEND_TO_PHONE = 12;
+    SHARE = 4;
+    SHARE_LOCATION = 23;
+    SHOW_RECIPIENTS = 20;
+    TOGGLE_PINNED = 15;
+    VOICE_CALL = 8;
+    VOLUME = 19;
+  }
+
+  enum State {
+    CONFIRMED = 2;
+    DEFAULT = 0;
+    PENDING = 1;
+  }
+
+  enum TravelMode {
+    BICYCLING = 3;
+    DRIVING = 1;
+    MOST_RECENTLY_USED = 0;
+    TRANSIT = 4;
+    WALKING = 2;
+  }
+}

@@ -1,0 +1,35 @@
+// Generato da tools/re/nano2proto.py from SetupNano.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.setupnano;
+
+import "BuildNano.proto";
+
+message SetupUserAccountRequest {
+  optional string deviceId = 1;
+  optional string serialNumber = 2;
+  optional .glass.buildnano.Build build = 4;
+  optional string wifiMacAddress = 5;
+  optional string locale = 6;
+}
+
+message SetupUserAccountResponse {
+  optional string displayName = 1;
+  optional string photoUrl = 2;
+  optional bool useGoogleVoiceSms = 3;
+  optional int64 lockCode = 4;
+}
+
+message SetupSharedKeyRequest {
+  optional int32 requestSource = 1;  // enum? RequestSource [unverified]
+
+  enum RequestSource {
+    ANDROID_COMPANION = 1;
+    GLASS = 0;
+    IOS_COMPANION = 2;
+  }
+}
+
+message SetupSharedKeyResponse {
+  optional bytes key = 1;
+}

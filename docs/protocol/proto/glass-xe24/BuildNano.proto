@@ -1,0 +1,16 @@
+// Generato da tools/re/nano2proto.py from BuildNano.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.buildnano;
+
+enum BuildType {
+  ENG = 2;
+  USER = 0;
+  USERDEBUG = 1;
+}
+
+message Build {
+  optional int32 buildType = 1;
+  optional string buildDisplayId = 2;
+  optional string buildVersion = 3;
+}

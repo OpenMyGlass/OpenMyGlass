@@ -1,0 +1,5 @@
+// Generato da tools/re/nano2proto.py from SharingFeature.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.sharingfeature;
+

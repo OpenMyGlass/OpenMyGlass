@@ -1,0 +1,8 @@
+// Generato da tools/re/nano2proto.py from LoggingAnnotations.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.loggingannotations;
+
+message LoggingAnnotations {
+  optional int32 cardType = 51;
+}

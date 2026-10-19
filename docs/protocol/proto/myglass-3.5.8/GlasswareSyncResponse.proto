@@ -1,0 +1,14 @@
+// Generato da tools/re/nano2proto.py from GlasswareSyncResponse.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.glasswaresyncresponse;
+
+import "Account.proto";
+import "InstalledGlassware.proto";
+
+message GlasswareSyncResponse {
+  repeated .glass.installedglassware.InstalledGlassware installedGlassware = 1;
+  optional int64 syncTimestampUs = 2;
+  repeated .glass.account.Account account = 3;
+  optional bool hasCompletedTutorialTask = 4;
+}

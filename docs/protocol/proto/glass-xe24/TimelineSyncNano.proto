@@ -1,0 +1,64 @@
+// Generato da tools/re/nano2proto.py from TimelineSyncNano.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.timelinesyncnano;
+
+import "TimelineNano.proto";
+
+message TimelineSyncRequest {
+  optional Select select = 1;
+  repeated InsertReplaceOnConflict insertReplaceOnConflict = 2;
+  repeated Update update = 3;
+  repeated Delete delete = 4;
+  optional string deviceId = 5;
+}
+
+message TimelineSyncResponse {
+  optional int32 responseCode = 1;  // enum? ResponseCode [unverified]
+  repeated .glass.timelinenano.TimelineItem selectedItems = 2;
+  repeated string insertFailedItemIds = 3;
+  repeated string updateFailedItemIds = 4;
+  repeated string deleteFailedItemIds = 5;
+  optional uint64 syncStartTime = 6;
+  optional uint64 syncEndTime = 7;
+  optional bytes syncContinuationToken = 8;
+  optional uint64 selectStartTime = 9;
+  optional bytes selectContinuationToken = 10;
+  optional uint64 selectMaxWriteTimestamp = 11;
+
+  enum ResponseCode {
+    SUCCESS = 0;
+  }
+}
+
+message Select {
+  optional uint32 maxItems = 1;
+  optional uint64 writeAfterTime = 2;
+  optional uint64 writeBeforeTime = 3;
+  optional bytes continuationToken = 4;
+  optional uint64 modifiedAfterTime = 7;
+  optional uint64 modifiedBeforeTime = 8;
+  optional uint64 startTime = 9;
+}
+
+message InsertReplaceOnConflict {
+  optional .glass.timelinenano.TimelineItem timelineItem = 1;
+  repeated .glass.timelinenano.UserAction userAction = 2;
+}
+
+message Update {
+  optional Mutations mutations = 1;
+  optional string timelineItemId = 2;
+  repeated .glass.timelinenano.UserAction userAction = 3;
+
+  message Mutations {
+    optional .glass.timelinenano.TimelineItem item = 1;
+    repeated uint32 itemFieldDeletions = 2;
+    repeated string attachmentDeletions = 3;
+  }
+}
+
+message Delete {
+  optional string timelineItemId = 1;
+  repeated .glass.timelinenano.UserAction userAction = 2;
+}

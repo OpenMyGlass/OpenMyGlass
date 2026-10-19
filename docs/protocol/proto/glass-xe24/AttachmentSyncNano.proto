@@ -1,0 +1,45 @@
+// Generato da tools/re/nano2proto.py from AttachmentSyncNano.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.attachmentsyncnano;
+
+message AttachmentGetRequest {
+  optional string attachmentId = 1;
+  optional ScreenDimensions screenDimensions = 2;
+
+  message ScreenDimensions {
+    optional int32 widthPixels = 1;
+    optional int32 heightPixels = 2;
+  }
+}
+
+message AttachmentGetResponse {
+  optional int32 responseCode = 1;  // enum? ResponseCode [unverified]
+  optional string mimeType = 2;
+  optional bytes content = 3;
+
+  enum ResponseCode {
+    FAIL = 1;
+    SUCCESS = 0;
+  }
+}
+
+message AttachmentInsertRequest {
+  optional string deviceId = 1;
+  optional string mimeType = 2;
+  optional bytes content = 3;
+  optional string description = 4;
+  optional string name = 5;
+  optional uint64 creationTime = 6;
+  optional string source = 7;
+}
+
+message AttachmentInsertResponse {
+  optional int32 responseCode = 1;  // enum? ResponseCode [unverified]
+  optional string attachmentId = 2;
+
+  enum ResponseCode {
+    FAIL = 1;
+    SUCCESS = 0;
+  }
+}

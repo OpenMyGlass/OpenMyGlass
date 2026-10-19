@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test di tools/re/apk-info.sh: rifiuta bundle split e file mancanti, stampa package/hash/certificato per un APK reale.
+# Tests for tools/re/apk-info.sh: rejects split bundles and missing files, prints package/hash/certificate for a real APK.
 set -u
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/re/apk-info.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -9,18 +9,18 @@ ok() { echo "PASS $1"; pass=$((pass+1)); }
 ko() { echo "FAIL $1"; echo "$2" | sed 's/^/    /'; fail=$((fail+1)); }
 
 touch "$TMP/x.xapk"; out="$(bash "$SCRIPT" "$TMP/x.xapk" 2>&1)"; rc=$?
-[ $rc -eq 2 ] && echo "$out" | grep -q 'bundle split' && ok "xapk rifiutato con exit 2" || ko "xapk rifiutato con exit 2" "rc=$rc $out"
+[ $rc -eq 2 ] && echo "$out" | grep -q 'split bundle' && ok "xapk rejected with exit 2" || ko "xapk rejected with exit 2" "rc=$rc $out"
 
 touch "$TMP/x.apks"; out="$(bash "$SCRIPT" "$TMP/x.apks" 2>&1)"; rc=$?
-[ $rc -eq 2 ] && ok "apks rifiutato con exit 2" || ko "apks rifiutato con exit 2" "rc=$rc $out"
+[ $rc -eq 2 ] && ok "apks rejected with exit 2" || ko "apks rejected with exit 2" "rc=$rc $out"
 
 out="$(bash "$SCRIPT" "$TMP/missing.apk" 2>&1)"; rc=$?
-[ $rc -ne 0 ] && ok "file mancante -> exit != 0" || ko "file mancante -> exit != 0" "$out"
+[ $rc -ne 0 ] && ok "missing file -> exit != 0" || ko "missing file -> exit != 0" "$out"
 
-if [ -z "$SAMPLE" ]; then ko "APK di esempio disponibile" "nessun .apk nell'SDK"; else
+if [ -z "$SAMPLE" ]; then ko "sample APK available" "no .apk in the SDK"; else
   out="$(bash "$SCRIPT" "$SAMPLE" 2>&1)"; rc=$?
-  [ $rc -eq 0 ] && echo "$out" | grep -q "^package: name='" && ok "stampa package" || ko "stampa package" "$out"
-  echo "$out" | grep -qE '^file_sha256: [0-9a-f]{64}$' && ok "stampa sha256 file" || ko "stampa sha256 file" "$out"
-  echo "$out" | grep -q 'certificate SHA-256 digest' && ok "stampa digest certificato" || ko "stampa digest certificato" "$out"
+  [ $rc -eq 0 ] && echo "$out" | grep -q "^package: name='" && ok "prints package" || ko "prints package" "$out"
+  echo "$out" | grep -qE '^file_sha256: [0-9a-f]{64}$' && ok "prints file sha256" || ko "prints file sha256" "$out"
+  echo "$out" | grep -q 'certificate SHA-256 digest' && ok "prints certificate digest" || ko "prints certificate digest" "$out"
 fi
 echo "$pass passed, $fail failed"; [ $fail -eq 0 ]
