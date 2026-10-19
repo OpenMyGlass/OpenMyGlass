@@ -1,6 +1,6 @@
 # OpenMyGlass architecture (Phase 3)
 
-Status: **draft for the owner's review** (2026-10-19), updated with the owner's answers on navigation source, Android Auto, hardware and offline transcription. Inputs: [`project-brief.md`](project-brief.md), [`feature-inventory.md`](feature-inventory.md), [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [`cloud-dependencies.md`](cloud-dependencies.md), [`prior-art.md`](prior-art.md), [`emulator-feasibility.md`](emulator-feasibility.md).
+Status: **draft for the owner's review** (2026-10-19), updated with the owner's answers on navigation source, Android Auto, hardware, offline transcription, the optional minimap and iOS readiness. Inputs: [`project-brief.md`](project-brief.md), [`feature-inventory.md`](feature-inventory.md), [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [`cloud-dependencies.md`](cloud-dependencies.md), [`prior-art.md`](prior-art.md), [`emulator-feasibility.md`](emulator-feasibility.md).
 
 ## 1. Intent
 
@@ -12,9 +12,10 @@ A local, cloud-free replacement for MyGlass for one Glass Explorer Edition on **
 
 **Glass battery life is an explicit constraint** set by the owner.
 
-**No Glass hardware is available yet.** A phase counts as done when it passes its tests against the simulated Glass peer and the emulators; what can only be confirmed on a device goes into the hardware checklist (§10) and is verified when Glass is available.
+**No Glass hardware is available yet.** A phase counts as done when it passes its tests against the simulated Glass peer and the emulators; what can only be confirmed on a device goes into the hardware checklist (§11) and is verified when Glass is available.
 
 ### Goals
+- **Optional minimap** on the navigation card (the owner's request), off by default, toggled from the phone app or on Glass.
 - Navigation card driven by a phone navigation source (an app with a navigation API first, Google Maps' notification as best-effort fallback), readable at a glance, updating by itself, working with Android Auto connected.
 - Phone notifications on Glass, dismissed in sync, with dictated replies through `RemoteInput`.
 - Automatic media sync under charging + Wi-Fi, plus on-demand transfer.
@@ -115,6 +116,12 @@ interface Transport {            // one bidirectional byte stream to the glasses
 - **To Glass:** `NavUpdate{maneuver text, distance, street, eta, icon_id}`. Icons are sent once and cached by hash on Glass; updates carry only changed fields. Updates are sent when the source reports a change, with no polling.
 - **On Glass:** a GDK **LiveCard** (published to the timeline as "now") renders the maneuver at 640×360. The screen is woken (wakelock with `ACQUIRE_CAUSES_WAKEUP`) only when the maneuver gets close (a distance threshold, to be tuned) or changes, then turns off by itself. The card is removed when navigation ends.
 - **Latency budget:** from source update to card update **under 1 s** on Bluetooth (target to verify on hardware).
+- **Minimap (optional):**
+  - **Rendered on the phone, never on Glass** (battery): a small north-up or heading-up map image around the current position, with the route line when the source provides route geometry. It is sent as `MapFrame{image, bearing, scale}` and shown in a corner of the navigation card, or full card on a tap.
+  - Renderer: an offline map renderer on the phone. On Android, MapLibre with offline OSM tiles, or OsmAnd if its API can provide a map snapshot **[unverified]**. On iOS, `MKMapSnapshotter`. The builder chooses the renderer; tiles come from offline/OSM data, not Google servers for Glass.
+  - Fallback renderer on Android: cropping the navigation app's screen with MediaProjection (the brief's experimental mirroring option), only while the owner enables it.
+  - **Rate and size:** low resolution (around 200–240 px), compressed, sent only when it changes meaningfully. That means every few seconds while moving and more often close to a maneuver; exact rates are tuned to stay inside BLE throughput for iOS. The minimap stops when Glass's screen is off.
+  - Off by default; it costs Bluetooth airtime and Glass screen time.
 - **A fallback** (no bridge app installed): a single native timeline item updated in place (`timelineItem`, field 5). It is coarser (no wake control) and only a fallback.
 
 ### 5.3 Notifications and dictated replies — B (A fallback)
@@ -162,14 +169,14 @@ interface Transport {            // one bidirectional byte stream to the glasses
 1. `core` skeleton: `Transport`, framing, connection state machine, `sim-glass` peer over TCP.
 2. CompanionLink (A): handshake, device info and battery, time zone, reconnection, against `sim-glass`.
 3. Navigation sources: OsmAnd API check and adapter; Google Maps notification capture tool, fixture corpus and parser; Android Auto checks on the emulator.
-4. Bridge app skeleton (`glass-xe`, GDK toolchain) + BridgeLink + **navigation card**.
+4. Bridge app skeleton (`glass-xe`, GDK toolchain) + BridgeLink + **navigation card**, then the optional **minimap**.
 5. Notifications: read and dismiss, then actions, then dictated replies.
 6. Location (A).
 7. Media sync (auto + on demand).
 8. Wi-Fi setup, screencast, remote control, text input (A).
 9. Settings and app management (sideload helper).
 
-All steps run without hardware (sim-glass, emulators); each step adds its device-only checks to the hardware checklist in §10.
+All steps run without hardware (sim-glass, emulators); each step adds its device-only checks to the hardware checklist in §11.
 
 ## 8. Decisions made by the assistant (owner may override)
 - Phone app **Kotlin**, minSdk **29** (Android 10), current targetSdk. The Android on-device recognizer path needs API 33+; on older phones the bundled offline engine is used. The owner's phone model is not known yet.
@@ -186,7 +193,19 @@ All steps run without hardware (sim-glass, emulators); each step adds its device
 - Audio encoding for dictation, the media transfer protocol (HTTP or raw TCP), LAN discovery method.
 - The bridge app's RFCOMM UUID (a new random UUID, documented in `protocol/openmyglass/`).
 
-## 10. Testing
+## 10. iOS readiness
+
+iOS cannot use the CompanionLink (no Bluetooth Classic RFCOMM to non-MFi devices), so on iOS **everything goes through the bridge app**. The architecture keeps that path open:
+
+- **One bridge protocol for both phones:** `openmyglass.v1` is the only contract the bridge app knows. Android and iOS clients send the same messages (`NavUpdate`, `MapFrame`, notifications, audio, media), so the Glass app does not change.
+- **Transports:** the bridge app gets a **BLE peripheral/central transport** (GATT service with a write characteristic and a notify characteristic carrying the same varint-framed messages) and keeps TCP over the LAN for media. IrisGlass shows that XE24 can do BLE with an iPhone ([`prior-art.md`](prior-art.md)). Message sizes are designed for BLE: icons cached by hash, minimap frames small and rate-limited, audio chunked.
+- **Feature logic:** `core` stays free of Android APIs so that its state machines and message handling can be mirrored in Swift (or shared later through Kotlin Multiplatform; builder's call when the iOS phase starts).
+- **What changes on iOS** (detail for `docs/ios-plan.md`, Phase 5):
+  - Navigation source: iOS does not expose other apps' navigation, so the iOS app does its own routing (MapKit `MKDirections`) and uses `MKMapSnapshotter` for the minimap.
+  - Notifications: read on Glass through **ANCS**. The bridge app talks to the iPhone's notification service directly over BLE, with positive/negative actions only and no free-text replies.
+  - Background limits restrict what works with the iOS app closed.
+
+## 11. Testing
 - **Unit (JVM):** framing, `Envelope` encoding against the reconstructed schema, connection state machine, Maps notification parser on the captured fixture corpus, `NavUpdate` diffing.
 - **Integration without hardware:** phone app (debug build with `TcpTransport`) on an Android emulator ↔ `sim-glass` through `adb reverse`; bridge app logic on an arm64 AVD with GDK stubs (see [`emulator-feasibility.md`](emulator-feasibility.md)).
 - **Hardware checklist** (kept in `docs/progress.md`, filled as features land): XE24 accepts our handshake; CompanionLink and BridgeLink open at the same time; LiveCard wake behavior; navigation latency under 1 s; camera folder path; adb sideloading on the owner's Glass; battery drain (§6).
