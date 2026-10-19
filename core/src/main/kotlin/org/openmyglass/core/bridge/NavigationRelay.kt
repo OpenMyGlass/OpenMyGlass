@@ -40,11 +40,15 @@ class NavigationRelay(
     }
 
     /** A bridge session; [detach] only ends the session it is given (a late cleanup cannot end a newer one). */
-    class Session internal constructor(internal val send: suspend (Frame) -> Unit)
+    class Session internal constructor(internal val send: suspend (Frame) -> Unit, internal val onFailure: () -> Unit)
 
-    /** Starts a bridge session, replacing any previous one: the current state (and its icon) is sent right away. */
-    suspend fun attach(send: suspend (Frame) -> Unit): Session = lock.withLock {
-        val session = Session(send)
+    /**
+     * Starts a bridge session, replacing any previous one: the current state (and its icon) is sent right away.
+     * [onFailure] runs when a send fails and the relay drops the session; the owner should close the link so it
+     * reconnects (an open link the relay no longer feeds would leave Glass without updates).
+     */
+    suspend fun attach(onFailure: () -> Unit = {}, send: suspend (Frame) -> Unit): Session = lock.withLock {
+        val session = Session(send, onFailure)
         active = session
         lastSent = null
         sentIcons.clear()
@@ -94,6 +98,7 @@ class NavigationRelay(
         } catch (_: Exception) {
             if (active === session) active = null
             lastSent = null
+            runCatching { session.onFailure() }
             false
         }
     }

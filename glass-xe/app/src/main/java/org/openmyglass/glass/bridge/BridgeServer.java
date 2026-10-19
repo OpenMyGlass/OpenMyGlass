@@ -2,15 +2,19 @@ package org.openmyglass.glass.bridge;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.net.ServerSocket;
-import java.net.Socket;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Timer;
+import java.util.TimerTask;
 
 import org.openmyglass.protocol.v1.Bridge;
 
 /**
- * Glass side of the OpenMyGlass bridge (protocol openmyglass.v1) over TCP. One session at a time:
- * a new connection replaces the active one, because it means the phone reconnected.
- * The phone speaks first; we answer its Hello. Blocking I/O on two threads (accept, session).
+ * Glass side of the OpenMyGlass bridge (protocol openmyglass.v1). Accepts on one or more {@link ServerChannel}s
+ * (TCP, Bluetooth RFCOMM) with one session at a time across all of them: a new connection replaces the active
+ * one, because it means the phone reconnected. The phone speaks first; we answer its Hello.
+ * Blocking I/O: one accept thread per channel, one thread per session.
  */
 public final class BridgeServer implements Closeable {
 
@@ -27,62 +31,104 @@ public final class BridgeServer implements Closeable {
 
     public static final int PROTOCOL_VERSION = 1;
     public static final int DEFAULT_HELLO_TIMEOUT_MS = 5_000;
+    public static final int DEFAULT_REOPEN_DELAY_MS = 5_000;
+    private static final int MAX_REOPEN_DELAY_MS = 60_000;
 
-    private final int port;
+    private final List<ServerChannel> channels;
     private final FrameHandler handler;
     private final int helloTimeoutMs;
-    private volatile ServerSocket server;
+    private final int reopenDelayMs;
+    private final Timer helloTimer = new Timer("bridge-hello-timeout", true);
     private volatile boolean closed;
-    private Socket activeSocket;
+    private ServerChannel.Connection activeConnection;
     private Thread activeThread;
 
     public BridgeServer(int port, FrameHandler handler) {
         this(port, handler, DEFAULT_HELLO_TIMEOUT_MS);
     }
 
-    /**
-     * A connection becomes the active session only after it sends a valid Hello within {@code helloTimeoutMs}:
-     * a stray connection (e.g. a port scan on the same Wi-Fi) cannot drop the phone's session. The TCP port has
-     * no authentication yet; Bluetooth bonding provides it in plan 4e.
-     */
     public BridgeServer(int port, FrameHandler handler, int helloTimeoutMs) {
-        this.port = port;
-        this.handler = handler;
-        this.helloTimeoutMs = helloTimeoutMs;
+        this(Collections.<ServerChannel>singletonList(new TcpServerChannel(port)), handler, helloTimeoutMs);
     }
 
-    /** Starts listening and returns the bound port. */
+    public BridgeServer(List<ServerChannel> channels, FrameHandler handler, int helloTimeoutMs) {
+        this(channels, handler, helloTimeoutMs, DEFAULT_REOPEN_DELAY_MS);
+    }
+
+    /**
+     * A connection becomes the active session only after it sends a valid Hello within {@code helloTimeoutMs}:
+     * a stray connection (e.g. a port scan on the same Wi-Fi) cannot drop the phone's session. A channel whose
+     * accept fails (Bluetooth turned off) is reopened after {@code reopenDelayMs}, doubling up to 60 s.
+     */
+    public BridgeServer(List<ServerChannel> channels, FrameHandler handler, int helloTimeoutMs, int reopenDelayMs) {
+        this.channels = new ArrayList<ServerChannel>(channels);
+        this.handler = handler;
+        this.helloTimeoutMs = helloTimeoutMs;
+        this.reopenDelayMs = reopenDelayMs;
+    }
+
+    /**
+     * Starts listening on every channel and returns the port of the first TCP channel (-1 if none).
+     * A channel that cannot open now (Bluetooth off) is retried in the background; a TCP port that cannot be
+     * bound fails here.
+     */
     public int start() {
-        try {
-            server = new ServerSocket(port);
-        } catch (IOException e) {
-            throw new IllegalStateException("cannot listen on port " + port, e);
+        int port = -1;
+        for (final ServerChannel channel : channels) {
+            boolean opened = true;
+            try {
+                channel.open();
+            } catch (IOException e) {
+                if (channel instanceof TcpServerChannel) throw new IllegalStateException("cannot listen", e);
+                opened = false;
+            }
+            if (port < 0 && channel instanceof TcpServerChannel) port = ((TcpServerChannel) channel).localPort();
+            final boolean ready = opened;
+            Thread accept = new Thread(new Runnable() {
+                @Override public void run() { acceptLoop(channel, ready); }
+            }, "bridge-accept");
+            accept.setDaemon(true);
+            accept.start();
         }
-        Thread accept = new Thread(new Runnable() {
-            @Override public void run() { acceptLoop(); }
-        }, "bridge-accept");
-        accept.setDaemon(true);
-        accept.start();
-        return server.getLocalPort();
+        return port;
     }
 
     @Override
     public void close() {
         closed = true;
-        closeQuietly(server);
+        for (ServerChannel channel : channels) channel.close();
+        helloTimer.cancel();
         replaceSession(null, null);
     }
 
-    private void acceptLoop() {
+    private void acceptLoop(ServerChannel channel, boolean opened) {
+        int delay = reopenDelayMs;
         while (!closed) {
-            final Socket socket;
-            try {
-                socket = server.accept();
-            } catch (IOException e) {
-                return;
+            if (!opened) {
+                try {
+                    Thread.sleep(delay);
+                    if (closed) return;
+                    channel.open();
+                    opened = true;
+                } catch (InterruptedException e) {
+                    return;
+                } catch (IOException e) {
+                    delay = Math.min(delay * 2, MAX_REOPEN_DELAY_MS);
+                    continue;
+                }
             }
+            final ServerChannel.Connection connection;
+            try {
+                connection = channel.accept();
+            } catch (IOException e) {
+                if (closed) return;
+                channel.close();
+                opened = false;
+                continue;
+            }
+            delay = reopenDelayMs;
             Thread session = new Thread(new Runnable() {
-                @Override public void run() { serve(socket); }
+                @Override public void run() { serve(connection); }
             }, "bridge-session");
             session.setDaemon(true);
             session.start();
@@ -90,32 +136,39 @@ public final class BridgeServer implements Closeable {
     }
 
     /** Ends the active session (its onSessionEnded runs before the new session can start). */
-    private synchronized void replaceSession(Socket socket, Thread thread) {
-        if (activeSocket != null) {
-            closeQuietly(activeSocket);
+    private synchronized void replaceSession(ServerChannel.Connection connection, Thread thread) {
+        if (activeConnection != null) {
+            closeQuietly(activeConnection);
             try {
                 activeThread.join(2_000);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
-        activeSocket = socket;
+        activeConnection = connection;
         activeThread = thread;
     }
 
-    private void serve(final Socket socket) {
+    private void serve(final ServerChannel.Connection connection) {
         boolean started = false;
+        // RFCOMM sockets have no read timeout: close the connection if no Hello arrives in time
+        TimerTask helloDeadline = new TimerTask() {
+            @Override public void run() { closeQuietly(connection); }
+        };
         try {
-            socket.setSoTimeout(helloTimeoutMs);
-            Bridge.Frame first = read(socket);
-            if (first == null || !first.hasHello()) return;
-            socket.setSoTimeout(0);
-            replaceSession(socket, Thread.currentThread());
+            try {
+                helloTimer.schedule(helloDeadline, helloTimeoutMs);
+            } catch (IllegalStateException e) {
+                return;   // server closed
+            }
+            Bridge.Frame first = read(connection);
+            if (first == null || !first.hasHello() || !helloDeadline.cancel()) return;
+            replaceSession(connection, Thread.currentThread());
             final Object writeLock = new Object();
             Sender sender = new Sender() {
                 @Override public void send(Bridge.Frame frame) throws IOException {
                     synchronized (writeLock) {
-                        Framing.write(socket.getOutputStream(), frame.toByteArray());
+                        Framing.write(connection.output(), frame.toByteArray());
                     }
                 }
             };
@@ -125,17 +178,18 @@ public final class BridgeServer implements Closeable {
             handler.onSessionStarted(sender);
             started = true;
             Bridge.Frame frame;
-            while ((frame = read(socket)) != null) handler.onFrame(frame);
+            while ((frame = read(connection)) != null) handler.onFrame(frame);
         } catch (IOException e) {
             // malformed frame, link dropped or session replaced: the session ends, the server keeps accepting
         } finally {
-            closeQuietly(socket);
+            helloDeadline.cancel();
+            closeQuietly(connection);
             if (started) handler.onSessionEnded();
         }
     }
 
-    private static Bridge.Frame read(Socket socket) throws IOException {
-        byte[] payload = Framing.read(socket.getInputStream());
+    private static Bridge.Frame read(ServerChannel.Connection connection) throws IOException {
+        byte[] payload = Framing.read(connection.input());
         return payload == null ? null : Bridge.Frame.parseFrom(payload);
     }
 

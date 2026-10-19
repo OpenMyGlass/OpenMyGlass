@@ -143,4 +143,13 @@ class NavigationRelayTest {
         assertEquals(1, fresh.count { it.hasNavEnded() })
         assertEquals(0, fresh.count { it.hasNav() })
     }
+
+    @Test
+    fun `a failed send tells the session owner so the link can be closed`() {
+        // Without this the link stays open while the relay no longer feeds it: Glass shows nothing until a reconnect
+        var failed = false
+        runBlocking { relay.attach(send = { throw java.io.IOException("broken pipe") }, onFailure = { failed = true }) }
+        osmand.flow.value = nav(100)
+        assertEquals(true, failed)
+    }
 }

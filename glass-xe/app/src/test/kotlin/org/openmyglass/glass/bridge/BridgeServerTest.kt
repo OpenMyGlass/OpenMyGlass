@@ -110,4 +110,52 @@ class BridgeServerTest {
             }
         } finally { quick.close() }
     }
+
+    @Test
+    fun `sessions from two channels replace each other`() = runBlocking {
+        // Two TCP channels stand in for TCP + RFCOMM: one active session across all of them
+        val a = TcpServerChannel(0)
+        val b = TcpServerChannel(0)
+        val log = Collections.synchronizedList(mutableListOf<String>())
+        val multi = BridgeServer(listOf(a, b), object : BridgeServer.FrameHandler {
+            override fun onSessionStarted(sender: BridgeServer.Sender) { log += "started" }
+            override fun onFrame(frame: Bridge.Frame) {}
+            override fun onSessionEnded() { log += "ended" }
+        }, BridgeServer.DEFAULT_HELLO_TIMEOUT_MS)
+        multi.start()
+        try {
+            BridgeLink(TcpTransport("127.0.0.1", a.localPort()).connect(), "test").handshake()
+            await { log.size == 1 }
+            BridgeLink(TcpTransport("127.0.0.1", b.localPort()).connect(), "test").handshake()
+            await { log.size == 3 }
+            assertEquals(listOf("started", "ended", "started"), log.toList())
+        } finally { multi.close() }
+    }
+
+    @Test
+    fun `a failing channel is reopened`() = runBlocking {
+        // e.g. Bluetooth turned off and on again on Glass: the RFCOMM listener must come back
+        val tcp = TcpServerChannel(0)
+        val flaky = object : ServerChannel {
+            var failures = 1
+            override fun open() = tcp.open()
+            override fun accept(): ServerChannel.Connection {
+                if (failures-- > 0) { tcp.close(); throw java.io.IOException("adapter off") }
+                return tcp.accept()
+            }
+            override fun close() = tcp.close()
+        }
+        val log = Collections.synchronizedList(mutableListOf<String>())
+        val retrying = BridgeServer(listOf(flaky), object : BridgeServer.FrameHandler {
+            override fun onSessionStarted(sender: BridgeServer.Sender) { log += "started" }
+            override fun onFrame(frame: Bridge.Frame) {}
+            override fun onSessionEnded() {}
+        }, BridgeServer.DEFAULT_HELLO_TIMEOUT_MS, 50)
+        retrying.start()
+        try {
+            await { tcp.localPort() > 0 && flaky.failures < 0 }
+            BridgeLink(TcpTransport("127.0.0.1", tcp.localPort()).connect(), "test").handshake()
+            await { log.size == 1 }
+        } finally { retrying.close() }
+    }
 }

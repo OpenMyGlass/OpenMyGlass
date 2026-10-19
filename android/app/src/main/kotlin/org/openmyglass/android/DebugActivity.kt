@@ -60,8 +60,16 @@ class DebugActivity : Activity() {
                 text = "Connect bridge (debug TCP)"
                 setOnClickListener {
                     val (host, port) = bridgeAddress.text.toString().split(":").let { it[0] to (it.getOrNull(1)?.toIntOrNull() ?: 7824) }
-                    NavigationHub.connectBridge(host, port, appVersion = "debug")
+                    val links = org.openmyglass.android.transport.Settings(this@DebugActivity)
+                    links.save(links.load().copy(bridgeMode = org.openmyglass.android.transport.BridgeMode.TCP, tcpHost = host, tcpPort = port))
+                    if (!org.openmyglass.android.service.OpenMyGlassService.start(this@DebugActivity)) {
+                        startActivity(Intent(this@DebugActivity, SettingsActivity::class.java))
+                    }
                 }
+            })
+            addView(Button(this@DebugActivity).apply {
+                text = "Connection settings"
+                setOnClickListener { startActivity(Intent(this@DebugActivity, SettingsActivity::class.java)) }
             })
             addView(Button(this@DebugActivity).apply {
                 text = "Notification access settings"

@@ -12,6 +12,7 @@ import android.os.PowerManager;
 import com.google.android.glass.timeline.LiveCard;
 
 import org.openmyglass.glass.bridge.BridgeServer;
+import org.openmyglass.glass.bridge.BridgeChannels;
 import org.openmyglass.glass.nav.CardBinder;
 import org.openmyglass.glass.nav.HandlerScheduler;
 import org.openmyglass.glass.nav.IconCache;
@@ -20,8 +21,8 @@ import org.openmyglass.glass.nav.WakePolicy;
 
 /**
  * Runs the bridge server and shows navigation as a GDK LiveCard (RemoteViews: low battery cost, updated only
- * when the state changes). The screen is woken only per {@link WakePolicy}. Bluetooth RFCOMM is plan 4e;
- * for now the phone connects over TCP (Wi-Fi) on {@link #PORT}.
+ * when the state changes). The screen is woken only per {@link WakePolicy}. The phone connects over
+ * Bluetooth RFCOMM, or over TCP on {@link #PORT} for debugging.
  */
 public final class NavLiveCardService extends Service {
     public static final int PORT = 7825;
@@ -49,7 +50,10 @@ public final class NavLiveCardService extends Service {
                 main.post(new Runnable() { @Override public void run() { end(); } });
             }
         }, new HandlerScheduler(main), 30_000);
-        server = new BridgeServer(PORT, state);
+        // RFCOMM for the phone (bonding authenticates it); the unauthenticated TCP debug port only on debuggable builds
+        boolean debuggable = (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        server = new BridgeServer(BridgeChannels.forBuild(new RfcommServerChannel(), PORT, debuggable),
+                state, BridgeServer.DEFAULT_HELLO_TIMEOUT_MS);
         server.start();
     }
 
