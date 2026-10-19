@@ -44,4 +44,13 @@ expect "gdk.jar rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
 repo; mkdir -p "$TMP/r/x"; printf 'PK' > "$TMP/r/x/gdk.jar"; git -C "$TMP/r" add -f x/gdk.jar
 expect "gdk.jar rejected anywhere" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
 
+repo; mkdir -p "$TMP/r/glass-xe/gdk-stubs/src/main/java/com/google/android/glass"; printf '/** Compile-only stub, written by OpenMyGlass from the public GDK reference */\npackage com.google.android.glass;\n' > "$TMP/r/glass-xe/gdk-stubs/src/main/java/com/google/android/glass/A.java"; git -C "$TMP/r" add glass-xe
+expect "own GDK stub with provenance accepted" 0 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; mkdir -p "$TMP/r/glass-xe/gdk-stubs/src/main/java/com/google/android/glass"; printf 'package com.google.android.glass;\n' > "$TMP/r/glass-xe/gdk-stubs/src/main/java/com/google/android/glass/B.java"; git -C "$TMP/r" add glass-xe
+expect "stub without provenance rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; mkdir -p "$TMP/r/src/com/google"; printf '/** Compile-only stub, written by OpenMyGlass */\npackage com.google.foo;\n' > "$TMP/r/src/com/google/C.java"; git -C "$TMP/r" add src
+expect "provenance outside gdk-stubs rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
 echo "$pass passed, $fail failed"; [ $fail -eq 0 ]
