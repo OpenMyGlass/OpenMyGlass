@@ -1,0 +1,63 @@
+// Subset of the original Glass companion protocol used by OpenMyGlass.
+// Source schema (reconstructed from XE24): docs/protocol/proto/glass-xe24/Proto.proto.
+// Field names, numbers and types are copied from it; add fields from the reconstructed
+// schema as features need them. Unknown fields are ignored by protobuf on parse.
+syntax = "proto2";
+
+package openmyglass.companion;
+
+option java_package = "org.openmyglass.protocol.companion";
+option java_outer_classname = "Companion";
+
+message Envelope {
+  optional uint32 version = 1;
+  optional uint32 serialNumber = 2;
+  optional uint64 timeMillis = 3;
+  optional uint64 uptimeMillis = 4;
+  optional string timezoneC2G = 9;
+  optional GlassInfoRequest glassInfoRequestC2G = 21;
+  optional GlassInfoResponse glassInfoResponseG2C = 22;
+  optional AndroidDeviceInfo androidDeviceInfo = 30;
+  optional CompanionDeviceInfo companionDeviceInfoC2G = 31;
+  optional CompanionFeatureInfo companionFeatureInfoC2G = 32;
+  optional GlassFeatureInfo glassFeatureInfoG2C = 33;
+}
+
+message AndroidDeviceInfo {
+  optional int32 sdkVersion = 1;
+}
+
+message CompanionDeviceInfo {
+  optional bool wifiConnected = 1;
+  optional bool isInteractiveState = 2;
+  optional bool gpsEnabled = 3;
+}
+
+message CompanionFeatureInfo {
+  optional bool isPhotoSyncEnabled = 1;
+  optional bool isKeyboardTextEntrySupported = 2;
+}
+
+message GlassFeatureInfo {
+  optional bool isWallpaperFeatureEnabled = 1;
+}
+
+message GlassInfoRequest {
+  optional bool requestBatteryLevel = 1;
+  optional bool requestStorageInfo = 2;
+  optional bool requestDeviceName = 3;
+  optional bool requestSoftwareVersion = 4;
+  optional bool requestNeedSetup = 5;
+  optional bool requestScreenDimensions = 6;
+}
+
+message GlassInfoResponse {
+  optional int32 batteryLevel = 1;
+  optional int64 externalStorageTotalBytes = 2;
+  optional int64 externalStorageAvailableBytes = 3;
+  optional string deviceName = 4;
+  optional string softwareVersion = 5;
+  optional bool needSetup = 6;
+  optional int32 glassScreenWidthPixels = 7;
+  optional int32 glassScreenHeightPixels = 8;
+}
