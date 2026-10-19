@@ -3,11 +3,10 @@ package org.openmyglass.simglass
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -16,7 +15,6 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import org.openmyglass.core.companion.CompanionEvent
 import org.openmyglass.core.companion.GlassHello
 import org.openmyglass.core.companion.PhoneState
 import org.openmyglass.core.connection.Backoff
@@ -57,13 +55,8 @@ class EndToEndTest {
     @Test
     fun `connects and receives glass info`() {
         val (_, m) = startSim()
-        val info = runBlocking {
-            withTimeout(3.seconds) {
-                val pending = async { m.events.filterIsInstance<CompanionEvent.GlassInfoReceived>().first() }
-                assertEquals(ConnectionState.Connected(GlassHello(655366, 19, false)), m.state.first { it is ConnectionState.Connected })
-                pending.await().info
-            }
-        }
+        assertEquals(ConnectionState.Connected(GlassHello(655366, 19, false)), m.await { it is ConnectionState.Connected })
+        val info = runBlocking { withTimeout(3.seconds) { m.glassInfo.filterNotNull().first() } }
         assertEquals(80, info.batteryLevel)
         assertEquals("Sim Glass", info.deviceName)
     }

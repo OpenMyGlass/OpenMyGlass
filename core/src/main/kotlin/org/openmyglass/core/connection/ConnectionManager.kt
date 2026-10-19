@@ -18,6 +18,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.openmyglass.core.companion.CompanionEvent
 import org.openmyglass.core.companion.CompanionLink
 import org.openmyglass.core.companion.GlassHello
+import org.openmyglass.core.companion.GlassInfo
 import org.openmyglass.core.companion.PhoneState
 import org.openmyglass.core.transport.Channel
 import org.openmyglass.core.transport.Transport
@@ -52,6 +53,10 @@ class ConnectionManager(
 
     private val _events = MutableSharedFlow<CompanionEvent>(extraBufferCapacity = 64)
     val events: SharedFlow<CompanionEvent> = _events.asSharedFlow()
+
+    private val _glassInfo = MutableStateFlow<GlassInfo?>(null)
+    /** Latest device info of the current session; kept for late subscribers ([events] does not replay). */
+    val glassInfo: StateFlow<GlassInfo?> = _glassInfo.asStateFlow()
 
     private val wake = SignalChannel<Unit>(SignalChannel.CONFLATED)
     @Volatile private var job: Job? = null
@@ -97,23 +102,32 @@ class ConnectionManager(
         var attempt = 0
         while (scope.isActive && !stopped) {
             setState(ConnectionState.Connecting)
+            var channel: Channel? = null
+            var current: CompanionLink? = null
             try {
-                val channel = withContext(Dispatchers.IO) { transport.connect() }
-                val l = linkFactory(channel).also { link = it }
+                // Store the channel inside the block: withContext discards its result if we were cancelled
+                // meanwhile (prompt cancellation), and finally must still close a channel that connected late.
+                withContext(Dispatchers.IO) { channel = transport.connect() }
+                current = linkFactory(checkNotNull(channel)).also { link = it }
                 setState(ConnectionState.Handshaking)
-                val hello = l.handshake(handshakeTimeout)
+                val hello = current.handshake(handshakeTimeout)
                 backoff.reset()
                 attempt = 0
+                _glassInfo.value = null
                 setState(ConnectionState.Connected(hello))
-                l.requestGlassInfo()
-                l.events().collect { _events.emit(it) }
+                current.requestGlassInfo()
+                current.events().collect { event ->
+                    if (event is CompanionEvent.GlassInfoReceived) _glassInfo.value = event.info
+                    _events.emit(event)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
                 // connect refused, handshake failure, framing error or dropped link: retry below
             } finally {
-                link?.close()
-                link = null
+                current?.close()
+                runCatching { channel?.close() }
+                if (link === current) link = null
             }
             if (stopped) break
             attempt++

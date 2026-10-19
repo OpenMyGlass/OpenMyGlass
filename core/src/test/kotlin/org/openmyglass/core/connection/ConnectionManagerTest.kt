@@ -148,4 +148,63 @@ class ConnectionManagerTest {
         assertEquals(ConnectionState.Stopped, m.state.value)
         assertEquals(1, transport.connects.get())
     }
+
+    /** Channel that records whether it was closed. */
+    private class TrackedChannel(private val inner: Channel) : Channel by inner {
+        @Volatile var closed = false
+        override fun close() { closed = true; inner.close() }
+    }
+
+    @Test
+    fun `stop during a slow connect closes the late channel`() {
+        val release = java.util.concurrent.CountDownLatch(1)
+        var tracked: TrackedChannel? = null
+        transport.steps.add {
+            release.await()
+            val g = FakeGlass.open(); transport.glasses += g
+            TrackedChannel(g.phoneChannel).also { tracked = it }
+        }
+        val m = manager(); m.start()
+        m.await { it == ConnectionState.Connecting }
+        m.stop()
+        release.countDown()
+        runBlocking { withTimeout(2.seconds) { while (tracked?.closed != true) kotlinx.coroutines.delay(20) } }
+    }
+
+    @Test
+    fun `restart while an old connect is pending does not break the new link`() {
+        val release = java.util.concurrent.CountDownLatch(1)
+        transport.steps.add {
+            release.await()
+            val g = FakeGlass.open(); transport.glasses += g
+            thread(isDaemon = true) { runCatching { goodGlass(g) } }
+            g.phoneChannel
+        }
+        transport.glass(goodGlass)
+        val m = manager(); m.start()
+        m.await { it == ConnectionState.Connecting }
+        m.stop()
+        m.start()
+        m.await { it is ConnectionState.Connected }
+        release.countDown()
+        Thread.sleep(300)
+        assertTrue(m.state.value is ConnectionState.Connected)
+        runBlocking { m.requestGlassInfo() }
+    }
+
+    @Test
+    fun `latest glass info is kept for late subscribers`() {
+        transport.glass { g ->
+            g.send(FakeGlass.glassHello()); g.receive(); g.receive()
+            g.send(org.openmyglass.protocol.companion.Companion.Envelope.newBuilder().setVersion(655366)
+                .setGlassInfoResponseG2C(org.openmyglass.protocol.companion.Companion.GlassInfoResponse.newBuilder().setBatteryLevel(77))
+                .build())
+            while (true) g.receive(10_000)
+        }
+        val m = manager(); m.start()
+        m.await { it is ConnectionState.Connected }
+        Thread.sleep(300) // the response has been emitted before anyone subscribes
+        val info = runBlocking { withTimeout(2.seconds) { m.glassInfo.first { it != null } } }
+        assertEquals(77, info?.batteryLevel)
+    }
 }
