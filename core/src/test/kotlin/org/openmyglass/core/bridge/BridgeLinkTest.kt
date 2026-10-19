@@ -1,6 +1,8 @@
 package org.openmyglass.core.bridge
 
 import com.google.protobuf.ByteString
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -35,7 +37,7 @@ class BridgeLinkTest {
     @Test
     fun `handshake exchanges hellos`() = runBlocking {
         val glassHello = Hello.newBuilder().setProtocolVersion(1).setAppVersion("glass-0.1").addCapabilities("nav").build()
-        val pending = kotlinx.coroutines.async(kotlinx.coroutines.Dispatchers.IO) { link.handshake() }
+        val pending = async(Dispatchers.IO) { link.handshake() }
         val ours = peerReceive()
         assertEquals(1, ours.hello.protocolVersion)
         assertEquals("0.1.0", ours.hello.appVersion)
