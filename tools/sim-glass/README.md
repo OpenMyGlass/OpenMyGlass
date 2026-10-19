@@ -11,6 +11,14 @@ It mirrors what the firmware does according to [`docs/protocol/`](../../docs/pro
 
 It does not emulate the firmware itself: passing against sim-glass means we follow our reconstructed spec, not that real Glass accepts us. See the hardware checklist in [`docs/progress.md`](../../docs/progress.md).
 
+## Bridge mode
+
+`--bridge` simulates the **OpenMyGlass bridge app** on Glass (protocol `openmyglass.v1`, default port 7824) instead of the firmware companion server: it answers the phone's Hello, logs every navigation state and icon, and requests icons it has not received yet.
+
+```bash
+./gradlew :tools:sim-glass:run --args="--bridge"              # port 7824
+```
+
 ## Run
 
 ```bash
