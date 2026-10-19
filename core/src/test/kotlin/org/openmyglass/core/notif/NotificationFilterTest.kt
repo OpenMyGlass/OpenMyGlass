@@ -94,4 +94,11 @@ class NotificationItemTest {
         val frame = Bridge.Frame.newBuilder().setNotification(Bridge.NotificationPosted.newBuilder().setNotification(worst.toProto(true))).build()
         assertTrue(frame.serializedSize < 64 * 1024, "frame is ${frame.serializedSize} bytes")
     }
+
+    @Test
+    fun `blank actions are skipped and indices kept`() {
+        val p = item("a", "b").copy(actions = listOf(ItemAction("", false), ItemAction("Archive", false))).toProto(false)
+        assertEquals(listOf(1), p.actionsList.map { it.index })
+        assertEquals("Archive", p.actionsList.single().title)
+    }
 }

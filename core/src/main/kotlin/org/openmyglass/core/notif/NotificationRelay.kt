@@ -45,6 +45,14 @@ class NotificationRelay(
         if (items.remove(key) != null) sendRemoval(key)
     }
 
+    /** Removes every notification (e.g. the owner turned notifications off). */
+    suspend fun clear() = lock.withLock {
+        for (key in items.keys.toList()) {
+            items.remove(key)
+            sendRemoval(key)
+        }
+    }
+
     /** Starts a session (replacing any previous one) and sends the current set. See NavigationRelay.attach. */
     suspend fun attach(onFailure: () -> Unit = {}, send: suspend (Frame) -> Unit): Session = lock.withLock {
         val session = Session(send, onFailure)

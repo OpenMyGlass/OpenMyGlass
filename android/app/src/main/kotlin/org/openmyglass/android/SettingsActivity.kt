@@ -19,7 +19,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import org.openmyglass.android.nav.NavigationHub
 import org.openmyglass.android.service.OpenMyGlassService
 import org.openmyglass.android.transport.BridgeMode
 import org.openmyglass.android.transport.Settings
@@ -83,9 +82,41 @@ class SettingsActivity : Activity() {
                 text = "Disconnect"
                 setOnClickListener { OpenMyGlassService.stop(this@SettingsActivity) }
             })
+            addNotificationSettings(this)
         }
         setContentView(ScrollView(this).apply { fitsSystemWindows = true; addView(content) })
-        scope.launch { NavigationHub.bridgeStatus.collect { status.text = it } }
+        scope.launch { PhoneHub.bridgeStatus.collect { status.text = it } }
+    }
+
+    /** Notifications on Glass: on/off, wake, and a mute list of the apps seen since the app started. */
+    private fun addNotificationSettings(content: LinearLayout) {
+        val store = org.openmyglass.android.notifications.NotificationSettings(this)
+        val prefs = store.load()
+        content.addView(TextView(this).apply { text = "Notifications on Glass:" })
+        content.addView(CheckBox(this).apply {
+            text = "Show phone notifications on Glass"
+            isChecked = prefs.enabled
+            setOnCheckedChangeListener { _, on ->
+                store.save(store.load().copy(enabled = on))
+                if (!on) PhoneHub.notificationsDisabled()
+            }
+        })
+        content.addView(CheckBox(this).apply {
+            text = "Wake Glass for new messages, calls, alarms and reminders"
+            isChecked = prefs.wake
+            setOnCheckedChangeListener { _, on -> store.save(store.load().copy(wake = on)) }
+        })
+        content.addView(TextView(this).apply { text = "Mute apps:" })
+        PhoneHub.seenApps.entries.sortedBy { it.value.lowercase() }.forEach { (pkg, name) ->
+            content.addView(CheckBox(this).apply {
+                text = name
+                isChecked = pkg in prefs.muted
+                setOnCheckedChangeListener { _, muted ->
+                    val now = store.load()
+                    store.save(now.copy(muted = if (muted) now.muted + pkg else now.muted - pkg))
+                }
+            })
+        }
     }
 
     override fun onResume() {

@@ -32,7 +32,8 @@ data class NotificationItem(
         b.postedAtMs = postedAt
         b.wake = wake
         iconSha256?.let { b.iconSha256 = ByteString.copyFrom(it.chunked(2).map { h -> h.toInt(16).toByte() }.toByteArray()) }
-        actions.take(ACTIONS_MAX).forEachIndexed { i, a ->
+        // Untitled actions cannot be shown; the index stays the action's position on the phone
+        actions.withIndex().filter { it.value.title.isNotBlank() }.take(ACTIONS_MAX).forEach { (i, a) ->
             b.addActions(Bridge.NotificationActionInfo.newBuilder().setIndex(i).setTitle(a.title.clip(ACTION_TITLE_MAX)).setReply(a.reply))
         }
     }.build()

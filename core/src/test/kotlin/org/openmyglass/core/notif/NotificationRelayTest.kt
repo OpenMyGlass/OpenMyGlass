@@ -96,4 +96,15 @@ class NotificationRelayTest {
         sent.clear(); attach()
         assertEquals(1, sent.count { it.hasIcon() })
     }
+
+    @Test
+    fun `clear removes everything from glass`() = runBlocking {
+        // Turning notifications off in settings
+        attach()
+        relay.posted(item("k1")); relay.posted(item("k2"))
+        relay.clear()
+        assertEquals(listOf("k1", "k2"), sent.filter { it.hasNotificationRemoved() }.map { it.notificationRemoved.key })
+        sent.clear(); attach()
+        assertEquals(0, sent.size)
+    }
 }
