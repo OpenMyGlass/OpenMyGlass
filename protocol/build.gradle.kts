@@ -6,7 +6,7 @@ plugins {
 kotlin { jvmToolchain(17) }
 
 sourceSets {
-    main { proto { srcDir("companion") } }
+    main { proto { srcDir("companion"); srcDir("openmyglass") } }
 }
 
 dependencies {
