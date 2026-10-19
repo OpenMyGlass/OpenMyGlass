@@ -7,24 +7,34 @@ import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import org.openmyglass.android.nav.IconEncoder
-import org.openmyglass.android.nav.NavigationHub
+import org.openmyglass.android.PhoneHub
 import org.openmyglass.core.nav.NotificationText
 import org.openmyglass.core.nav.OsmAndNotificationParser
 import java.io.File
 
 /**
- * Notification access for OpenMyGlass. For now it only has a capture mode that records navigation
- * notifications (Google Maps, OsmAnd) as JSON lines, to learn which fields they carry.
+ * Notification access for OpenMyGlass: feeds the navigation sources (Google Maps, OsmAnd notifications) and the
+ * notification relay to Glass, and carries out actions chosen on Glass. Capture mode (debug, opt-in) records
+ * navigation notifications as JSON lines.
  */
 class OpenMyGlassNotificationListener : NotificationListenerService() {
 
     override fun onListenerConnected() {
-        NavigationHub.init(applicationContext)
+        instance = this
+        PhoneHub.init(applicationContext)
+        // The shade when access starts or resumes: removals may have been missed while unbound
+        resync()
+    }
+
+    override fun onListenerDisconnected() {
+        if (instance === this) instance = null
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        PhoneHub.init(applicationContext)
+        feedNotifications(sbn)
         if (sbn.packageName !in CAPTURED_PACKAGES) return
-        NavigationHub.init(applicationContext)
+        PhoneHub.init(applicationContext)
         runCatching { feedNavigation(sbn) }
         if (!isCaptureEnabled(this)) return
         val n = sbn.notification
@@ -45,9 +55,27 @@ class OpenMyGlassNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        PhoneHub.init(applicationContext)
+        PhoneHub.notificationRemoved(sbn.key)
         if (sbn.packageName !in CAPTURED_PACKAGES || sbn.notification.category != Notification.CATEGORY_NAVIGATION) return
-        NavigationHub.init(applicationContext)
-        if (sbn.packageName == MAPS) NavigationHub.maps.onRemoved() else NavigationHub.osmand.onNavigationNotificationRemoved()
+        PhoneHub.init(applicationContext)
+        if (sbn.packageName == MAPS) PhoneHub.maps.onRemoved() else PhoneHub.osmand.onNavigationNotificationRemoved()
+    }
+
+    /** Sends the whole active set through the relay (reconnect, settings change). */
+    fun resync() {
+        if (!NotificationSettings(this).load().enabled) return
+        val ranking = runCatching { currentRanking }.getOrNull()
+        val items = runCatching { activeNotifications }.getOrNull().orEmpty().mapNotNull { sbn ->
+            runCatching { NotificationMapper.map(AndroidNotifications.fields(this, sbn, ranking)) }.getOrNull()
+        }
+        PhoneHub.notificationsSync(items)
+    }
+
+    private fun feedNotifications(sbn: StatusBarNotification) {
+        if (!NotificationSettings(this).load().enabled) return
+        runCatching { AndroidNotifications.fields(this, sbn, runCatching { currentRanking }.getOrNull()) }
+            .onSuccess { PhoneHub.notificationPosted(NotificationMapper.map(it)) }
     }
 
     /** Navigation notifications → sources: Google Maps fully, OsmAnd for the street/ETA its AIDL API lacks. */
@@ -57,7 +85,7 @@ class OpenMyGlassNotificationListener : NotificationListenerService() {
         val e = n.extras
         val icon = (n.getLargeIcon()?.let { runCatching { it.loadDrawable(this) }.getOrNull() } as? android.graphics.drawable.BitmapDrawable)?.bitmap
         val encoded = icon?.let { IconEncoder.encode(it) }
-        encoded?.let { (sha, png) -> NavigationHub.putIcon(sha, png) }
+        encoded?.let { (sha, png) -> PhoneHub.putIcon(sha, png) }
         val text = NotificationText(
             title = e.getCharSequence(Notification.EXTRA_TITLE)?.toString(),
             text = e.getCharSequence(Notification.EXTRA_TEXT)?.toString(),
@@ -65,8 +93,8 @@ class OpenMyGlassNotificationListener : NotificationListenerService() {
             bigText = e.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString(),
             iconSha256 = encoded?.first,
         )
-        if (sbn.packageName == MAPS) NavigationHub.maps.onPosted(text)
-        else NavigationHub.osmand.onNotification(OsmAndNotificationParser.parse(text))
+        if (sbn.packageName == MAPS) PhoneHub.maps.onPosted(text)
+        else PhoneHub.osmand.onNotification(OsmAndNotificationParser.parse(text))
     }
 
     /** One extra at a time: a value that cannot be read (e.g. a custom Parcelable) becomes a placeholder. */
@@ -99,6 +127,10 @@ class OpenMyGlassNotificationListener : NotificationListenerService() {
     }
 
     companion object {
+        /** The connected listener, for actions chosen on Glass (dismiss, fire an action). */
+        @Volatile var instance: OpenMyGlassNotificationListener? = null
+            private set
+
         private const val MAPS = "com.google.android.apps.maps"
         val CAPTURED_PACKAGES = setOf(MAPS, "net.osmand.plus", "net.osmand")
         private const val PREFS = "capture"

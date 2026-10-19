@@ -16,7 +16,11 @@
             android:name=".NavMenuActivity"
             android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
-        <service android:name=".NavLiveCardService" android:exported="false" />
+        <activity
+            android:name=".NotificationsActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
+        <service android:name=".BridgeService" android:exported="false" />
         <receiver android:name=".BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

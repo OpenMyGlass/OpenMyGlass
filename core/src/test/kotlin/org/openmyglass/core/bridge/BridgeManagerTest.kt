@@ -65,6 +65,7 @@ class BridgeManagerTest {
         /** Next NavState, skipping the NavEnded the relay may send on attach before it has seen the source. */
         fun nextNav(): Frame { while (true) { val f = next()!!; if (f.hasNav()) return f } }
         fun dropConnection() = socket?.close()
+        fun send(frame: Frame) = DelimitedFraming.writeFrame(socket!!.getOutputStream(), frame.toByteArray())
         override fun close() = server.close()
     }
 
@@ -117,6 +118,30 @@ class BridgeManagerTest {
             glass.dropConnection()
             // after reconnecting, the current state is sent again on the new session
             assertEquals(500, glass.nextNav().nav.distanceM)
+            m.stop()
+        }
+    }
+
+    @Test
+    fun `notifications reach glass and actions from glass reach the relay`() {
+        val chosen = java.util.concurrent.LinkedBlockingQueue<Pair<String, org.openmyglass.core.notif.NotificationRelay.ActionRequest>>()
+        val notifications = org.openmyglass.core.notif.NotificationRelay(
+            filter = { org.openmyglass.core.notif.NotificationFilter("own") }, icons = { null },
+            onAction = { key, req -> chosen += key to req })
+        GlassPeer().use { glass ->
+            val m = BridgeManager({ TcpTransport("127.0.0.1", glass.port) }, relay, appVersion = "test", scope = scope,
+                backoff = Backoff(50.milliseconds, 200.milliseconds), onStateChange = { history += it }, notifications = notifications)
+            m.start()
+            m.await { it is LinkState.Connected }
+            runBlocking {
+                notifications.posted(org.openmyglass.core.notif.NotificationItem("k1", "com.chat", "Chat", "Anna", "Ciao", 1L,
+                    "msg", false, false, 4, null, emptyList(), null))
+            }
+            var f = glass.next()!!
+            while (!f.hasNotification()) f = glass.next()!!
+            assertEquals("k1", f.notification.notification.key)
+            glass.send(Frame.newBuilder().setNotificationAction(Bridge.NotificationAction.newBuilder().setKey("k1").setDismiss(true)).build())
+            assertEquals("k1" to org.openmyglass.core.notif.NotificationRelay.ActionRequest.Dismiss, chosen.poll(3, TimeUnit.SECONDS))
             m.stop()
         }
     }

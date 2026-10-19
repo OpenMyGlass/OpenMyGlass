@@ -15,6 +15,9 @@ message Frame {
     NavEnded nav_ended = 3;        // phone -> glass: navigation ended, remove the card
     Icon icon = 4;                 // phone -> glass: icon bytes for a hash
     IconRequest icon_request = 5;  // glass -> phone: icon hash not in the Glass cache
+    NotificationPosted notification = 6;          // phone -> glass: new or changed notification
+    NotificationRemoved notification_removed = 7; // phone -> glass: notification gone (dismissed anywhere)
+    NotificationAction notification_action = 8;   // glass -> phone: the owner chose an action or Dismiss
   }
 }
 
@@ -63,4 +66,38 @@ message Icon {
 
 message IconRequest {
   bytes sha256 = 1;
+}
+
+// A phone notification, already filtered and truncated by the phone (title 200, text 1000 code points, 3 actions).
+message Notification {
+  string key = 1;                  // StatusBarNotification key: identifies the notification in updates and actions
+  string app_name = 2;
+  string title = 3;
+  string text = 4;
+  int64 posted_at_ms = 5;
+  optional bytes icon_sha256 = 6;  // app icon, sent separately as Icon
+  repeated NotificationActionInfo actions = 7;
+  bool wake = 8;                   // the owner allowed this notification to wake the screen
+}
+
+message NotificationActionInfo {
+  uint32 index = 1;                // position in the phone notification's action list
+  string title = 2;
+  bool reply = 3;                  // has a RemoteInput: dictated reply (plan 5b)
+}
+
+message NotificationPosted {
+  Notification notification = 1;
+}
+
+message NotificationRemoved {
+  string key = 1;
+}
+
+message NotificationAction {
+  string key = 1;
+  oneof choice {
+    uint32 action_index = 2;
+    bool dismiss = 3;
+  }
 }

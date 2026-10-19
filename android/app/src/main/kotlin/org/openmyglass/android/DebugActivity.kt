@@ -15,7 +15,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import org.openmyglass.android.nav.AndroidOsmAndBinder
-import org.openmyglass.android.nav.NavigationHub
 import org.openmyglass.android.nav.OsmAndNavigationSource
 import org.openmyglass.android.notifications.OpenMyGlassNotificationListener
 
@@ -28,8 +27,9 @@ class DebugActivity : Activity() {
         super.onCreate(savedInstanceState)
         val osmandStatus = TextView(this)
         val bridgeStatus = TextView(this)
-        // Default: the host machine as seen from the Android emulator, where `sim-glass --bridge` listens.
-        val bridgeAddress = android.widget.EditText(this).apply { setText("10.0.2.2:7824"); isSingleLine = true }
+        // The last TCP bridge address used (default: the host machine as seen from the emulator)
+        val saved = org.openmyglass.android.transport.Settings(this).load()
+        val bridgeAddress = android.widget.EditText(this).apply { setText("${saved.tcpHost}:${saved.tcpPort}"); isSingleLine = true }
         val allowOsmAnd = Button(this).apply {
             text = "Allow OpenMyGlass in OsmAnd"
             visibility = android.view.View.GONE
@@ -68,6 +68,10 @@ class DebugActivity : Activity() {
                 }
             })
             addView(Button(this@DebugActivity).apply {
+                text = "Post test notification"
+                setOnClickListener { org.openmyglass.android.notifications.TestNotification.post(this@DebugActivity) }
+            })
+            addView(Button(this@DebugActivity).apply {
                 text = "Connection settings"
                 setOnClickListener { startActivity(Intent(this@DebugActivity, SettingsActivity::class.java)) }
             })
@@ -86,8 +90,8 @@ class DebugActivity : Activity() {
                 text = "Captures: " + OpenMyGlassNotificationListener.captureFile(this@DebugActivity).absolutePath
             })
         })
-        NavigationHub.init(applicationContext)
-        osmand = NavigationHub.osmand
+        PhoneHub.init(applicationContext)
+        osmand = PhoneHub.osmand
         scope.launch {
             combine(osmand.available, osmand.needsAuthorization, osmand.current) { a, n, u -> Triple(a, n, u) }
                 .collect { (available, needsAuth, update) ->
@@ -102,7 +106,7 @@ class DebugActivity : Activity() {
                             ?: "no active navigation")
                 }
         }
-        scope.launch { NavigationHub.bridgeStatus.collect { bridgeStatus.text = it } }
+        scope.launch { PhoneHub.bridgeStatus.collect { bridgeStatus.text = it } }
     }
 
     @Deprecated("Activity result API is enough for a debug screen")

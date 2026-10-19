@@ -24,7 +24,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import org.openmyglass.android.SettingsActivity
-import org.openmyglass.android.nav.NavigationHub
+import org.openmyglass.android.PhoneHub
 import org.openmyglass.android.transport.BridgeMode
 import org.openmyglass.android.transport.Settings
 import org.openmyglass.android.transport.TransportTargets
@@ -95,7 +95,7 @@ class OpenMyGlassService : Service() {
             getSystemService(NotificationManager::class.java).notify(PROBLEM_NOTIFICATION_ID, notification(
                 if (permitted) "Could not start, open OpenMyGlass" else
                     ServiceStatus.text(LinkState.Stopped, companionConnected = false, permissionMissing = true), ongoing = false))
-            NavigationHub.setBridgeStatus(if (permitted) "service: could not start" else "service: Bluetooth permission needed")
+            PhoneHub.setBridgeStatus(if (permitted) "service: could not start" else "service: Bluetooth permission needed")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -107,15 +107,16 @@ class OpenMyGlassService : Service() {
     /** (Re)creates both links from the current settings; called on every start, so saving settings applies them. */
     private fun restartLinks() {
         stopLinks()
-        NavigationHub.init(applicationContext)
+        PhoneHub.init(applicationContext)
         val s = CoroutineScope(SupervisorJob() + Dispatchers.Default).also { scope = it }
         val settings = Settings(this)
         val bridge = BridgeManager(
             transport = { Transports.create(this, TransportTargets.bridge(settings.load(), Transports.environment(this))) },
-            relay = NavigationHub.relay,
+            relay = PhoneHub.relay,
             appVersion = appVersion(),
             scope = s,
             onError = { android.util.Log.w(TAG, "bridge link: $it") },
+            notifications = PhoneHub.notifications,
         ).also { this.bridge = it }
         val companionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
         if (settings.load().companionEnabled) {
@@ -135,7 +136,7 @@ class OpenMyGlassService : Service() {
                 val text = ServiceStatus.text(b, companionUp, permissionMissing = !env.hasBluetoothPermission,
                     unavailableReason = TransportTargets.bridgeUnavailableReason(settings.load(), env))
                 getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text, ongoing = true))
-                NavigationHub.setBridgeStatus("bridge: ${describe(b)}" + if (companionUp) " · companion connected" else "")
+                PhoneHub.setBridgeStatus("bridge: ${describe(b)}" + if (companionUp) " · companion connected" else "")
             }
         }
     }
@@ -156,7 +157,7 @@ class OpenMyGlassService : Service() {
     override fun onDestroy() {
         unregisterReceiver(bluetoothEvents)
         stopLinks()
-        NavigationHub.setBridgeStatus("bridge: service stopped")
+        PhoneHub.setBridgeStatus("bridge: service stopped")
         super.onDestroy()
     }
 

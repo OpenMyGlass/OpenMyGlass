@@ -9,7 +9,7 @@ public final class StartActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        startService(new Intent(this, NavLiveCardService.class));
+        startService(new Intent(this, BridgeService.class));
         finish();
     }
 }
