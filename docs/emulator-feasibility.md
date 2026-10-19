@@ -1,40 +1,40 @@
-# Spike: emulare Glass XE24 senza hardware
+# Spike: emulating Glass XE24 without hardware
 
-**Domanda:** possiamo eseguire il lato occhiali di XE24 (sistema intero o le sue app companion) in un emulatore su questo Mac (Apple Silicon, arm64), per testare il companion senza Glass?
+**Question:** can we run the Glass side of XE24 (the whole system or its companion apps) in an emulator on this Mac (Apple Silicon, arm64), to test the companion without Glass?
 
-**Risposta breve:** **no**, né il sistema XE24 completo né le app Glass di sistema girano qui in modo utile. Per lo sviluppo useremo un **peer simulato** e, se l'architettura prevede un'app ponte, un **AVD arm64 con display 640×360 e stub GDK**. Il comportamento del firmware originale si verifica solo leggendo il codice decompilato finché non c'è hardware.
+**Short answer:** **no.** Neither the full XE24 system nor the Glass system apps run here in a useful way. For development we will use a **simulated peer** and, if the architecture includes a bridge app, an **arm64 AVD with a 640×360 display and GDK stubs**. Until hardware is available, original firmware behavior can only be checked by reading the decompiled code.
 
-Data: 2026-10-19. Ambiente: macOS arm64, Android Emulator 36.5.11, cmdline-tools 9862592. Tutto il materiale di prova è in `_re/emulator/` ed è usa e getta.
+Date: 2026-10-19. Environment: macOS arm64, Android Emulator 36.5.11, cmdline-tools 9862592. All probe material is in `_re/emulator/` and is throwaway.
 
-## Cosa è stato provato
+## What was tried
 
-### A. Immagine XE24 o AVD API 19 ARM standard
+### A. XE24 image or stock API 19 ARM AVD
 
-- XE24 è **ARMv7 a 32 bit** (OMAP4, `board=glass_1`; le librerie in `system/lib` sono ELF 32-bit ARM EABI5) con HAL OMAP, non goldfish.
-- Prima del trapianto ho verificato se gira l'immagine ufficiale `system-images;android-19;default;armeabi-v7a`. L'avvio fallisce subito:
+- XE24 is **32-bit ARMv7** (OMAP4, `board=glass_1`; libraries in `system/lib` are 32-bit ARM EABI5 ELF) with OMAP HALs, not goldfish.
+- Before transplanting, I checked whether the official `system-images;android-19;default;armeabi-v7a` runs. Boot fails immediately:
   `FATAL | CPU Architecture 'arm' is not supported by the QEMU2 emulator, (the classic engine is deprecated!)`.
-- Il binario `qemu-system-armel` esiste nell'SDK, ma l'emulatore rifiuta le immagini ARM32 con QEMU2. Il motore classic, l'unico che le eseguiva, è stato rimosso.
-- **Esito:** bloccata alla radice. Se il sistema API 19 base non si avvia, non si avvia neanche XE24 trapiantato.
+- The SDK ships a `qemu-system-armel` binary, but the emulator refuses ARM32 images under QEMU2. The classic engine, the only one that ran them, has been removed.
+- **Outcome:** blocked at the root. If the stock API 19 system does not boot, a transplanted XE24 will not either.
 
-### B. App Glass di sistema su un AVD moderno (API 28 arm64-v8a)
+### B. Glass system apps on a modern AVD (API 28 arm64-v8a)
 
-- Gli APK in `system/priv-app` hanno META-INF che dichiara una firma v2 assente (`INSTALL_PARSE_FAILED_NO_CERTIFICATES`). Si installano solo dopo averli rifirmati con una chiave di debug.
-- `GlassBluetooth` usa `sharedUserId=android.uid.system`, quindi senza la chiave di piattaforma non si installa (`INSTALL_FAILED_SHARED_USER_INCOMPATIBLE`).
-- `MyGlassWear` e `GlassHome` includono librerie native solo `lib/armeabi`, mentre l'AVD espone solo `arm64-v8a`: `INSTALL_FAILED_NO_MATCHING_ABIS`. Apple Silicon non esegue codice ARM a 32 bit, quindi nessun AVD arm64 su questo Mac offre quell'ABI.
-- `MyGlassWear` senza librerie native si installa, ma all'avvio di qualsiasi componente va in crash: `NoClassDefFoundError: com/google/android/glass/hidden/HiddenSystemProperties`, perché manca il framework Glass (`glass-core.jar`, `glass-services.jar`, classi `com.google.android.glass.*`).
-- **Esito:** il framework Glass e il codice nativo ARM32 sono dipendenze dure, e ricostruirle in emulatore costerebbe più dell'hardware.
+- The APKs in `system/priv-app` have a META-INF that declares a missing v2 signature (`INSTALL_PARSE_FAILED_NO_CERTIFICATES`). They install only after re-signing with a debug key.
+- `GlassBluetooth` uses `sharedUserId=android.uid.system`, so it cannot be installed without the platform key (`INSTALL_FAILED_SHARED_USER_INCOMPATIBLE`).
+- `MyGlassWear` and `GlassHome` ship native libraries for `lib/armeabi` only, while the AVD exposes only `arm64-v8a`: `INSTALL_FAILED_NO_MATCHING_ABIS`. Apple Silicon cannot run 32-bit ARM code, so no arm64 AVD on this Mac offers that ABI.
+- `MyGlassWear` without native libraries installs, but crashes as soon as any component starts: `NoClassDefFoundError: com/google/android/glass/hidden/HiddenSystemProperties`, because the Glass framework is missing (`glass-core.jar`, `glass-services.jar`, `com.google.android.glass.*` classes).
+- **Outcome:** the Glass framework and the ARM32 native code are hard dependencies; rebuilding them in an emulator would cost more than the hardware.
 
 ### C. GDK add-on
 
-- Il pacchetto GDK (`addon-google_gdk-google-19`) **non è più nel repository ufficiale dell'SDK** (`addon2-1.xml`). Va recuperato altrove (archivi, mirror) per compilare l'eventuale app ponte; da affrontare in Fase 4.
+- The GDK package (`addon-google_gdk-google-19`) is **no longer in the official SDK repository** (`addon2-1.xml`). It must be sourced elsewhere (archives, mirrors) to build a possible bridge app; to be handled in Phase 4.
 
-## Scoperta laterale importante
+## Side finding
 
-I componenti registrati da `MyGlassWear.apk` (XE24, package `com.google.glass.companion`) appartengono al **framework Android Wear / clockwork**, per esempio `com.google.android.clockwork.stream.bridger.NotificationBridgerService`, `com.google.android.clockwork.host.DispatchingWearableListenerService` e `com.google.android.wearable.app.RemoteActionReceiver`. Le notifiche nelle ultime versioni potrebbero quindi passare dal **Wearable Data Layer di Google Play services** e non da un protocollo Glass dedicato. Da verificare nel Task 6: incide direttamente sull'opzione A dell'architettura.
+The components registered by `MyGlassWear.apk` (XE24, package `com.google.glass.companion`) belong to the **Android Wear / clockwork framework**, e.g. `com.google.android.clockwork.stream.bridger.NotificationBridgerService`, `com.google.android.clockwork.host.DispatchingWearableListenerService` and `com.google.android.wearable.app.RemoteActionReceiver`. Glass runs a Wear node through GmsCore, alongside the companion RFCOMM channel (see [`protocol/`](protocol/)).
 
-## Raccomandazione per i test senza hardware
+## Recommendation for hardware-free testing
 
-1. **Peer simulato lato occhiali** in `tools/` (Python o JVM) che parla il nostro modello dei messaggi su **TCP**. Il telefono emulato lo raggiunge con `adb reverse`/`adb forward`, e il trasporto TCP sostituisce RFCOMM, che l'emulatore non offre: nessun AVD ha Bluetooth Classic reale.
-2. **App ponte su AVD arm64** con profilo display 640×360 e **stub delle classi GDK** (`CardBuilder`, `LiveCard`, …) per UI e logica, se la Fase 3 sceglie l'opzione B o C. Il codice dell'app ponte va scritto senza librerie native ARM32.
-3. **Emulazione del protocollo originale (opzione A):** verificabile solo con hardware o, in parte, rieseguendo nel peer simulato le sequenze ricavate dal codice decompilato. Non è un test del firmware vero.
-4. **Alternativa non provata:** un host Linux x86_64 con un vecchio emulatore che ha ancora il motore classic potrebbe avviare API 19 ARM. Il trapianto di XE24 avrebbe comunque i problemi di HAL OMAP. Sconsigliato salvo necessità forte.
+1. **Simulated Glass peer** in `tools/` (Python or JVM) speaking our message model over **TCP**. The emulated phone reaches it via `adb reverse`/`adb forward`; TCP replaces RFCOMM, which the emulator does not provide (no AVD has real Bluetooth Classic).
+2. **Bridge app on an arm64 AVD** with a 640×360 display profile and **GDK class stubs** (`CardBuilder`, `LiveCard`, …) for UI and logic, if Phase 3 picks option B or C. Bridge-app code must avoid ARM32 native libraries.
+3. **Original-protocol emulation (option A):** only verifiable with hardware or, partially, by replaying in the simulated peer the sequences derived from the decompiled code. This does not test the real firmware.
+4. **Untested alternative:** an x86_64 Linux host with an old emulator that still has the classic engine might boot API 19 ARM. Transplanting XE24 would still hit the OMAP HAL problems. Not recommended unless strongly needed.

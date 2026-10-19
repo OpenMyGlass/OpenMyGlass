@@ -1,44 +1,45 @@
 # Progress
 
-Piano completo del progetto: [`project-prompt.md`](project-prompt.md).
+Full project brief: [`project-brief.md`](project-brief.md) (English) — original Italian version: [`project-prompt.it.md`](project-prompt.it.md).
+Current plan: [`superpowers/plans/2026-10-19-phase-0-2-reverse-engineering.md`](superpowers/plans/2026-10-19-phase-0-2-reverse-engineering.md).
 
-## Stato delle fasi
+## Phase status
 
-| Fase | Stato |
+| Phase | Status |
 |---|---|
-| 0 — Inventario strumenti e impostazione repo | ✅ completata (2026-10-19); `tools/check-tools.sh` verifica, `tools/check-clean-room.sh` blocca materiale Google |
-| 1 — Recupero binari (MyGlass APK, immagine XE24) | ⏳ da pianificare |
-| 2 — Reverse engineering e mappatura | ⏳ — **stop: revisione inventario funzionalità** |
-| 3 — Architettura | ⏳ — **stop: approvazione architettura** |
-| 4 — Implementazione Android | ⏳ |
-| 5 — Piano iOS | ⏳ (solo su richiesta) |
+| 0 — Tool inventory and repo setup | ✅ done (2026-10-19); `tools/check-tools.sh` checks tools, `tools/check-clean-room.sh` blocks Google material |
+| 1 — Binary retrieval (MyGlass APK, XE24 image) | ✅ done (2026-10-19), see [`sources.md`](sources.md) |
+| 2 — Reverse engineering and mapping | 🔄 in progress — protocol spec done ([`protocol/`](protocol/)); **stop: feature inventory review** |
+| 3 — Architecture | ⏳ — **stop: architecture approval** |
+| 4 — Android implementation | ⏳ |
+| 5 — iOS plan | ⏳ (only on request) |
 
-## Fase 0 — Inventario strumenti (macOS, 2026-10-19)
+## Phase 0 — Tool inventory (macOS arm64, 2026-10-19)
 
-| Strumento | Stato | Note |
+| Tool | Status | Notes |
 |---|---|---|
-| git, gh | ✅ | gh autenticato |
+| git, gh | ✅ | gh authenticated |
 | Java (OpenJDK 21) | ✅ | |
 | Python 3, Homebrew | ✅ | |
-| Android SDK | ✅ | `~/Library/Android/sdk` (platform-tools, build-tools, emulator, system-images); `adb` non nel PATH (gli script usano il path completo) |
+| Android SDK | ✅ | `~/Library/Android/sdk` (platform-tools, build-tools, emulator, system-images, cmdline-tools); `adb` not on PATH (scripts use the full path) |
 | jadx | ✅ 1.5.6 | brew |
 | apktool | ✅ 3.0.3 | brew |
-| Ghidra | ❌ | opzionale, solo per codice nativo |
-| gradle, kotlin | ❌ | arriveranno via Gradle wrapper in Fase 4 |
+| Ghidra | ❌ | optional, native code only |
+| gradle, kotlin | ❌ | will come through the Gradle wrapper in Phase 4 |
 | protoc | ✅ libprotoc 36.2 | brew `protobuf` |
-| e2fsprogs (debugfs), simg2img, 7z | ✅ | brew; per estrarre l'immagine XE24 |
+| e2fsprogs (debugfs), simg2img, 7z | ✅ | brew; used to extract the XE24 image |
 | apksigner, aapt | ✅ | build-tools 37.0.0 |
-| REA MCP (`rea-agents` 6.7.0) | ✅ | registrato a livello di progetto (`claude mcp add --scope local`); usa JADX/Ghidra come provider |
-| GDK add-on (API 19) | ❌ | da recuperare/verificare in Fase 4 per `glass-xe/` |
+| REA MCP (`rea-agents` 6.7.0) | ✅ | registered at project scope (`claude mcp add --scope local`); uses JADX/Ghidra as providers |
+| GDK add-on (API 19) | ❌ | no longer in the official SDK repository; to be sourced for `glass-xe/` in Phase 4 |
 
-## Fase 2 — Decompilazione (2026-10-19)
+## Phase 2 — Decompilation (2026-10-19)
 
-Decompilati con jadx 1.5.6 e apktool 3.0.3 in `_re/` (non versionato). Gli indici in `_re/index/` contano file o stringhe, non i contenuti:
+Decompiled with jadx 1.5.6 and apktool 3.0.3 into `_re/` (not versioned). The indexes in `_re/index/` count files or strings, not contents:
 
-| Target | .java | UUID | classi proto | RFCOMM | intent Glass | URL | Wearable API |
+| Target | .java | UUIDs | proto classes | RFCOMM | Glass intents | URLs | Wearable API |
 |---|---|---|---|---|---|---|---|
-| MyGlass 3.5.8 (telefono) | 3780 | 9 | 134 | 7 | 155 | 39 | 81 |
-| MyGlassWear (occhiali) | 2806 | 7 | 62 | 4 | 153 | 63 | 299 |
+| MyGlass 3.5.8 (phone) | 3780 | 9 | 134 | 7 | 155 | 39 | 81 |
+| MyGlassWear (Glass) | 2806 | 7 | 62 | 4 | 153 | 63 | 299 |
 | GlassBluetooth | 943 | 7 | 29 | 9 | 114 | 15 | 0 |
 | GlassHome | 2385 | 7 | 64 | 4 | 197 | 51 | 243 |
 | GlassLiteSetup | 577 | 6 | 13 | 4 | 18 | 5 | 0 |
@@ -51,16 +52,24 @@ Decompilati con jadx 1.5.6 e apktool 3.0.3 in `_re/` (non versionato). Gli indic
 | glass-core.jar | 142 | 0 | 0 | 1 | 43 | 0 | 0 |
 | glass-services.jar | 83 | 0 | 0 | 0 | 18 | 0 | 0 |
 
-I conteggi simili tra le app Glass (UUID 7, RFCOMM 4) suggeriscono una libreria comune inclusa in ciascuna.
+The similar counts across Glass apps (7 UUIDs, 4 RFCOMM files) come from a shared library bundled into each app.
 
-## Decisioni
+## Key findings so far
 
-- 2026-10-19 — Licenza **GPL-3.0**.
-- 2026-10-19 — Repo pubblica; workspace di reverse in `_re/` escluso da git.
-- 2026-10-19 — **Nessun hardware Glass disponibile per ora.** Si parte con emulatore/simulatore: valutare se l'immagine XE24 è avviabile in un emulatore Android (API 19) e, in ogni caso, peer simulati lato occhiali in `tools/`. I test con hardware (adb, HCI snoop) restano pianificati ma rinviati.
+- Companion channel: RFCOMM secure, Glass is server, UUID `F15CC914-…`, varint-delimited protobuf `Envelope`s ([`protocol/transport.md`](protocol/transport.md)).
+- **No application-level authentication and no Google account needed** on XE24 ([`protocol/handshake.md`](protocol/handshake.md)).
+- Glass natively handles timeline cards, location, navigation intents, Wi-Fi setup, screencast, touch injection, device info ([`protocol/messages.md`](protocol/messages.md)).
 
-## Problemi aperti
+## Decisions
 
-- Emulatore Glass XE24 **non fattibile** su questo Mac (vedi [`emulator-feasibility.md`](emulator-feasibility.md)). Test senza hardware tramite peer simulato su TCP e AVD arm64 con stub GDK.
-- GDK add-on assente dal repository SDK ufficiale: da recuperare per la Fase 4.
-- `MyGlassWear.apk` (lato occhiali) è costruito sul framework Android Wear/clockwork: verificare nel Task 6 quanto il protocollo dipenda da Google Play services Wearable.
+- 2026-10-19 — License **GPL-3.0**.
+- 2026-10-19 — Public repo; reverse-engineering workspace in `_re/`, excluded from git.
+- 2026-10-19 — **No Glass hardware available for now.** Start with emulator/simulator; hardware tests (adb, HCI snoop) stay planned but postponed.
+- 2026-10-19 — All repo content in **English**.
+
+## Open issues
+
+- Glass XE24 emulation **not feasible** on this Mac (see [`emulator-feasibility.md`](emulator-feasibility.md)). Hardware-free testing through a simulated peer over TCP and an arm64 AVD with GDK stubs.
+- GDK add-on missing from the official SDK repository: to be sourced for Phase 4.
+- `MyGlassWear.apk` (Glass side) runs an Android Wear node through GmsCore: a second, Google-Play-services-based channel next to the companion RFCOMM channel. Its role and whether it still works is to be assessed in the feature inventory.
+- `Envelope.notificationC2G` (field 45) is received by XE24 but no consumer was found in the decompiled APKs; odex-only APKs (e.g. GlassSystemUI) not checked yet.
