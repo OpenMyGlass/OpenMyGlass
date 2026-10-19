@@ -14,6 +14,15 @@ touch "$TMP/x.xapk"; out="$(bash "$SCRIPT" "$TMP/x.xapk" 2>&1)"; rc=$?
 touch "$TMP/x.apks"; out="$(bash "$SCRIPT" "$TMP/x.apks" 2>&1)"; rc=$?
 [ $rc -eq 2 ] && ok "apks rejected with exit 2" || ko "apks rejected with exit 2" "rc=$rc $out"
 
+touch "$TMP/x.apkm"; out="$(bash "$SCRIPT" "$TMP/x.apkm" 2>&1)"; rc=$?
+[ $rc -eq 2 ] && ok "apkm rejected with exit 2" || ko "apkm rejected with exit 2" "rc=$rc $out"
+
+UNSIGNED="$(ls "$(cd "$(dirname "$0")/../.." && pwd)"/_re/xe24/system/priv-app/GlassLiteSetup.apk 2>/dev/null)"
+if [ -n "$UNSIGNED" ]; then
+  out="$(bash "$SCRIPT" "$UNSIGNED" 2>&1)"; rc=$?
+  [ $rc -eq 0 ] && echo "$out" | grep -q 'certificate: none readable' && ok "unreadable signature reported, exit 0" || ko "unreadable signature reported, exit 0" "rc=$rc $out"
+fi
+
 out="$(bash "$SCRIPT" "$TMP/missing.apk" 2>&1)"; rc=$?
 [ $rc -ne 0 ] && ok "missing file -> exit != 0" || ko "missing file -> exit != 0" "$out"
 

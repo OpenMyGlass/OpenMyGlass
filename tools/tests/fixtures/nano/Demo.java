@@ -13,6 +13,7 @@ public interface Demo {
         public String[] tags;
         public byte[] blob_;
         public Command command_;
+        public byte[][] chunks;
 
         public void writeTo(CodedOutputByteBufferNano output) throws IOException {
             output.writeUInt32(1, this.version);
@@ -42,6 +43,11 @@ public interface Demo {
             output.writeBytes(7, this.blob_);
             if (this.command_ != null) {
                 output.writeMessage(8, this.command_);
+            }
+            if (this.chunks != null) {
+                for (byte[] element3 : this.chunks) {
+                    output.writeBytes(9, element3);
+                }
             }
             super.writeTo(output);
         }

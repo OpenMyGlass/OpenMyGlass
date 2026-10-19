@@ -31,3 +31,6 @@ captures/
 
 # superpowers execution workspace
 .superpowers/
+
+# Python bytecode
+__pycache__/

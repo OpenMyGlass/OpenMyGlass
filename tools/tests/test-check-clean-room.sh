@@ -35,4 +35,7 @@ expect "own source accepted" 0 bash -c "cd '$TMP/r' && bash '$GUARD'"
 repo; mkdir -p "$TMP/r/gradle/wrapper"; printf 'PK' > "$TMP/r/gradle/wrapper/gradle-wrapper.jar"; git -C "$TMP/r" add -f gradle/wrapper/gradle-wrapper.jar
 expect "gradle wrapper jar accepted" 0 bash -c "cd '$TMP/r' && bash '$GUARD'"
 
+repo; mkdir "$TMP/r/sub"; printf 'PK' > "$TMP/r/fake.apk"; echo x > "$TMP/r/sub/x.txt"; git -C "$TMP/r" add -f fake.apk sub/x.txt
+expect "apk rejected when run from a subdirectory" 1 bash -c "cd '$TMP/r/sub' && bash '$GUARD'"
+
 echo "$pass passed, $fail failed"; [ $fail -eq 0 ]

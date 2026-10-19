@@ -224,6 +224,7 @@ message ApiRequest {
   optional string token = 2;
   optional int32 type = 3;  // enum? RequestType [unverified]
   optional .glass.timelinenano.TimelineItem timelineItem = 4;
+  repeated bytes attachmentContent = 5;
 
   enum RequestType {
     DELETE_TIMELINE_ITEM = 1;
@@ -337,6 +338,7 @@ message OpenEndedInputResponse {
 
 message MultimediaMessage {
   optional .glass.timelinenano.TimelineItem timelineItem = 1;
+  repeated bytes attachmentContent = 2;
 }
 
 message SetWallpaperRequest {

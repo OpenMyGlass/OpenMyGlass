@@ -69,7 +69,7 @@ Details: [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [
 
 ### 7. Navigation
 - **What:** "Navigate on Glass" from the phone; turn-by-turn shown by the Glass Maps Glassware.
-- **Classes:** MG `base/LaunchNavigationActivity`, `defpackage/wt` (builds `google.navigation:q=…`); XE24 `CompanionConnection.startNavigationFromCompanion` → `ACTION_VIEW(uri)`.
+- **Classes:** MG `base/LaunchNavigationActivity`, `defpackage/wt`, `com/google/glass/maps/NavigationLauncher` (builds `google.navigation:q=…&mode=…&source=…`); XE24 `CompanionConnection.startNavigationFromCompanion` → `ACTION_VIEW(uri)`.
 - **Messages:** `navigationRequestC2G{uri}` (10).
 - **Cloud:** yes. The handler `com.google.glass.maps` is **not in the XE24 image** and relied on Google routing.
 - **Rebuild:** **B** — the phone reads Google Maps' navigation notification (`NotificationListenerService`) and sends maneuver, distance, street and icon to our own 640×360 card. Option A (field 10) is useless on a stock XE24 device. An A-only fallback could push the instruction as an updating timeline item **[to evaluate in Phase 3]**.

@@ -45,7 +45,7 @@ Broadcasts the companion server emits on Glass after receiving an envelope (`Com
 
 ## Navigation
 
-- MyGlass sends `NavigationRequest{uri}` with `google.navigation:q=…` (phone: `com/google/android/apps/myglass/base/LaunchNavigationActivity`, `defpackage/wt`); Glass fires `ACTION_VIEW(uri)`.
+- MyGlass sends `NavigationRequest{uri}` with a `google.navigation:q=…&mode=…&source=…` URI (MG 3.5.8: `com/google/android/apps/myglass/base/LaunchNavigationActivity` forwards a URI it receives; MG `defpackage/wt` takes the URI built by `com/google/glass/maps/NavigationLauncher.getNavigationIntent`); Glass fires `ACTION_VIEW(uri)`.
 - **No APK in the XE24 system image declares a `VIEW` intent filter.** Native turn-by-turn lived in the separate Glassware package `com.google.glass.maps` (referenced by GlassHome, GlassSync, GlassSettings, MyGlassWear; e.g. `com.google.glass.maps.service.MapRenderingService`), which is not in the image.
 - So on a stock XE24 device the navigation request does nothing unless `com.google.glass.maps` is installed, and that app depended on Google routing servers (see [`cloud-dependencies.md`](cloud-dependencies.md)).
 
