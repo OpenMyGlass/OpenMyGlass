@@ -47,4 +47,15 @@ class TransportTargetsTest {
         assertEquals(TransportTarget.Rfcomm(glass, CompanionConstants.SECURE_UUID), TransportTargets.companion(tcp, ready))
         assertNull(TransportTargets.companion(tcp.copy(companionEnabled = false), ready))
     }
+
+    @Test
+    fun `unavailable bridge says why`() {
+        // Issue #18
+        assertEquals(null, TransportTargets.bridgeUnavailableReason(bt, ready))
+        assertEquals(null, TransportTargets.bridgeUnavailableReason(tcp, ready.copy(bluetoothOn = false)))
+        assertEquals("Choose your Glass in settings", TransportTargets.bridgeUnavailableReason(bt.copy(glassAddress = null), ready))
+        assertEquals("Bluetooth is off", TransportTargets.bridgeUnavailableReason(bt, ready.copy(bluetoothOn = false)))
+        assertEquals("Bluetooth permission needed", TransportTargets.bridgeUnavailableReason(bt, ready.copy(hasBluetoothPermission = false)))
+        assertEquals("Bridge is off", TransportTargets.bridgeUnavailableReason(bt.copy(bridgeMode = BridgeMode.OFF), ready))
+    }
 }

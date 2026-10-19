@@ -62,6 +62,8 @@ class BridgeManagerTest {
             }
         }.apply { isDaemon = true; start() }
         fun next(): Frame? = frames.poll(3, TimeUnit.SECONDS)
+        /** Next NavState, skipping the NavEnded the relay may send on attach before it has seen the source. */
+        fun nextNav(): Frame { while (true) { val f = next()!!; if (f.hasNav()) return f } }
         fun dropConnection() = socket?.close()
         override fun close() = server.close()
     }
@@ -70,11 +72,15 @@ class BridgeManagerTest {
     private val source = FakeSource()
     private val relay = NavigationRelay(listOf(source), icons = { null }, scope = scope)
 
-    private fun manager(port: Int, backoff: Backoff = Backoff(50.milliseconds, 200.milliseconds)) =
-        BridgeManager({ TcpTransport("127.0.0.1", port) }, relay, appVersion = "test", scope = scope, backoff = backoff)
+    private val history = java.util.Collections.synchronizedList(mutableListOf<LinkState<Bridge.Hello>>())
+    private val cursor = org.openmyglass.core.connection.HistoryCursor(history)
 
-    private fun BridgeManager.await(timeout: Duration = 3.seconds, p: (LinkState<Bridge.Hello>) -> Boolean) =
-        runBlocking { withTimeout(timeout) { state.first(p) } }
+    private fun manager(port: Int, backoff: Backoff = Backoff(50.milliseconds, 200.milliseconds)) =
+        BridgeManager({ TcpTransport("127.0.0.1", port) }, relay, appVersion = "test", scope = scope, backoff = backoff,
+            onStateChange = { history += it })
+
+    @Suppress("UnusedReceiverParameter")
+    private fun BridgeManager.await(timeout: Duration = 3.seconds, p: (LinkState<Bridge.Hello>) -> Boolean) = cursor.await(timeout, p)
 
     private fun nav(d: Int) = NavUpdate(Maneuver.LEFT, d, null, "Via Roma", "20:33", "osmand", null)
 
@@ -97,12 +103,7 @@ class BridgeManagerTest {
     fun `retries when the bridge app is missing`() {
         val closedPort = ServerSocket(0).use { it.localPort }
         val m = manager(closedPort, Backoff(20.milliseconds, 80.milliseconds)); m.start()
-        val waits = mutableListOf<LinkState.WaitingToRetry>()
-        runBlocking {
-            withTimeout(3.seconds) {
-                m.state.first { s -> if (s is LinkState.WaitingToRetry && waits.lastOrNull() != s) waits += s; waits.size >= 4 }
-            }
-        }
+        val waits = (1..4).map { m.await { it is LinkState.WaitingToRetry } as LinkState.WaitingToRetry }
         assertTrue(waits.all { it.delay <= 80.milliseconds })
         m.stop()
     }
@@ -112,10 +113,10 @@ class BridgeManagerTest {
         GlassPeer().use { glass ->
             source.flow.value = nav(500)
             val m = manager(glass.port); m.start()
-            assertEquals(500, glass.next()!!.nav.distanceM)
+            assertEquals(500, glass.nextNav().nav.distanceM)
             glass.dropConnection()
             // after reconnecting, the current state is sent again on the new session
-            assertEquals(500, glass.next()!!.nav.distanceM)
+            assertEquals(500, glass.nextNav().nav.distanceM)
             m.stop()
         }
     }

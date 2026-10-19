@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import org.openmyglass.android.SettingsActivity
 import org.openmyglass.android.nav.NavigationHub
+import org.openmyglass.android.transport.BridgeMode
 import org.openmyglass.android.transport.Settings
 import org.openmyglass.android.transport.TransportTargets
 import org.openmyglass.android.transport.ProvidedTransport
@@ -47,9 +48,15 @@ class OpenMyGlassService : Service() {
 
     private val bluetoothEvents = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val on = intent.action != BluetoothAdapter.ACTION_STATE_CHANGED ||
-                intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1) == BluetoothAdapter.STATE_ON
-            if (on) {
+            val event = when (intent.action) {
+                BluetoothAdapter.ACTION_STATE_CHANGED ->
+                    if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1) == BluetoothAdapter.STATE_ON) BluetoothEvents.Event.AdapterOn
+                    else BluetoothEvents.Event.Other
+                BluetoothDevice.ACTION_ACL_CONNECTED -> BluetoothEvents.Event.AclConnected(
+                    @Suppress("DEPRECATION") intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)?.address)
+                else -> BluetoothEvents.Event.Other
+            }
+            if (BluetoothEvents.shouldReconnect(event, Settings(context).load().glassAddress)) {
                 bridge?.reconnectNow()
                 companion?.reconnectNow()
             }
@@ -120,10 +127,13 @@ class OpenMyGlassService : Service() {
                 scope = s,
             ).also { m -> s.launch { m.state.collect { companionState.value = it } }; m.start() }
         }
-        bridge.start()
+        // Bridge off: no loop waking up for nothing (§6)
+        if (settings.load().bridgeMode != BridgeMode.OFF) bridge.start()
         s.launch {
             combine(bridge.state, companionState) { b, c -> b to (c is ConnectionState.Connected) }.collect { (b, companionUp) ->
-                val text = ServiceStatus.text(b, companionUp, permissionMissing = !hasBluetoothPermission(this@OpenMyGlassService))
+                val env = Transports.environment(this@OpenMyGlassService)
+                val text = ServiceStatus.text(b, companionUp, permissionMissing = !env.hasBluetoothPermission,
+                    unavailableReason = TransportTargets.bridgeUnavailableReason(settings.load(), env))
                 getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text, ongoing = true))
                 NavigationHub.setBridgeStatus("bridge: ${describe(b)}" + if (companionUp) " · companion connected" else "")
             }

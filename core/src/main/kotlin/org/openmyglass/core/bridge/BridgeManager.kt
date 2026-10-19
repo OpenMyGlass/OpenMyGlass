@@ -23,6 +23,7 @@ class BridgeManager(
     backoff: Backoff = Backoff(),
     onStateChange: (LinkState<Bridge.Hello>) -> Unit = {},
     onError: (Throwable) -> Unit = {},
+    stableAfter: kotlin.time.Duration = kotlin.time.Duration.parse("30s"),
 ) {
     private inner class Session(private val link: BridgeLink) : LinkSession<Bridge.Hello> {
         override suspend fun handshake(): Bridge.Hello = link.handshake()
@@ -41,7 +42,7 @@ class BridgeManager(
     }
 
     private val manager = LinkManager(transport, { channel: Channel -> Session(BridgeLink(channel, appVersion)) },
-        scope, backoff, onStateChange, onError)
+        scope, backoff, onStateChange, onError, stableAfter)
 
     val state: StateFlow<LinkState<Bridge.Hello>> = manager.state
 

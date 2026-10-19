@@ -67,6 +67,7 @@ public final class NavCardState implements BridgeServer.FrameHandler {
     @Override
     public synchronized void onSessionStarted(BridgeServer.Sender sender) {
         this.sender = sender;
+        icons.clearRequested();
         cancelGrace();
     }
 
@@ -85,7 +86,8 @@ public final class NavCardState implements BridgeServer.FrameHandler {
     }
 
     @Override
-    public synchronized void onSessionEnded() {
+    public synchronized void onSessionEnded(BridgeServer.Sender ended) {
+        if (ended != sender) return;   // a replaced session ending late: the newer one is still active
         sender = null;
         if (nav == null) return;
         cancelGrace();

@@ -15,6 +15,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.openmyglass.core.transport.Channel
 import org.openmyglass.core.transport.Transport
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 /** One connected session of a link: handshake, then [run] until the link ends (returns) or fails (throws). */
 interface LinkSession<H> {
@@ -48,6 +50,8 @@ class LinkManager<H>(
     private val onStateChange: (LinkState<H>) -> Unit = {},
     /** Why an attempt or session ended (for logs); the loop retries regardless. */
     private val onError: (Throwable) -> Unit = {},
+    /** A session must stay up this long before the backoff resets (a peer failing right after the handshake keeps backing off). */
+    private val stableAfter: Duration = 30.seconds,
 ) {
     private val _state = MutableStateFlow<LinkState<H>>(LinkState.Disconnected)
     val state: StateFlow<LinkState<H>> = _state.asStateFlow()
@@ -56,6 +60,9 @@ class LinkManager<H>(
     @Volatile private var job: Job? = null
     @Volatile private var session: LinkSession<H>? = null
     @Volatile private var stopped = false
+    private val stateLock = Any()
+    /** Counts reconnectNow signals (under stateLock): a wait is skipped if one arrived after the attempt began. */
+    private var wakeGen = 0L
 
     fun start() {
         if (job?.isActive == true) return
@@ -64,23 +71,29 @@ class LinkManager<H>(
     }
 
     fun stop() {
-        stopped = true
+        // Under the state lock: no transition can be published after Stopped
+        synchronized(stateLock) {
+            stopped = true
+            onStateChange(LinkState.Stopped)
+            _state.value = LinkState.Stopped
+        }
         job?.cancel()
         session?.close()
-        onStateChange(LinkState.Stopped)
-        _state.value = LinkState.Stopped
     }
 
     /** Skips the current wait (Bluetooth turned on, device back in range, firmware ping). */
-    fun reconnectNow() {
+    fun reconnectNow() = synchronized(stateLock) {
         val s = _state.value
-        if (s is LinkState.WaitingToRetry || s is LinkState.Unavailable) wake.trySend(Unit)
+        if (s is LinkState.WaitingToRetry || s is LinkState.Unavailable) {
+            wakeGen++
+            wake.trySend(Unit)
+        }
     }
 
     /** The current session while connected, for sending; null otherwise. */
     fun currentSession(): LinkSession<H>? = session.takeIf { _state.value is LinkState.Connected }
 
-    private fun setState(s: LinkState<H>) {
+    private fun setState(s: LinkState<H>) = synchronized(stateLock) {
         if (stopped) return
         onStateChange(s)
         _state.value = s
@@ -89,11 +102,15 @@ class LinkManager<H>(
     private suspend fun loop() {
         var attempt = 0
         while (scope.isActive && !stopped) {
+            // Signals counted after `seen` mean something changed since this attempt began: skip the next wait.
+            // For an unavailable transport that is any signal after we asked for it (Bluetooth just turned on);
+            // for a real attempt, only signals after it started connecting (earlier ones are covered by it).
+            var seen = synchronized(stateLock) { wakeGen }
             val t = transport()
             if (t == null) {
                 setState(LinkState.Unavailable("no transport"))
             } else {
-                setState(LinkState.Connecting)
+                seen = synchronized(stateLock) { setState(LinkState.Connecting); wakeGen }
                 var channel: Channel? = null
                 var current: LinkSession<H>? = null
                 try {
@@ -103,10 +120,16 @@ class LinkManager<H>(
                     current = open(checkNotNull(channel)).also { session = it }
                     setState(LinkState.Handshaking)
                     val hello = current.handshake()
-                    backoff.reset()
-                    attempt = 0
                     setState(LinkState.Connected(hello))
-                    current.run()
+                    val connectedAt = TimeSource.Monotonic.markNow()
+                    try {
+                        current.run()
+                    } finally {
+                        if (connectedAt.elapsedNow() >= stableAfter) {
+                            backoff.reset()
+                            attempt = 0
+                        }
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -121,8 +144,12 @@ class LinkManager<H>(
             if (stopped) break
             attempt++
             val delay = backoff.next()
-            setState(LinkState.WaitingToRetry(attempt, delay))
-            withTimeoutOrNull(delay) { wake.receive() }
+            wake.tryReceive()   // a signal left over from an earlier wait must not cut this one short
+            val skip = synchronized(stateLock) {
+                setState(LinkState.WaitingToRetry(attempt, delay))
+                wakeGen != seen
+            }
+            if (!skip) withTimeoutOrNull(delay) { wake.receive() }
         }
     }
 }
