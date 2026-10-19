@@ -21,6 +21,12 @@ class FakeGlass private constructor(private val glass: Socket, val phoneChannel:
         return Envelope.parseFrom(frame)
     }
 
+    /** Reads the next raw frame payload sent by the phone, failing after [timeoutMs]. */
+    fun receiveRaw(timeoutMs: Int = 2_000): ByteArray {
+        glass.soTimeout = timeoutMs
+        return DelimitedFraming.readFrame(glass.getInputStream()) ?: error("phone closed the link")
+    }
+
     /** True if the phone sent nothing within [timeoutMs]. */
     fun silentFor(timeoutMs: Int): Boolean {
         glass.soTimeout = timeoutMs

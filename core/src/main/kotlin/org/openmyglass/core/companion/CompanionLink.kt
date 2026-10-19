@@ -1,16 +1,14 @@
 package org.openmyglass.core.companion
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.openmyglass.core.framing.DelimitedFraming
 import org.openmyglass.core.transport.Channel
+import org.openmyglass.core.transport.readFrameWithTimeout
 import org.openmyglass.protocol.companion.Companion.AndroidDeviceInfo
 import org.openmyglass.protocol.companion.Companion.CompanionDeviceInfo
 import org.openmyglass.protocol.companion.Companion.CompanionFeatureInfo
@@ -104,18 +102,8 @@ class CompanionLink(
 
     private fun readEnvelope(): Envelope? = DelimitedFraming.readFrame(channel.input)?.let(Envelope::parseFrom)
 
-    /** Blocking socket reads ignore coroutine cancellation, so a timeout closes the channel to unblock them. */
-    private suspend fun readWithTimeout(timeout: Duration): Envelope? = coroutineScope {
-        var timedOut = false
-        val watchdog = launch { delay(timeout); timedOut = true; close() }
-        try {
-            withContext(Dispatchers.IO) { readEnvelope() }
-        } catch (e: IOException) {
-            throw if (timedOut) IOException("handshake timed out after $timeout") else e
-        } finally {
-            watchdog.cancel()
-        }
-    }
+    private suspend fun readWithTimeout(timeout: Duration): Envelope? =
+        channel.readFrameWithTimeout(timeout, "handshake")?.let(Envelope::parseFrom)
 
     private fun toEvent(envelope: Envelope): CompanionEvent =
         if (envelope.hasGlassInfoResponseG2C()) CompanionEvent.GlassInfoReceived(envelope.glassInfoResponseG2C.toGlassInfo())
