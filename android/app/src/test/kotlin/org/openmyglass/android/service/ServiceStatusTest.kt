@@ -39,4 +39,12 @@ class ServiceStatusTest {
         assertEquals("Glass connected, OpenMyGlass app not reachable",
             ServiceStatus.text(LinkState.WaitingToRetry(5, 60.seconds), companionConnected = true, permissionMissing = false))
     }
+
+    @Test
+    fun `an unavailable bridge shows the reason`() {
+        // Issue #18: not "Glass not reachable" when the user just has to choose a Glass or turn Bluetooth on
+        assertEquals("Choose your Glass in settings",
+            ServiceStatus.text(LinkState.WaitingToRetry(1, 1.seconds), false, false, unavailableReason = "Choose your Glass in settings"))
+        assertEquals("Glass connected", ServiceStatus.text(hello, false, false, unavailableReason = null))
+    }
 }

@@ -36,6 +36,16 @@ object TransportTargets {
         BridgeMode.BLUETOOTH -> rfcomm(settings, env, BridgeLink.RFCOMM_UUID)
     }
 
+    /** Why [bridge] gives no target, in words for the user; null when a target exists. */
+    fun bridgeUnavailableReason(settings: LinkSettings, env: Environment): String? = when {
+        settings.bridgeMode == BridgeMode.OFF -> "Bridge is off"
+        settings.bridgeMode == BridgeMode.TCP -> null
+        settings.glassAddress == null -> "Choose your Glass in settings"
+        !env.hasBluetoothPermission -> "Bluetooth permission needed"
+        !env.bluetoothOn -> "Bluetooth is off"
+        else -> null
+    }
+
     fun companion(settings: LinkSettings, env: Environment): TransportTarget? =
         if (settings.companionEnabled) rfcomm(settings, env, CompanionConstants.SECURE_UUID) else null
 
