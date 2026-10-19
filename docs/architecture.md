@@ -1,6 +1,6 @@
 # OpenMyGlass architecture (Phase 3)
 
-Status: **draft for the owner's review** (2026-10-19), updated with the owner's answers on navigation source, Android Auto, hardware, offline transcription, the optional minimap and iOS readiness. Inputs: [`project-brief.md`](project-brief.md), [`feature-inventory.md`](feature-inventory.md), [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [`cloud-dependencies.md`](cloud-dependencies.md), [`prior-art.md`](prior-art.md), [`emulator-feasibility.md`](emulator-feasibility.md).
+Status: **approved by the owner** (2026-10-19), updated with the owner's answers on navigation source, Android Auto, hardware, offline transcription, the optional minimap and iOS readiness. Inputs: [`project-brief.md`](project-brief.md), [`feature-inventory.md`](feature-inventory.md), [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [`cloud-dependencies.md`](cloud-dependencies.md), [`prior-art.md`](prior-art.md), [`emulator-feasibility.md`](emulator-feasibility.md).
 
 ## 1. Intent
 
