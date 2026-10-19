@@ -19,7 +19,7 @@ The OpenMyGlass app that runs on Glass Explorer Edition XE24. It receives naviga
 
 ## Security note (TCP debug port)
 
-The phone normally uses Bluetooth RFCOMM, where pairing authenticates it. The TCP debug port **7825 listens on all interfaces with no authentication**: anyone on the same Wi-Fi or hotspot can connect.
+The phone normally uses Bluetooth RFCOMM, where pairing authenticates it. The TCP debug port **7825 listens on all interfaces with no authentication**: anyone on the same Wi-Fi or hotspot can connect. On Glass it is opened **only by debuggable builds**; release builds listen on RFCOMM only.
 - A connection becomes the active session only after a valid Hello within 5 s, so a stray connection (e.g. a port scan) does not drop the phone's session.
 - A client that does send a Hello can replace the session and push cards.
 

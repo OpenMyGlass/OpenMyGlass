@@ -16,6 +16,8 @@ data class LinkSettings(
     val tcpPort: Int = 7825,
     /** Original companion link to the XE24 firmware (time zone, device info). */
     val companionEnabled: Boolean = true,
+    /** The user connected and did not disconnect: start the service again after a reboot. */
+    val autoStart: Boolean = false,
 )
 
 /** What the phone can do right now. */

@@ -12,8 +12,7 @@ import android.os.PowerManager;
 import com.google.android.glass.timeline.LiveCard;
 
 import org.openmyglass.glass.bridge.BridgeServer;
-import org.openmyglass.glass.bridge.ServerChannel;
-import org.openmyglass.glass.bridge.TcpServerChannel;
+import org.openmyglass.glass.bridge.BridgeChannels;
 import org.openmyglass.glass.nav.CardBinder;
 import org.openmyglass.glass.nav.HandlerScheduler;
 import org.openmyglass.glass.nav.IconCache;
@@ -51,8 +50,9 @@ public final class NavLiveCardService extends Service {
                 main.post(new Runnable() { @Override public void run() { end(); } });
             }
         }, new HandlerScheduler(main), 30_000);
-        // RFCOMM for the phone (bonding authenticates it); TCP stays as the documented debug path
-        server = new BridgeServer(java.util.Arrays.<ServerChannel>asList(new RfcommServerChannel(), new TcpServerChannel(PORT)),
+        // RFCOMM for the phone (bonding authenticates it); the unauthenticated TCP debug port only on debuggable builds
+        boolean debuggable = (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        server = new BridgeServer(BridgeChannels.forBuild(new RfcommServerChannel(), PORT, debuggable),
                 state, BridgeServer.DEFAULT_HELLO_TIMEOUT_MS);
         server.start();
     }

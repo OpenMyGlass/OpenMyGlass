@@ -71,19 +71,28 @@ class OpenMyGlassService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        // Enter the foreground first, whatever happens next: a service started with startForegroundService that
+        // stops without startForeground crashes the app. Without BLUETOOTH_CONNECT this throws on API 34+
+        // (connectedDevice prerequisite), and a sticky restart may be refused the foreground: stop cleanly.
+        val foreground = try {
+            startForeground(NOTIFICATION_ID, notification("Starting…", ongoing = true), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            true
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "cannot start in the foreground: $e")
+            false
+        }
+        val permitted = hasBluetoothPermission(this)
+        if (!foreground || !permitted) {
+            if (foreground) stopForeground(STOP_FOREGROUND_REMOVE)
+            // Own id: the system removes the foreground notification's id when the service stops
+            getSystemService(NotificationManager::class.java).notify(PROBLEM_NOTIFICATION_ID, notification(
+                if (permitted) "Could not start, open OpenMyGlass" else
+                    ServiceStatus.text(LinkState.Stopped, companionConnected = false, permissionMissing = true), ongoing = false))
+            NavigationHub.setBridgeStatus(if (permitted) "service: could not start" else "service: Bluetooth permission needed")
             stopSelf()
             return START_NOT_STICKY
         }
-        if (!hasBluetoothPermission(this)) {
-            // A connectedDevice foreground service needs BLUETOOTH_CONNECT: say so instead of crashing.
-            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(
-                ServiceStatus.text(LinkState.Stopped, companionConnected = false, permissionMissing = true), ongoing = false))
-            NavigationHub.setBridgeStatus("service: Bluetooth permission needed")
-            stopSelf()
-            return START_NOT_STICKY
-        }
-        startForeground(NOTIFICATION_ID, notification("Starting…", ongoing = true), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        getSystemService(NotificationManager::class.java).cancel(PROBLEM_NOTIFICATION_ID)
         restartLinks()
         return START_STICKY
     }
@@ -158,18 +167,23 @@ class OpenMyGlassService : Service() {
         private const val TAG = "OpenMyGlassService"
         private const val CHANNEL = "links"
         private const val NOTIFICATION_ID = 1
-        const val ACTION_STOP = "org.openmyglass.android.STOP"
-
+        private const val PROBLEM_NOTIFICATION_ID = 2
         fun hasBluetoothPermission(context: Context) = Build.VERSION.SDK_INT < 31 ||
             context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
 
         /** Starts (or restarts with the saved settings) the service; false if the permission is missing. */
         fun start(context: Context): Boolean {
             if (!hasBluetoothPermission(context)) return false
+            val settings = Settings(context)
+            settings.save(settings.load().copy(autoStart = true))
             context.startForegroundService(Intent(context, OpenMyGlassService::class.java))
             return true
         }
 
-        fun stop(context: Context) = context.stopService(Intent(context, OpenMyGlassService::class.java))
+        fun stop(context: Context) {
+            val settings = Settings(context)
+            settings.save(settings.load().copy(autoStart = false))
+            context.stopService(Intent(context, OpenMyGlassService::class.java))
+        }
     }
 }
