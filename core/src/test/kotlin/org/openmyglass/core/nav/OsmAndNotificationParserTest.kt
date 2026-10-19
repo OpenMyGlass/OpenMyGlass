@@ -24,4 +24,10 @@ class OsmAndNotificationParserTest {
         assertEquals(OsmAndNotificationParser.Extra(null, null), OsmAndNotificationParser.parse(n(null)))
         assertEquals(OsmAndNotificationParser.Extra("Arrived", null), OsmAndNotificationParser.parse(n("Arrived")))
     }
+
+    @Test
+    fun `stats-only text near the destination gives only the eta`() {
+        // Captured at the end of a route: OsmAnd drops the instruction line
+        assertEquals(OsmAndNotificationParser.Extra(null, "22:23"), OsmAndNotificationParser.parse(n("100 m • <1 min • 22:23 • 0 km/h")))
+    }
 }

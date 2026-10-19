@@ -1,13 +1,16 @@
 package org.openmyglass.android.notifications
 
+import android.app.Notification
 import android.graphics.Bitmap
 import android.graphics.drawable.Icon
 import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import org.openmyglass.android.nav.IconEncoder
+import org.openmyglass.android.nav.NavigationHub
+import org.openmyglass.core.nav.NotificationText
+import org.openmyglass.core.nav.OsmAndNotificationParser
 import java.io.File
-import java.nio.ByteBuffer
-import java.security.MessageDigest
 
 /**
  * Notification access for OpenMyGlass. For now it only has a capture mode that records navigation
@@ -15,8 +18,15 @@ import java.security.MessageDigest
  */
 class OpenMyGlassNotificationListener : NotificationListenerService() {
 
+    override fun onListenerConnected() {
+        NavigationHub.init(applicationContext)
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        if (!isCaptureEnabled(this) || sbn.packageName !in CAPTURED_PACKAGES) return
+        if (sbn.packageName !in CAPTURED_PACKAGES) return
+        NavigationHub.init(applicationContext)
+        runCatching { feedNavigation(sbn) }
+        if (!isCaptureEnabled(this)) return
         val n = sbn.notification
         @Suppress("DEPRECATION")
         val line = NotificationDump.toJson(
@@ -32,6 +42,31 @@ class OpenMyGlassNotificationListener : NotificationListenerService() {
             )
         )
         runCatching { captureFile(this).appendText(line + "\n") }
+    }
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        if (sbn.packageName !in CAPTURED_PACKAGES || sbn.notification.category != Notification.CATEGORY_NAVIGATION) return
+        NavigationHub.init(applicationContext)
+        if (sbn.packageName == MAPS) NavigationHub.maps.onRemoved() else NavigationHub.osmand.onNavigationNotificationRemoved()
+    }
+
+    /** Navigation notifications → sources: Google Maps fully, OsmAnd for the street/ETA its AIDL API lacks. */
+    private fun feedNavigation(sbn: StatusBarNotification) {
+        val n = sbn.notification
+        if (n.category != Notification.CATEGORY_NAVIGATION) return
+        val e = n.extras
+        val icon = (n.getLargeIcon()?.let { runCatching { it.loadDrawable(this) }.getOrNull() } as? android.graphics.drawable.BitmapDrawable)?.bitmap
+        val encoded = icon?.let { IconEncoder.encode(it) }
+        encoded?.let { (sha, png) -> NavigationHub.putIcon(sha, png) }
+        val text = NotificationText(
+            title = e.getCharSequence(Notification.EXTRA_TITLE)?.toString(),
+            text = e.getCharSequence(Notification.EXTRA_TEXT)?.toString(),
+            subText = e.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString(),
+            bigText = e.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString(),
+            iconSha256 = encoded?.first,
+        )
+        if (sbn.packageName == MAPS) NavigationHub.maps.onPosted(text)
+        else NavigationHub.osmand.onNotification(OsmAndNotificationParser.parse(text))
     }
 
     /** One extra at a time: a value that cannot be read (e.g. a custom Parcelable) becomes a placeholder. */
@@ -52,11 +87,7 @@ class OpenMyGlassNotificationListener : NotificationListenerService() {
     /** Only metadata and a hash leave the device: icons from other apps are never stored as images. */
     private fun imageMeta(bitmap: Bitmap): Map<String, Any?> {
         val meta = mapOf("type" to "image", "width" to bitmap.width, "height" to bitmap.height)
-        val sha = runCatching {
-            val readable = if (bitmap.config == Bitmap.Config.HARDWARE) bitmap.copy(Bitmap.Config.ARGB_8888, false) else bitmap
-            val buffer = ByteBuffer.allocate(readable.byteCount).also { readable.copyPixelsToBuffer(it) }
-            MessageDigest.getInstance("SHA-256").digest(buffer.array()).joinToString("") { "%02x".format(it) }
-        }.getOrNull()
+        val sha = runCatching { IconEncoder.pixelSha256(bitmap) }.getOrNull()
         return if (sha != null) meta + ("sha256" to sha) else meta
     }
 
@@ -68,7 +99,8 @@ class OpenMyGlassNotificationListener : NotificationListenerService() {
     }
 
     companion object {
-        val CAPTURED_PACKAGES = setOf("com.google.android.apps.maps", "net.osmand.plus", "net.osmand")
+        private const val MAPS = "com.google.android.apps.maps"
+        val CAPTURED_PACKAGES = setOf(MAPS, "net.osmand.plus", "net.osmand")
         private const val PREFS = "capture"
         private const val KEY_ENABLED = "enabled"
 

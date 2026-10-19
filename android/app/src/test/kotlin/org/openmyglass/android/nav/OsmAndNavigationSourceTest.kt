@@ -135,4 +135,30 @@ class OsmAndNavigationSourceTest {
         assertTrue(source.available.value)
         assertEquals(100, source.current.value?.distanceMeters)
     }
+
+    @Test
+    fun `notification text adds instruction and eta`() {
+        val binder = FakeBinder(); val api = FakeApi()
+        val source = OsmAndNavigationSource(binder)
+        source.start(); binder.onConnected!!(api)
+        api.nav!!(60, 5)
+        source.onNotification(org.openmyglass.core.nav.OsmAndNotificationParser.Extra("Turn right and go Obergass", "8:17 PM"))
+        assertEquals("Turn right and go Obergass", source.current.value!!.instruction)
+        assertEquals("8:17 PM", source.current.value!!.eta)
+        api.nav!!(40, 5)
+        assertEquals("8:17 PM", source.current.value!!.eta)
+        assertEquals(40, source.current.value!!.distanceMeters)
+    }
+
+    @Test
+    fun `navigation notification removal ends navigation`() {
+        // OsmAnd sends no final callback when navigation is stopped; its notification disappears instead
+        val binder = FakeBinder(); val api = FakeApi()
+        val source = OsmAndNavigationSource(binder)
+        source.start(); binder.onConnected!!(api)
+        api.nav!!(60, 5)
+        source.onNavigationNotificationRemoved()
+        assertNull(source.current.value)
+        assertTrue(source.available.value)
+    }
 }

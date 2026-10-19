@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- TCP bridge transport (debug connection to sim-glass; Wi-Fi bridge to Glass later). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Package visibility for binding OsmAnd's AIDL service (Android 11+). -->
     <queries>
         <package android:name="net.osmand.plus" />

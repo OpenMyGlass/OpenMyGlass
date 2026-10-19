@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.openmyglass.core.nav.NavUpdate
 import org.openmyglass.core.nav.NavUpdateReducer
 import org.openmyglass.core.nav.NavigationSource
+import org.openmyglass.core.nav.OsmAndNotificationParser
 
 /**
  * Navigation updates from OsmAnd's public AIDL API (docs/navigation-sources.md).
@@ -24,6 +25,8 @@ class OsmAndNavigationSource(private val binder: OsmAndBinder) : NavigationSourc
     private var registrations: List<Long> = emptyList()
     private var generation = 0
     private var started = false
+    /** Instruction (with street) and ETA from OsmAnd's own notification, which its AIDL API lacks. */
+    private var extra = OsmAndNotificationParser.Extra(null, null)
 
     private val _available = MutableStateFlow(false)
     override val available: StateFlow<Boolean> = _available.asStateFlow()
@@ -77,12 +80,12 @@ class OsmAndNavigationSource(private val binder: OsmAndBinder) : NavigationSourc
         val ids = listOf(
             runCatching {
                 connected.registerNavigation { distanceTo, turnType ->
-                    synchronized(lock) { if (gen == generation) _current.value = reducer.onDirection(distanceTo, turnType) }
+                    synchronized(lock) { if (gen == generation) _current.value = merged(reducer.onDirection(distanceTo, turnType)) }
                 }
             }.getOrDefault(FAILED),
             runCatching {
                 connected.registerVoice { played ->
-                    synchronized(lock) { if (gen == generation) reducer.onVoicePlayed(played)?.let { _current.value = it } }
+                    synchronized(lock) { if (gen == generation) reducer.onVoicePlayed(played)?.let { _current.value = merged(it) } }
                 }
             }.getOrDefault(FAILED),
         )
@@ -94,6 +97,23 @@ class OsmAndNavigationSource(private val binder: OsmAndBinder) : NavigationSourc
             if (!_available.value) _current.value = null
         }
     }
+
+    /** Called by the notification listener for OsmAnd's navigation notification. */
+    fun onNotification(update: OsmAndNotificationParser.Extra) = synchronized(lock) {
+        extra = update
+        _current.value = merged(reducer.current)
+    }
+
+    /** OsmAnd sends no final callback when navigation stops; the removal of its navigation notification is the signal. */
+    fun onNavigationNotificationRemoved() = synchronized(lock) {
+        extra = OsmAndNotificationParser.Extra(null, null)
+        _current.value = reducer.onNavigationStopped()
+    }
+
+    private fun merged(update: NavUpdate?): NavUpdate? = update?.copy(
+        instruction = extra.instruction ?: update.instruction,
+        eta = extra.eta ?: update.eta,
+    )
 
     private fun onDisconnected(bindingDied: Boolean) {
         val rebind = synchronized(lock) {
@@ -118,6 +138,7 @@ class OsmAndNavigationSource(private val binder: OsmAndBinder) : NavigationSourc
     }
 
     private fun clear() {
+        extra = OsmAndNotificationParser.Extra(null, null)
         _available.value = false
         _current.value = reducer.onNavigationStopped()
     }
