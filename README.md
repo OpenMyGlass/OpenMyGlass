@@ -1,29 +1,29 @@
 # OpenMyGlass
 
-Companion open source per **Google Glass Explorer Edition (XE24)**, senza cloud Google.
-Ricostruisce in chiave clean-room le funzioni dell'app MyGlass: navigazione Google Maps sugli occhiali,
-notifiche complete del telefono, configurazione Wi-Fi, screencast, batteria, sincronizzazione foto/video,
-gestione Glassware e GPS condiviso. Prima Android, con architettura pronta per iOS.
+Open-source, cloud-free companion for **Google Glass Explorer Edition (XE24)**.
+A clean-room rebuild of what the MyGlass app offered: Google Maps navigation on the glasses, full phone
+notifications, Wi-Fi setup, screencast, battery, photo/video sync, Glassware management and shared GPS.
+Android first, with an architecture ready for iOS.
 
-> Stato: **Fase 0 – impostazione**. Vedi [`docs/progress.md`](docs/progress.md).
+> Status: **Phase 2 – reverse engineering**. See [`docs/progress.md`](docs/progress.md).
 
-## Struttura
+## Layout
 
-| Cartella | Contenuto |
+| Folder | Content |
 |---|---|
-| `docs/` | Documentazione di reverse engineering, protocollo e architettura |
-| `protocol/` | Definizioni dei messaggi (`.proto` o schema), versionate |
-| `core/` | Logica delle feature indipendente dal trasporto |
-| `android/` | App companion Android |
-| `glass-xe/` | App ponte GDK per Explorer XE24 (se prevista dall'architettura) |
-| `tools/` | Peer simulati, harness di test, script adb |
+| `docs/` | Reverse-engineering, protocol and architecture documentation |
+| `protocol/` | Message definitions (`.proto` or schema), versioned |
+| `core/` | Transport-independent feature logic |
+| `android/` | Android companion app |
+| `glass-xe/` | GDK bridge app for Explorer XE24 (if the architecture needs one) |
+| `tools/` | Simulated peers, test harnesses, adb and reverse-engineering scripts |
 
-## Approccio clean-room
+## Clean-room approach
 
-Nessun binario, immagine di sistema o codice decompilato di Google viene committato.
-L'analisi avviene in una cartella locale `_re/` (esclusa da git); la specifica in `docs/`
-fa da ponte tra analisi e implementazione, che è codice originale.
+No Google binaries, system images or decompiled code are committed.
+Analysis happens in a local `_re/` folder (git-ignored); the specification in `docs/` bridges analysis
+and implementation, which is original code. `tools/check-clean-room.sh` guards against accidental commits.
 
-## Licenza
+## License
 
 [GPL-3.0](LICENSE)

@@ -1,3 +1,5 @@
+> Original project brief in Italian, as written by the project owner. English version: [`project-brief.md`](project-brief.md).
+
 # Progetto: OpenMyGlass — reverse engineering di MyGlass e companion open source senza cloud Google
 
 ## Ruolo e obiettivo
