@@ -129,6 +129,8 @@ public final class DictationActivity extends Activity implements DictationClient
     }
 
     private void fail(String message) {
+        // The microphone must not keep running for a request the phone already refused (battery, §6)
+        if (recorder != null) recorder.stop();
         show(Phase.FAILED, message + " · tap to retry", null);
     }
 

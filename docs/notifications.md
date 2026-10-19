@@ -66,3 +66,42 @@ Notification content leaves the phone only over the bridge to the owner's Glass.
 ## Not verified yet (hardware checklist in `progress.md`)
 
 On XE24, the touchpad's swipes reaching `NotificationsActivity` as D-pad/Tab keys, the options menu rendering, and the wake behavior.
+
+## Dictated replies (plan 5b)
+
+A notification action with a `RemoteInput` shows as **Reply** on Glass.
+1. Glass records with the microphone (16 kHz mono PCM16; 44.1 kHz microphones are downsampled in Java) and streams ~100 ms chunks over the bridge. The microphone is on only while recording, which stops:
+   - when you tap;
+   - after 2 s of silence following speech;
+   - after 8 s without speech;
+   - at 30 s.
+2. The phone transcribes **offline** with [Vosk](https://alphacephei.com/vosk/) (Apache 2.0).
+   - The Italian (`vosk-model-small-it-0.22`, 48 MB) or English (`vosk-model-small-en-us-0.15`, 40 MB) model is downloaded once, only when you press "Download speech model" in settings.
+   - Its SHA-256 is checked before unpacking.
+   - No cloud speech service is used; audio and text are never stored or logged.
+3. Glass shows the transcript; tap opens Send / Retry / Cancel (the emulator shows buttons).
+4. On Send the phone fills the notification's `RemoteInput` and fires its action, then Glass shows "Sent" or why it failed. Possible failures:
+   - the notification is gone;
+   - the app refused the reply;
+   - the request expired after 60 s.
+
+Errors reach Glass at once: no model downloaded, nothing heard, phone not reachable. One dictation at a time; a new one cancels the older one.
+
+Bridge messages (Frame fields 9–14):
+
+| Message | Direction |
+|---|---|
+| `DictationStart{request_id, key, action_index, sample_rate}` | Glass → phone |
+| `AudioChunk{request_id, seq, pcm}` | Glass → phone |
+| `DictationEnd{request_id, cancelled}` | Glass → phone |
+| `Transcript{request_id, text, final, error}` | phone → Glass |
+| `ReplyConfirm{request_id, send}` | Glass → phone |
+| `ReplyResult{request_id, ok, message}` | phone → Glass |
+
+**Verified on the emulator (2026-10-20):**
+- Model download: Italian model from settings in 12 s, checksum ok.
+- Transcription: an Italian sentence (macOS voice "Alice", 3.2 s) was transcribed offline as "arrivo tra dieci minuti ci vediamo davanti al bar", with the transcript on Glass about 5 s after Reply.
+- Send: the test notification's `RemoteInput` received the text ("Replied: …" on the phone and on the Glass card).
+- With the English model missing, Glass showed "Download the English speech model…" at once.
+
+**Not verified yet:** Glass XE24 microphone quality and 16 kHz support, real latency over RFCOMM, the touchpad flow (hardware checklist).
