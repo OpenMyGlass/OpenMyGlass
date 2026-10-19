@@ -10,8 +10,8 @@ Current plan: [`superpowers/plans/2026-10-19-phase-0-2-reverse-engineering.md`](
 | 0 — Tool inventory and repo setup | ✅ done (2026-10-19); `tools/check-tools.sh` checks tools, `tools/check-clean-room.sh` blocks Google material |
 | 1 — Binary retrieval (MyGlass APK, XE24 image) | ✅ done (2026-10-19), see [`sources.md`](sources.md) |
 | 2 — Reverse engineering and mapping | ✅ done (2026-10-19): [`feature-inventory.md`](feature-inventory.md), [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [`cloud-dependencies.md`](cloud-dependencies.md), [`prior-art.md`](prior-art.md) — **waiting for the owner's review of the inventory** |
-| 3 — Architecture | ⏳ — **stop: architecture approval** |
-| 4 — Android implementation | ⏳ |
+| 3 — Architecture | ✅ approved by the owner (2026-10-19): option **C (hybrid)**, [`architecture.md`](architecture.md) |
+| 4 — Android implementation | ⏳ next: plan for steps 1–2 (core, sim-glass, CompanionLink) |
 | 5 — iOS plan | ⏳ (only on request) |
 
 ## Phase 0 — Tool inventory (macOS arm64, 2026-10-19)
@@ -68,6 +68,7 @@ The similar counts across Glass apps (7 UUIDs, 4 RFCOMM files) come from a share
 - 2026-10-19 — Public repo; reverse-engineering workspace in `_re/`, excluded from git.
 - 2026-10-19 — **No Glass hardware available for now.** Start with emulator/simulator; hardware tests (adb, HCI snoop) stay planned but postponed.
 - 2026-10-19 — All repo content in **English**.
+- 2026-10-19 — Architecture option **C (hybrid)**. Owner priorities: navigation (car and on foot, with Android Auto), notifications with dictated replies (offline transcription on the phone), photo/video sync on Wi-Fi + charging. Navigation source: an app with a navigation API preferred (OsmAnd candidate), Google Maps notification as fallback.
 
 ## Open issues
 
