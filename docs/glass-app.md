@@ -25,6 +25,10 @@ The phone normally uses Bluetooth RFCOMM, where pairing authenticates it. The TC
 
 Use it only on trusted networks; it is meant for development.
 
+## Notifications
+
+The same bridge session also carries phone notifications: see [`notifications.md`](notifications.md). `BridgeService` (formerly `NavLiveCardService`) owns both LiveCards.
+
 ## Flavors
 
 | Flavor | Renderer | Target |

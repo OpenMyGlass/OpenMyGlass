@@ -14,7 +14,7 @@ import org.openmyglass.core.notif.NotificationFilter
 
 /** Debug: a notification on the channel the filter lets through, with a plain action and a reply action. */
 object TestNotification {
-    private var counter = 0
+    private var counter = 1_000   // ids clear of the service notification (1, 2)
 
     fun post(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
@@ -22,7 +22,7 @@ object TestNotification {
         val id = ++counter
         val ping = PendingIntent.getBroadcast(context, id, Intent(context, TestActionReceiver::class.java).putExtra("id", id),
             PendingIntent.FLAG_IMMUTABLE)
-        val reply = PendingIntent.getBroadcast(context, 1000 + id, Intent(context, TestActionReceiver::class.java).putExtra("id", id),
+        val reply = PendingIntent.getBroadcast(context, 100_000 + id, Intent(context, TestActionReceiver::class.java).putExtra("id", id),
             PendingIntent.FLAG_MUTABLE)
         val n = Notification.Builder(context, NotificationFilter.TEST_CHANNEL)
             .setSmallIcon(android.R.drawable.ic_dialog_email)

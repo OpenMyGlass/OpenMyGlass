@@ -27,8 +27,9 @@ class DebugActivity : Activity() {
         super.onCreate(savedInstanceState)
         val osmandStatus = TextView(this)
         val bridgeStatus = TextView(this)
-        // Default: the host machine as seen from the Android emulator, where `sim-glass --bridge` listens.
-        val bridgeAddress = android.widget.EditText(this).apply { setText("10.0.2.2:7824"); isSingleLine = true }
+        // The last TCP bridge address used (default: the host machine as seen from the emulator)
+        val saved = org.openmyglass.android.transport.Settings(this).load()
+        val bridgeAddress = android.widget.EditText(this).apply { setText("${saved.tcpHost}:${saved.tcpPort}"); isSingleLine = true }
         val allowOsmAnd = Button(this).apply {
             text = "Allow OpenMyGlass in OsmAnd"
             visibility = android.view.View.GONE
