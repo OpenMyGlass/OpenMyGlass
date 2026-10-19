@@ -1,0 +1,358 @@
+// Generato da tools/re/nano2proto.py from TimelineNano.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.timelinenano;
+
+enum PhoneNumberLabel {
+  HOME = 1;
+  MOBILE = 2;
+  OTHER = 0;
+  WORK = 3;
+}
+
+enum SharingFeature {
+  ADD_CAPTION = 0;
+}
+
+message TimelineItem {
+  optional string id = 1;
+  optional uint64 creationTime = 2;
+  optional uint64 modifiedTime = 3;
+  optional string source = 4;
+  optional Entity creator = 5;
+  repeated Entity shareTarget = 6;
+  optional string inReplyTo = 7;
+  optional string text = 8;
+  repeated Attachment attachment = 9;
+  optional Location location = 10;
+  repeated MenuItem menuItem = 11;
+  optional int32 cloudSyncStatus = 12;
+  optional int32 cloudSyncProtocol = 13;
+  optional int32 sourceType = 14;  // enum? SourceType [unverified]
+  optional bool isDeleted = 15;
+  optional NotificationConfig notification = 16;
+  optional uint64 displayTime = 17;
+  repeated MenuItem pendingAction = 18;
+  optional string speakableText = 19;
+  optional int32 smsType = 20;  // enum? SmsType [unverified]
+  optional bool isPinned = 21;
+  optional string title = 23;
+  optional string html = 24;
+  optional string bundleId = 25;
+  optional string sendToPhoneUrl = 28;
+  optional bool isBundleCover = 29;
+  optional string sourceItemId = 30;
+  optional string canonicalUrl = 31;
+  optional int32 companionSyncStatus = 33;
+  optional int32 companionSyncProtocol = 34;
+  optional uint64 pinTime = 35;
+  optional int32 pinScore = 36;
+  optional string sourceAccountId = 37;
+  optional string speakableType = 38;
+  optional uint64 expirationTime = 39;
+  optional int32 viewType = 40;  // enum? ViewType [unverified]
+  repeated int32 sharingFeature = 41;
+  optional ProgressStatus progressStatus = 42;
+  repeated LinkSpec linkSpec = 43;
+  optional bool requireLinkify = 44;
+  repeated LinkSpec htmlLinkSpec = 45;
+  optional int32 attributionType = 46;  // enum? AttributionType [unverified]
+  optional FailedDeliveryInfo failedDeliveryInfo = 49;
+  optional bool isDirectoryCover = 50;
+  optional LoggingAnnotations loggingAnnotations = 51;
+  optional string glanceableContent = 52;
+
+  enum AttributionType {
+    ANDROID_WEAR = 11;
+    BUGREPORT = 9;
+    CAMERA_PICTURE = 0;
+    CAMERA_VIDEO = 1;
+    MUSIC_HISTORY = 7;
+    NAVIGATION = 8;
+    PHONE_CALL = 4;
+    SEARCH_HISTORY = 3;
+    SOUND_SEARCH_HISTORY = 6;
+    TEXT_MESSAGE = 10;
+    VIGNETTE = 2;
+  }
+
+  enum SmsType {
+    COMPANION_DECIDES = 2;
+    GOOGLE_VOICE = 1;
+    NATIVE = 0;
+  }
+
+  enum SourceType {
+    COMPANIONWARE = 2;
+    GLASSWARE = 0;
+    GLASS_DEVICE = 1;
+  }
+
+  enum SyncProtocol {
+    ALWAYS = 0;
+    NEVER = 2;
+    OPPORTUNISTIC = 1;
+  }
+
+  enum SyncStatus {
+    NOT_SYNCED = 0;
+    SYNCED = 1;
+    SYNC_FAILED = 2;
+    SYNC_FAILED_PERMANENTLY = 3;
+  }
+
+  enum ViewType {
+    CALL = 6;
+    CONNECTIVITY_STATUS = 10;
+    HANGOUT = 7;
+    HTML = 4;
+    IMAGE = 2;
+    MAP = 13;
+    MESSAGE = 1;
+    MESSAGE_IPHONE = 11;
+    MULTIMEDIA_MESSAGE = 14;
+    MUSIC = 9;
+    SEARCH = 5;
+    SIDE_IMAGE = 12;
+    SOUND_SEARCH = 8;
+    TEXT = 0;
+    UNSET = -1;
+    VIDEO = 3;
+  }
+
+  message ProgressStatus {
+    optional string label = 1;
+  }
+}
+
+message LinkSpec {
+  optional uint32 start = 1;
+  optional uint32 end = 2;
+  optional string url = 3;
+}
+
+message Location {
+  optional double latitude = 1;
+  optional double longitude = 2;
+  optional string displayName = 3;
+  optional string address = 4;
+  optional uint64 timestamp = 5;
+  optional double accuracy = 6;
+  optional string id = 7;
+  optional string levelId = 8;
+  optional float levelNumber = 9;
+  optional string source = 10;
+}
+
+message Attachment {
+  optional string id = 1;
+  optional string contentType = 2;
+  optional string contentUrl = 3;
+  optional string thumbnailUrl = 4;
+  optional string clientCachePath = 5;
+  optional uint64 creationTime = 6;
+  optional bool isProcessingContent = 7;
+  optional string source = 8;
+}
+
+message MessagingPersona {
+  optional string source = 1;
+  optional string personaId = 2;
+  optional bool isDefault = 3;
+  repeated string acceptType = 4;
+  repeated int32 sharingFeature = 5;
+  optional string displayId = 6;
+  optional string phoneNumber = 7;
+  optional PhoneNumberPersona phoneNumberPersona = 8;
+  optional DisplayMetadata displayMetadata = 9;
+
+  message PhoneNumberPersona {
+    optional string phoneNumber = 1;
+    optional int32 label = 2;
+  }
+
+  message DisplayMetadata {
+    optional string profileEmail = 1;
+  }
+}
+
+message Entity {
+  optional string source = 1;
+  optional string id = 2;
+  optional string displayName = 3;
+  optional bool shouldSync = 5;
+  optional int32 type = 6;  // enum? Type [unverified]
+  optional string phoneNumber = 7;
+  optional string email = 8;
+  repeated string acceptType = 9;
+  optional bool isCommunicationTarget = 10;
+  repeated string imageUrl = 12;
+  repeated string secondaryPhoneNumber = 13;
+  optional Priority priority = 14;
+  repeated string secondaryEmail = 15;
+  repeated Command acceptCommand = 16;
+  optional string speakableName = 17;
+  repeated int32 contactGroup = 20;  // enum? ContactGroup [unverified]
+  optional uint64 creationTime = 21;
+  repeated MessagingPersona messagingPersona = 22;
+  optional string nickname = 23;
+  optional int32 messagingOption = 25;  // enum? MessagingOption [unverified]
+  optional string fullName = 26;
+  repeated int32 sharingFeature = 27;
+  optional string obfuscatedGaiaId = 28;
+  repeated uint64 focusContactId = 29;
+
+  enum ContactGroup {
+    CIRCLES = 2;
+    MY_CONTACTS = 0;
+    STARRED = 1;
+  }
+
+  enum MessagingOption {
+    EMAIL = 1;
+    PERSONA = 0;
+    SMS = 2;
+  }
+
+  enum Type {
+    GROUP = 0;
+    INDIVIDUAL = 1;
+  }
+
+  message Priority {
+    optional uint32 glasswareAffinity = 1;
+    optional uint32 usageCount = 2;
+    optional uint64 contentUsageTimestampMs = 3;
+    optional uint64 phoneUsageTimestampMs = 4;
+  }
+
+  message Command {
+    optional int32 type = 1;  // enum? CommandType [unverified]
+    optional bool isVoiceEnabled = 2;
+    optional int32 inputType = 3;  // enum? InputType [unverified]
+    optional string pendingLabel = 4;
+    optional string completionLabel = 5;
+    optional int32 invocationMode = 6;  // enum? InvocationMode [unverified]
+
+    enum CommandType {
+      ADD_AN_EVENT = 3;
+      LOG_A_MEAL = 7;
+      POST_AN_UPDATE = 1;
+      POST_A_QUESTION = 11;
+      REMEMBER_WHERE_I_AM = 8;
+      REMIND_ME = 10;
+      TAKE_A_NOTE = 0;
+    }
+
+    enum InputType {
+      DICTATION = 2;
+      LOCAL_SEARCH = 1;
+      NO_INPUT = 3;
+      WEB_SEARCH = 0;
+    }
+
+    enum InvocationMode {
+      BLOCKING = 1;
+      DEFAULT = 0;
+      NON_BLOCKING = 2;
+    }
+  }
+}
+
+message MenuItem {
+  optional string id = 1;
+  optional int32 action = 2;  // enum? Action [unverified]
+  repeated MenuValue value = 3;
+  optional string broadcastAction = 5;
+  optional bool removeWhenSelected = 7;
+  optional int32 travelMode = 8;  // enum? TravelMode [unverified]
+  optional Entity recipient = 9;
+  optional string payload = 10;
+  optional string voiceCommand = 11;
+
+  enum Action {
+    BROADCAST = 7;
+    CUSTOM = 0;
+    DELETE = 3;
+    GET_MEDIA_INPUT = 22;
+    HANGOUT = 14;
+    MUTE_MIC = 11;
+    NAVIGATE = 9;
+    OPEN_URI = 13;
+    PLAY_AUDIO = 25;
+    PLAY_VIDEO = 17;
+    READ_ALOUD = 5;
+    READ_MORE = 16;
+    REPLY = 2;
+    REPLY_ALL = 6;
+    RETRY = 24;
+    SEARCH = 10;
+    SEND = 21;
+    SEND_MESSAGE = 18;
+    SEND_TO_PHONE = 12;
+    SHARE = 4;
+    SHARE_LOCATION = 23;
+    SHOW_RECIPIENTS = 20;
+    TOGGLE_PINNED = 15;
+    VOICE_CALL = 8;
+    VOLUME = 19;
+  }
+
+  enum State {
+    CONFIRMED = 2;
+    DEFAULT = 0;
+    PENDING = 1;
+  }
+
+  enum TravelMode {
+    BICYCLING = 3;
+    DRIVING = 1;
+    MOST_RECENTLY_USED = 0;
+    TRANSIT = 4;
+    WALKING = 2;
+  }
+}
+
+message MenuValue {
+  optional string displayName = 1;
+  optional string iconUrl = 2;
+  optional int32 state = 3;
+}
+
+message NotificationConfig {
+  optional int32 level = 1;  // enum? Level [unverified]
+  optional uint64 deliveryTime = 2;
+
+  enum Level {
+    DEFAULT = 10;
+  }
+}
+
+message UserAction {
+  optional int32 type = 1;  // enum? Type [unverified]
+  optional string payload = 2;
+
+  enum Type {
+    CUSTOM = 5;
+    DELETE = 6;
+    GET_MEDIA_INPUT = 10;
+    LAUNCH = 7;
+    NEW_MESSAGE = 1;
+    PIN = 8;
+    REPLY = 3;
+    REPLY_ALL = 4;
+    SHARE = 2;
+    SHARE_LOCATION = 11;
+    UNPIN = 9;
+  }
+}
+
+message FailedDeliveryInfo {
+  repeated UserAction failedUserAction = 1;
+  optional uint32 failedOperation = 2;
+  optional bool isDeliveryFailure = 3;
+}
+
+message LoggingAnnotations {
+  optional int32 cardType = 51;
+}

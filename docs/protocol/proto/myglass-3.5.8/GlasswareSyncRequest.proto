@@ -1,0 +1,15 @@
+// Generato da tools/re/nano2proto.py from GlasswareSyncRequest.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.glasswaresyncrequest;
+
+import "ApkMetadata.proto";
+
+message GlasswareSyncRequest {
+  optional int32 glassVersion = 1;
+  repeated .glass.apkmetadata.ApkMetadata apkMetadata = 2;
+  optional string glassBuildType = 3;
+  optional int64 lastSyncedTimestampUs = 4;
+  optional string deviceId = 5;
+  optional string glassBuildFingerprint = 6;
+}

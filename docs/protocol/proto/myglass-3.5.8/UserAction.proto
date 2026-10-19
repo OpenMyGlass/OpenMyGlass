@@ -1,0 +1,23 @@
+// Generato da tools/re/nano2proto.py from UserAction.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.useraction;
+
+message UserAction {
+  optional int32 type = 1;  // enum? Type [unverified]
+  optional string payload = 2;
+
+  enum Type {
+    CUSTOM = 5;
+    DELETE = 6;
+    GET_MEDIA_INPUT = 10;
+    LAUNCH = 7;
+    NEW_MESSAGE = 1;
+    PIN = 8;
+    REPLY = 3;
+    REPLY_ALL = 4;
+    SHARE = 2;
+    SHARE_LOCATION = 11;
+    UNPIN = 9;
+  }
+}

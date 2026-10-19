@@ -1,0 +1,16 @@
+// Generato da tools/re/nano2proto.py from ApkMetadata.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.apkmetadata;
+
+import "Permission.proto";
+
+message ApkMetadata {
+  optional int32 versionNumber = 1;
+  optional string packageName = 2;
+  optional string downloadUrl = 3;
+  repeated .glass.permission.Permission permission = 4;
+  repeated string registeredVoiceTrigger = 5;
+  repeated string unregisteredVoiceTrigger = 6;
+  optional bool isUninstalledByUser = 7;
+}

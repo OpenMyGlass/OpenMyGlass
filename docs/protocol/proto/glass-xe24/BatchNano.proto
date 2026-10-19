@@ -1,0 +1,46 @@
+// Generato da tools/re/nano2proto.py from BatchNano.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.batchnano;
+
+enum AuthTokenType {
+  ANDROID_SERVICE = 1;
+}
+
+message AuthToken {
+  optional int32 type = 1;
+  optional string value = 2;
+}
+
+message BatchHeader {
+  repeated AuthToken authToken = 1;
+  optional int64 dispatcherId = 2;
+}
+
+message RequestWrapper {
+  optional string path = 1;
+  optional bytes data = 2;
+}
+
+message BatchRequest {
+  optional BatchHeader header = 1;
+  repeated RequestWrapper request = 2;
+}
+
+message ResponseWrapper {
+  optional int32 errorCode = 1;  // enum? ErrorCode [unverified]
+  optional bytes data = 2;
+
+  enum ErrorCode {
+    INTERNAL_ERROR = 4;
+    INVALID_PROTO = 3;
+    NETWORK_ERROR = 5;
+    NONE = 0;
+    NOT_AUTHORIZED = 2;
+    UNKNOWN_REQUEST = 1;
+  }
+}
+
+message BatchResponse {
+  repeated ResponseWrapper response = 1;
+}

@@ -1,0 +1,126 @@
+// Generato da tools/re/nano2proto.py from TimelineItem.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.timelineitem;
+
+import "Attachment.proto";
+import "Entity.proto";
+import "FailedDeliveryInfo.proto";
+import "LinkSpec.proto";
+import "Location.proto";
+import "LoggingAnnotations.proto";
+import "MenuItem.proto";
+import "NotificationConfig.proto";
+
+message TimelineItem {
+  optional string id = 1;
+  optional uint64 creationTime = 2;
+  optional uint64 modifiedTime = 3;
+  optional string source = 4;
+  optional .glass.entity.Entity creator = 5;
+  repeated .glass.entity.Entity shareTarget = 6;
+  optional string inReplyTo = 7;
+  optional string text = 8;
+  repeated .glass.attachment.Attachment attachment = 9;
+  optional .glass.location.Location location = 10;
+  repeated .glass.menuitem.MenuItem menuItem = 11;
+  optional int32 cloudSyncStatus = 12;
+  optional int32 cloudSyncProtocol = 13;
+  optional int32 sourceType = 14;  // enum? SourceType [unverified]
+  optional bool isDeleted = 15;
+  optional .glass.notificationconfig.NotificationConfig notification = 16;
+  optional uint64 displayTime = 17;
+  repeated .glass.menuitem.MenuItem pendingAction = 18;
+  optional string speakableText = 19;
+  optional int32 smsType = 20;  // enum? SmsType [unverified]
+  optional bool isPinned = 21;
+  optional string title = 23;
+  optional string html = 24;
+  optional string bundleId = 25;
+  optional string sendToPhoneUrl = 28;
+  optional bool isBundleCover = 29;
+  optional string sourceItemId = 30;
+  optional string canonicalUrl = 31;
+  optional int32 companionSyncStatus = 33;
+  optional int32 companionSyncProtocol = 34;
+  optional uint64 pinTime = 35;
+  optional int32 pinScore = 36;
+  optional string sourceAccountId = 37;
+  optional string speakableType = 38;
+  optional uint64 expirationTime = 39;
+  optional int32 viewType = 40;  // enum? ViewType [unverified]
+  repeated int32 sharingFeature = 41;
+  optional ProgressStatus progressStatus = 42;
+  repeated .glass.linkspec.LinkSpec linkSpec = 43;
+  optional bool requireLinkify = 44;
+  repeated .glass.linkspec.LinkSpec htmlLinkSpec = 45;
+  optional int32 attributionType = 46;  // enum? AttributionType [unverified]
+  optional .glass.faileddeliveryinfo.FailedDeliveryInfo failedDeliveryInfo = 49;
+  optional bool isDirectoryCover = 50;
+  optional .glass.loggingannotations.LoggingAnnotations loggingAnnotations = 51;
+  optional string glanceableContent = 52;
+  optional string glanceableIconUrl = 53;
+  optional uint64 freshnessTime = 54;
+
+  enum AttributionType {
+    ANDROID_WEAR = 11;
+    BUGREPORT = 9;
+    CAMERA_PICTURE = 0;
+    CAMERA_VIDEO = 1;
+    MUSIC_HISTORY = 7;
+    NAVIGATION = 8;
+    PHONE_CALL = 4;
+    SEARCH_HISTORY = 3;
+    SOUND_SEARCH_HISTORY = 6;
+    TEXT_MESSAGE = 10;
+    VIGNETTE = 2;
+  }
+
+  enum SmsType {
+    COMPANION_DECIDES = 2;
+    GOOGLE_VOICE = 1;
+    NATIVE = 0;
+  }
+
+  enum SourceType {
+    COMPANIONWARE = 2;
+    GLASSWARE = 0;
+    GLASS_DEVICE = 1;
+  }
+
+  enum SyncProtocol {
+    ALWAYS = 0;
+    NEVER = 2;
+    OPPORTUNISTIC = 1;
+  }
+
+  enum SyncStatus {
+    NOT_SYNCED = 0;
+    SYNCED = 1;
+    SYNC_FAILED = 2;
+    SYNC_FAILED_PERMANENTLY = 3;
+  }
+
+  enum ViewType {
+    CALL = 6;
+    CONNECTIVITY_STATUS = 10;
+    HANGOUT = 7;
+    HTML = 4;
+    IMAGE = 2;
+    MAP = 13;
+    MESSAGE = 1;
+    MESSAGE_IPHONE = 11;
+    MULTIMEDIA_MESSAGE = 14;
+    MUSIC = 9;
+    SEARCH = 5;
+    SIDE_IMAGE = 12;
+    SOUND_SEARCH = 8;
+    TEXT = 0;
+    UNSET = -1;
+    VIDEO = 3;
+  }
+
+  message ProgressStatus {
+    optional string label = 1;
+  }
+}

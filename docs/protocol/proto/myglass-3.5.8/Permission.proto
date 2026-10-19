@@ -1,0 +1,10 @@
+// Generato da tools/re/nano2proto.py from Permission.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.permission;
+
+message Permission {
+  optional string name = 1;
+  optional bool requiresUserAcknowledgement = 2;
+  optional bool isAcknowledged = 3;
+}

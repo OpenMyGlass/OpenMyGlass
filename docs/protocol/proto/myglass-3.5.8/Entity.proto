@@ -1,0 +1,89 @@
+// Generato da tools/re/nano2proto.py from Entity.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.entity;
+
+import "MessagingPersona.proto";
+
+message Entity {
+  optional string source = 1;
+  optional string id = 2;
+  optional string displayName = 3;
+  optional bool shouldSync = 5;
+  optional int32 type = 6;  // enum? Type [unverified]
+  optional string phoneNumber = 7;
+  optional string email = 8;
+  repeated string acceptType = 9;
+  optional bool isCommunicationTarget = 10;
+  repeated string imageUrl = 12;
+  repeated string secondaryPhoneNumber = 13;
+  optional Priority priority = 14;
+  repeated string secondaryEmail = 15;
+  repeated Command acceptCommand = 16;
+  optional string speakableName = 17;
+  repeated int32 contactGroup = 20;  // enum? ContactGroup [unverified]
+  optional uint64 creationTime = 21;
+  repeated .glass.messagingpersona.MessagingPersona messagingPersona = 22;
+  optional string nickname = 23;
+  optional int32 messagingOption = 25;  // enum? MessagingOption [unverified]
+  optional string fullName = 26;
+  repeated int32 sharingFeature = 27;
+  optional string obfuscatedGaiaId = 28;
+  repeated uint64 focusContactId = 29;
+
+  enum ContactGroup {
+    CIRCLES = 2;
+    MY_CONTACTS = 0;
+    STARRED = 1;
+  }
+
+  enum MessagingOption {
+    EMAIL = 1;
+    PERSONA = 0;
+    SMS = 2;
+  }
+
+  enum Type {
+    GROUP = 0;
+    INDIVIDUAL = 1;
+  }
+
+  message Command {
+    optional int32 type = 1;  // enum? CommandType [unverified]
+    optional bool isVoiceEnabled = 2;
+    optional int32 inputType = 3;  // enum? InputType [unverified]
+    optional string pendingLabel = 4;
+    optional string completionLabel = 5;
+    optional int32 invocationMode = 6;  // enum? InvocationMode [unverified]
+
+    enum CommandType {
+      ADD_AN_EVENT = 3;
+      LOG_A_MEAL = 7;
+      POST_AN_UPDATE = 1;
+      POST_A_QUESTION = 11;
+      REMEMBER_WHERE_I_AM = 8;
+      REMIND_ME = 10;
+      TAKE_A_NOTE = 0;
+    }
+
+    enum InputType {
+      DICTATION = 2;
+      LOCAL_SEARCH = 1;
+      NO_INPUT = 3;
+      WEB_SEARCH = 0;
+    }
+
+    enum InvocationMode {
+      BLOCKING = 1;
+      DEFAULT = 0;
+      NON_BLOCKING = 2;
+    }
+  }
+
+  message Priority {
+    optional uint32 glasswareAffinity = 1;
+    optional uint32 usageCount = 2;
+    optional uint64 contentUsageTimestampMs = 3;
+    optional uint64 phoneUsageTimestampMs = 4;
+  }
+}

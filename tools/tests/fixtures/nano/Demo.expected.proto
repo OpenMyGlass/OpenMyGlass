@@ -1,0 +1,33 @@
+// Generato da tools/re/nano2proto.py from Demo.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.demo;
+
+import "Other.proto";
+
+message Envelope {
+  optional uint32 version = 1;
+  optional string name = 2;
+  repeated Item items = 3;
+  optional .glass.other.Thing thing = 4;
+  repeated int64 stamps = 5;
+  repeated string tags = 6;
+  optional bytes blob = 7;
+  optional Command command = 8;
+
+  message Item {
+    optional float x = 1;
+    optional bool ok = 2;
+    optional string label = 3;
+  }
+}
+
+message Command {
+  optional int32 command = 1;  // enum? CommandType [unverified]
+  repeated int32 flags = 2 [packed = true];
+
+  enum CommandType {
+    PING = 0;
+    SCREENSHOT = 7;
+  }
+}

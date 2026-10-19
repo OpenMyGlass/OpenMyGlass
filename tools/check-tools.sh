@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verifica gli strumenti necessari alle Fasi 0–2.
+# Checks the tools required by phases 0–2.
 set -u
 SDK="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 BT="$(ls -d "$SDK"/build-tools/* 2>/dev/null | sort -V | tail -1)"

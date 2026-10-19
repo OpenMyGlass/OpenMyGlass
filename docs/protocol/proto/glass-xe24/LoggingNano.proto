@@ -1,0 +1,42 @@
+// Generato da tools/re/nano2proto.py from LoggingNano.java — reconstructed schema, verify before use.
+syntax = "proto2";
+
+package glass.loggingnano;
+
+message GetSessionIdRequest {
+  optional bool unusedField = 1;
+}
+
+message GetSessionIdResponse {
+  optional string sessionId = 1;
+}
+
+message ReportUserEventRequest {
+  optional string action = 1;
+  optional string data = 2;
+  optional string sessionId = 3;
+  optional int64 timestamp = 4;
+  optional string softwareVersion = 5;
+  optional string hardwareVersion = 6;
+  repeated bytes userEventProto = 7;  // unresolved type: GlassExtensionsNano.GlassUserEventProto [unverified]
+  optional int32 userEventSource = 8;  // enum? UserEventSource [unverified]
+  optional string manufacturingBuild = 9;
+  optional string locale = 10;
+  optional string region = 11;
+
+  enum UserEventSource {
+    COMPANION_ANDROID = 2;
+    COMPANION_IOS = 3;
+    GLASS = 1;
+  }
+}
+
+message ReportUserEventResponse {
+  optional int32 responseCode = 1;  // enum? ResponseCode [unverified]
+
+  enum ResponseCode {
+    ERROR_MISSING_SESSION_ID = 1;
+    ERROR_MISSING_SOFTWARE_VERSION = 2;
+    SUCCESS = 0;
+  }
+}
