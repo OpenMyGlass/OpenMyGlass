@@ -1,7 +1,11 @@
 package org.openmyglass.android
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
+import android.provider.Settings
+import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.TextView
 import kotlinx.coroutines.CoroutineScope
@@ -12,6 +16,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import org.openmyglass.android.nav.AndroidOsmAndBinder
 import org.openmyglass.android.nav.OsmAndNavigationSource
+import org.openmyglass.android.notifications.OpenMyGlassNotificationListener
 
 /** Developer screen: navigation-source status. Grows as features land. */
 class DebugActivity : Activity() {
@@ -26,6 +31,20 @@ class DebugActivity : Activity() {
             setPadding(32, 32, 32, 32)
             addView(TextView(this@DebugActivity).apply { text = "OpenMyGlass — debug" })
             addView(osmandStatus)
+            addView(Button(this@DebugActivity).apply {
+                text = "Notification access settings"
+                setOnClickListener { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+            })
+            addView(CheckBox(this@DebugActivity).apply {
+                text = "Capture navigation notifications (Maps, OsmAnd)"
+                isChecked = OpenMyGlassNotificationListener.isCaptureEnabled(this@DebugActivity)
+                setOnCheckedChangeListener { _, checked ->
+                    OpenMyGlassNotificationListener.setCaptureEnabled(this@DebugActivity, checked)
+                }
+            })
+            addView(TextView(this@DebugActivity).apply {
+                text = "Captures: " + OpenMyGlassNotificationListener.captureFile(this@DebugActivity).absolutePath
+            })
         })
         osmand = OsmAndNavigationSource(AndroidOsmAndBinder(applicationContext))
         scope.launch {
