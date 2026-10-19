@@ -1,0 +1,30 @@
+# Reverse-engineering workspace: APK, system images, decompiled code (never commit)
+_re/
+*.apk
+*.apks
+*.xapk
+*.img
+*.zip
+*.tgz
+*.dex
+*.odex
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.log
+*.cfa
+btsnoop_hci.log
+
+# Build
+build/
+.gradle/
+local.properties
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
