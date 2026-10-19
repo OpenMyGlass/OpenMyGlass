@@ -18,6 +18,12 @@ message Frame {
     NotificationPosted notification = 6;          // phone -> glass: new or changed notification
     NotificationRemoved notification_removed = 7; // phone -> glass: notification gone (dismissed anywhere)
     NotificationAction notification_action = 8;   // glass -> phone: the owner chose an action or Dismiss
+    DictationStart dictation_start = 9;           // glass -> phone: the owner chose Reply and speaks
+    AudioChunk audio_chunk = 10;                  // glass -> phone: dictation audio
+    DictationEnd dictation_end = 11;              // glass -> phone: speech ended (or was cancelled)
+    Transcript transcript = 12;                   // phone -> glass: the offline transcription, or why there is none
+    ReplyConfirm reply_confirm = 13;              // glass -> phone: send or discard the transcript
+    ReplyResult reply_result = 14;                // phone -> glass: whether the reply went out
   }
 }
 
@@ -100,4 +106,42 @@ message NotificationAction {
     uint32 action_index = 2;
     bool dismiss = 3;
   }
+}
+
+// Dictated replies (plan 5b). Audio is PCM 16-bit little-endian mono at sample_rate, in chunks of about 100 ms.
+// A newer request_id replaces an older one; the phone forgets a request after 60 s.
+message DictationStart {
+  uint32 request_id = 1;
+  string key = 2;                  // notification key
+  uint32 action_index = 3;         // the reply action's index on the phone
+  uint32 sample_rate = 4;          // 16000
+}
+
+message AudioChunk {
+  uint32 request_id = 1;
+  uint32 seq = 2;
+  bytes pcm = 3;
+}
+
+message DictationEnd {
+  uint32 request_id = 1;
+  bool cancelled = 2;
+}
+
+message Transcript {
+  uint32 request_id = 1;
+  string text = 2;
+  bool final = 3;
+  string error = 4;                // non-empty: no usable transcript (no speech model, nothing heard, ...)
+}
+
+message ReplyConfirm {
+  uint32 request_id = 1;
+  bool send = 2;
+}
+
+message ReplyResult {
+  uint32 request_id = 1;
+  bool ok = 2;
+  string message = 3;
 }
