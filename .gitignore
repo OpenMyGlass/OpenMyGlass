@@ -35,3 +35,7 @@ captures/
 # Python bytecode
 __pycache__/
 .kotlin/
+
+# JVM heap / crash dumps
+*.hprof
+hs_err_pid*.log

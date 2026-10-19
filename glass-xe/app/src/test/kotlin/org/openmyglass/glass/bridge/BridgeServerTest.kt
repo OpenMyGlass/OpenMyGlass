@@ -77,4 +77,37 @@ class BridgeServerTest {
         second.send(nav(50))
         await { frames.size == 1 }
     }
+
+    @Test
+    fun `a connection without hello does not replace the active session`() = runBlocking {
+        val phone = link().also { it.handshake() }
+        await { events.size == 1 }
+        Socket("127.0.0.1", port).use { stranger ->
+            stranger.getOutputStream().write(byteArrayOf(0x00))   // an empty frame: not a Hello
+            stranger.getOutputStream().flush()
+            stranger.soTimeout = 3_000
+            val closed = try { stranger.getInputStream().read() == -1 } catch (_: java.net.SocketException) { true }
+            assertTrue(closed)
+        }
+        phone.send(nav(42))
+        await { frames.size == 1 }
+        assertEquals(listOf("started"), events.toList())
+    }
+
+    @Test
+    fun `a silent connection is dropped after the hello timeout`() {
+        val quick = BridgeServer(0, object : BridgeServer.FrameHandler {
+            override fun onSessionStarted(sender: BridgeServer.Sender) {}
+            override fun onFrame(frame: Bridge.Frame) {}
+            override fun onSessionEnded() {}
+        }, 300)
+        val p = quick.start()
+        try {
+            Socket("127.0.0.1", p).use { silent ->
+                silent.soTimeout = 3_000
+                val closed = try { silent.getInputStream().read() == -1 } catch (_: java.net.SocketException) { true }
+                assertTrue(closed)
+            }
+        } finally { quick.close() }
+    }
 }

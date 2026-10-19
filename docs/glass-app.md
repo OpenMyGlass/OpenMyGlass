@@ -15,6 +15,14 @@ The OpenMyGlass app that runs on Glass Explorer Edition XE24. It receives naviga
   - When the maneuver is unknown (Google Maps), the card shows the maneuver icon the phone forwarded.
 - **Screen wake** (`WakePolicy`): wakes on the first card, on a maneuver change, and when the distance crosses below 200 m. The wake lock lasts 5 s. Never on small distance changes, never when navigation ends.
 
+## Security note (interim TCP bridge)
+
+Until Bluetooth RFCOMM lands (plan 4e, where bonding authenticates the phone), the bridge listens on **TCP port 7825 on all interfaces with no authentication**. Anyone on the same Wi-Fi or hotspot can connect.
+- A connection becomes the active session only after a valid Hello within 5 s, so a stray connection (e.g. a port scan) does not drop the phone's session.
+- A client that does send a Hello can replace the session and push cards.
+
+Use it only on trusted networks; it is meant for development.
+
 ## Flavors
 
 | Flavor | Renderer | Target |

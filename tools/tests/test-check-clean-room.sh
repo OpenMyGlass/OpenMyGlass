@@ -53,4 +53,10 @@ expect "stub without provenance rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD
 repo; mkdir -p "$TMP/r/src/com/google"; printf '/** Compile-only stub, written by OpenMyGlass */\npackage com.google.foo;\n' > "$TMP/r/src/com/google/C.java"; git -C "$TMP/r" add src
 expect "provenance outside gdk-stubs rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
 
+repo; printf 'x' > "$TMP/r/java_pid1.hprof"; git -C "$TMP/r" add -f java_pid1.hprof
+expect "heap dump rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; dd if=/dev/zero of="$TMP/r/big.bin" bs=1048576 count=51 2>/dev/null; git -C "$TMP/r" add -f big.bin
+expect "file over 50 MB rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
 echo "$pass passed, $fail failed"; [ $fail -eq 0 ]

@@ -26,17 +26,29 @@ public final class BridgeServer implements Closeable {
     }
 
     public static final int PROTOCOL_VERSION = 1;
+    public static final int DEFAULT_HELLO_TIMEOUT_MS = 5_000;
 
     private final int port;
     private final FrameHandler handler;
+    private final int helloTimeoutMs;
     private volatile ServerSocket server;
     private volatile boolean closed;
     private Socket activeSocket;
     private Thread activeThread;
 
     public BridgeServer(int port, FrameHandler handler) {
+        this(port, handler, DEFAULT_HELLO_TIMEOUT_MS);
+    }
+
+    /**
+     * A connection becomes the active session only after it sends a valid Hello within {@code helloTimeoutMs}:
+     * a stray connection (e.g. a port scan on the same Wi-Fi) cannot drop the phone's session. The TCP port has
+     * no authentication yet; Bluetooth bonding provides it in plan 4e.
+     */
+    public BridgeServer(int port, FrameHandler handler, int helloTimeoutMs) {
         this.port = port;
         this.handler = handler;
+        this.helloTimeoutMs = helloTimeoutMs;
     }
 
     /** Starts listening and returns the bound port. */
@@ -73,7 +85,6 @@ public final class BridgeServer implements Closeable {
                 @Override public void run() { serve(socket); }
             }, "bridge-session");
             session.setDaemon(true);
-            replaceSession(socket, session);
             session.start();
         }
     }
@@ -95,8 +106,11 @@ public final class BridgeServer implements Closeable {
     private void serve(final Socket socket) {
         boolean started = false;
         try {
+            socket.setSoTimeout(helloTimeoutMs);
             Bridge.Frame first = read(socket);
             if (first == null || !first.hasHello()) return;
+            socket.setSoTimeout(0);
+            replaceSession(socket, Thread.currentThread());
             final Object writeLock = new Object();
             Sender sender = new Sender() {
                 @Override public void send(Bridge.Frame frame) throws IOException {
