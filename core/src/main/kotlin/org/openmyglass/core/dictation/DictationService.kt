@@ -32,6 +32,19 @@ class DictationService(
     private var current: Request? = null
 
     suspend fun onFrame(frame: Frame, send: suspend (Frame) -> Unit) {
+        try {
+            handle(frame, send)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            // A recognizer failure (native errors included) must not break the bridge session, and its message
+            // may contain transcript text: answer with a fixed error and drop the request.
+            val id = lock.withLock { current?.id.also { drop() } } ?: return
+            send(transcript(id, "", "Speech recognition failed"))
+        }
+    }
+
+    private suspend fun handle(frame: Frame, send: suspend (Frame) -> Unit) {
         when {
             frame.hasDictationStart() -> start(frame.dictationStart, send)
             frame.hasAudioChunk() -> lock.withLock {

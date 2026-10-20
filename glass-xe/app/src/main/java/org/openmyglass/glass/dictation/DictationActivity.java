@@ -46,6 +46,8 @@ public final class DictationActivity extends Activity implements DictationClient
     private int requestId = -1;
     private DictationRecorder recorder;
     private String text;
+    private int attempt;
+    private boolean destroyed;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -71,41 +73,62 @@ public final class DictationActivity extends Activity implements DictationClient
         record();
     }
 
+    /**
+     * Starts a dictation attempt. The phone is asked first and the microphone opens only once it accepted, off the
+     * main thread; every callback carries its attempt number, so Back, Retry or a destroyed screen discard late
+     * results and close a microphone opened meanwhile (it must never run unseen).
+     */
     private void record() {
+        final int myAttempt = ++attempt;
+        if (recorder != null) recorder.stop();
+        recorder = null;
+        requestId = -1;
         text = null;
         transcript.setText("");
-        String clip = getIntent().getStringExtra(EXTRA_CLIP);
-        final PcmSource source;
-        try {
-            source = clip != null ? PcmSource.wav(new File(clip)) : PcmSource.microphone();
-        } catch (IOException e) {
-            fail("Microphone not available");
-            return;
-        }
         show(Phase.RECORDING, "Speak now", null);
+        final String clip = getIntent().getStringExtra(EXTRA_CLIP);
         final String key = getIntent().getStringExtra(EXTRA_KEY);
         final int action = getIntent().getIntExtra(EXTRA_ACTION, 0);
         IO.execute(new Runnable() { @Override public void run() {
             final int id = DictationHost.CLIENT.start(key, action, DictationRecorder.RATE);
+            if (id < 0) {
+                post(myAttempt, new Runnable() { @Override public void run() { fail("Phone not reachable"); } });
+                return;
+            }
+            final PcmSource source;
+            try {
+                source = clip != null ? PcmSource.wav(new File(clip)) : PcmSource.microphone();
+            } catch (IOException | RuntimeException e) {
+                DictationHost.CLIENT.cancel(id);
+                post(myAttempt, new Runnable() { @Override public void run() { fail("Microphone not available"); } });
+                return;
+            }
             main.post(new Runnable() { @Override public void run() {
-                if (id < 0) {
+                if (destroyed || myAttempt != attempt) {
                     source.close();
-                    fail("Phone not reachable");
+                    IO.execute(new Runnable() { @Override public void run() { DictationHost.CLIENT.cancel(id); } });
                     return;
                 }
                 requestId = id;
                 recorder = new DictationRecorder();
                 recorder.start(source, DictationHost.CLIENT, id, new DictationRecorder.Callback() {
                     @Override public void onStopped(boolean heardSpeech) {
-                        main.post(new Runnable() { @Override public void run() {
+                        post(myAttempt, new Runnable() { @Override public void run() {
                             if (phase == Phase.RECORDING) show(Phase.TRANSCRIBING, "Transcribing on the phone…", null);
                         } });
                     }
                     @Override public void onFailed(final String message) {
-                        main.post(new Runnable() { @Override public void run() { fail(message); } });
+                        post(myAttempt, new Runnable() { @Override public void run() { fail(message); } });
                     }
                 });
             } });
+        } });
+    }
+
+    /** Runs on the main thread only if the screen is alive and the attempt is still the current one. */
+    private void post(final int forAttempt, final Runnable r) {
+        main.post(new Runnable() { @Override public void run() {
+            if (!destroyed && forAttempt == attempt) r.run();
         } });
     }
 
@@ -221,6 +244,7 @@ public final class DictationActivity extends Activity implements DictationClient
 
     @Override
     protected void onDestroy() {
+        destroyed = true;
         if (recorder != null) recorder.stop();
         DictationHost.setScreen(null);
         super.onDestroy();

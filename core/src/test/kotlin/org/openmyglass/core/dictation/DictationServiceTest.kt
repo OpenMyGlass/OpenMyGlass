@@ -142,4 +142,23 @@ class DictationServiceTest {
         assertEquals("The notification is gone", results().single().message)
         assertFalse(results().single().ok)
     }
+
+    @Test
+    fun `an engine failure answers with an error instead of breaking the link`() {
+        // Review finding: a native Error from the recognizer escaped onFrame and dropped the bridge session
+        val broken = DictationService(
+            engine = { SpeechToText { object : Recognition {
+                override fun feed(pcm: ByteArray) = throw UnsatisfiedLinkError("libvosk")
+                override fun finish() = throw IllegalStateException("secret transcript text")
+                override fun cancel() {}
+            } } },
+            replies = { _, _, _ -> ReplyOutcome(true, "") }, scope = scope)
+        runBlocking {
+            broken.onFrame(start(1), send)
+            broken.onFrame(chunk(1, 0, "x"), send)   // must not throw
+        }
+        val t = transcripts().single()
+        assertEquals("Speech recognition failed", t.error)
+        assertFalse(t.error.contains("secret"))
+    }
 }
