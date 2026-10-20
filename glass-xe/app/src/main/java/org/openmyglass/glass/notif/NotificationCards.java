@@ -20,7 +20,9 @@ public final class NotificationCards {
     public static RemoteViews bind(String packageName, NotificationState.Item item, int position, int count, String footer) {
         RemoteViews views = new RemoteViews(packageName, R.layout.notif_card);
         Bitmap icon = item.iconPng == null ? null : BitmapFactory.decodeByteArray(item.iconPng, 0, item.iconPng.length);
+        // Hidden without an icon: RemoteViews reapplied to the same layout would otherwise keep the previous app's
         if (icon != null) views.setImageViewBitmap(R.id.notif_icon, icon);
+        views.setViewVisibility(R.id.notif_icon, icon != null ? android.view.View.VISIBLE : android.view.View.GONE);
         String when = item.postedAtMs > 0 ? " · " + DateFormat.format("HH:mm", new Date(item.postedAtMs)) : "";
         views.setTextViewText(R.id.notif_app, item.appName + when);
         views.setTextViewText(R.id.notif_title, item.title);

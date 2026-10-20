@@ -45,9 +45,12 @@ class OpenMyGlassService : Service() {
     private var scope: CoroutineScope? = null
     private var bridge: BridgeManager? = null
     private var companion: ConnectionManager? = null
+    /** Bumped on Bluetooth broadcasts: the notification text depends on them too (issue #43). */
+    private val bluetoothTick = MutableStateFlow(0)
 
     private val bluetoothEvents = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            bluetoothTick.value++
             val event = when (intent.action) {
                 BluetoothAdapter.ACTION_STATE_CHANGED ->
                     if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1) == BluetoothAdapter.STATE_ON) BluetoothEvents.Event.AdapterOn
@@ -141,7 +144,7 @@ class OpenMyGlassService : Service() {
         // Bridge off: no loop waking up for nothing (§6)
         if (settings.load().bridgeMode != BridgeMode.OFF) bridge.start()
         s.launch {
-            combine(bridge.state, companionState) { b, c -> b to (c is ConnectionState.Connected) }.collect { (b, companionUp) ->
+            combine(bridge.state, companionState, bluetoothTick) { b, c, _ -> b to (c is ConnectionState.Connected) }.collect { (b, companionUp) ->
                 val env = Transports.environment(this@OpenMyGlassService)
                 val text = ServiceStatus.text(b, companionUp, permissionMissing = !env.hasBluetoothPermission,
                     unavailableReason = TransportTargets.bridgeUnavailableReason(settings.load(), env))

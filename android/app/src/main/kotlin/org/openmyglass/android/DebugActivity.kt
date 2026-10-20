@@ -87,7 +87,8 @@ class DebugActivity : Activity() {
                 }
             })
             addView(TextView(this@DebugActivity).apply {
-                text = "Captures: " + OpenMyGlassNotificationListener.captureFile(this@DebugActivity).absolutePath
+                text = "Captures (contain destinations; delete after use): " +
+                    OpenMyGlassNotificationListener.captureFile(this@DebugActivity).absolutePath
             })
         })
         PhoneHub.init(applicationContext)

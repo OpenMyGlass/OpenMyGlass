@@ -61,18 +61,43 @@ public final class NotificationState implements BridgeServer.FrameHandler {
     private final IconCache icons;
     private final Listener listener;
     private final int cap;
+    /** How long a dismissed card stays hidden waiting for the phone's removal before it comes back. */
+    static final long DISMISS_CONFIRM_MS = 5_000;
+
     private final List<Bridge.Notification> protos = new ArrayList<Bridge.Notification>();   // newest first
+    /** Dismissed here, waiting for the phone to confirm the removal (the phone may refuse: FLAG_NO_CLEAR). */
+    private final java.util.Map<String, org.openmyglass.glass.nav.NavCardState.Cancellable> hidden =
+            new java.util.HashMap<String, org.openmyglass.glass.nav.NavCardState.Cancellable>();
+    private final org.openmyglass.glass.nav.NavCardState.Scheduler scheduler;
     private BridgeServer.Sender sender;
 
     public NotificationState(IconCache icons, Listener listener, int cap) {
+        this(icons, listener, cap, timerScheduler());
+    }
+
+    public NotificationState(IconCache icons, Listener listener, int cap, org.openmyglass.glass.nav.NavCardState.Scheduler scheduler) {
         this.icons = icons;
         this.listener = listener;
         this.cap = cap;
+        this.scheduler = scheduler;
+    }
+
+    private static org.openmyglass.glass.nav.NavCardState.Scheduler timerScheduler() {
+        final java.util.Timer timer = new java.util.Timer("notification-timers", true);
+        return new org.openmyglass.glass.nav.NavCardState.Scheduler() {
+            @Override public org.openmyglass.glass.nav.NavCardState.Cancellable schedule(final Runnable task, long delayMs) {
+                final java.util.TimerTask t = new java.util.TimerTask() { @Override public void run() { task.run(); } };
+                timer.schedule(t, delayMs);
+                return new org.openmyglass.glass.nav.NavCardState.Cancellable() { @Override public void cancel() { t.cancel(); } };
+            }
+        };
     }
 
     @Override
     public synchronized void onSessionStarted(BridgeServer.Sender sender) {
         this.sender = sender;
+        for (org.openmyglass.glass.nav.NavCardState.Cancellable c : hidden.values()) c.cancel();
+        hidden.clear();
         if (!protos.isEmpty()) {
             protos.clear();
             changed();
@@ -104,7 +129,10 @@ public final class NotificationState implements BridgeServer.FrameHandler {
             changed();
             if (at < 0) listener.onNew(item(n), n.getWake());
         } else if (frame.hasNotificationRemoved()) {
-            int at = indexOf(frame.getNotificationRemoved().getKey());
+            String key = frame.getNotificationRemoved().getKey();
+            org.openmyglass.glass.nav.NavCardState.Cancellable restore = hidden.remove(key);
+            if (restore != null) restore.cancel();
+            int at = indexOf(key);
             if (at >= 0) {
                 protos.remove(at);
                 changed();
@@ -149,9 +177,14 @@ public final class NotificationState implements BridgeServer.FrameHandler {
         }
         if (!send(s, Bridge.NotificationAction.newBuilder().setKey(key).setDismiss(true).build())) return false;
         synchronized (this) {
-            int at = indexOf(key);
-            if (at >= 0) {
-                protos.remove(at);
+            // Hidden now, removed when the phone confirms; back if it does not (the phone kept it)
+            if (indexOf(key) >= 0 && !hidden.containsKey(key)) {
+                final String k = key;
+                hidden.put(key, scheduler.schedule(new Runnable() { @Override public void run() {
+                    synchronized (NotificationState.this) {
+                        if (hidden.remove(k) != null) changed();
+                    }
+                } }, DISMISS_CONFIRM_MS));
                 changed();
             }
         }
@@ -160,7 +193,7 @@ public final class NotificationState implements BridgeServer.FrameHandler {
 
     public synchronized List<Item> items() {
         List<Item> list = new ArrayList<Item>(protos.size());
-        for (Bridge.Notification n : protos) list.add(item(n));
+        for (Bridge.Notification n : protos) if (!hidden.containsKey(n.getKey())) list.add(item(n));
         return list;
     }
 

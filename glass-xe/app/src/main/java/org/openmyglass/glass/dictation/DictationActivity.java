@@ -132,7 +132,18 @@ public final class DictationActivity extends Activity implements DictationClient
         } });
     }
 
+    /** Waiting on the phone longer than this means the link is gone (the screen is kept on meanwhile). */
+    private static final long PHONE_DEADLINE_MS = 20_000;
+
+    private final Runnable phoneDeadline = new Runnable() {
+        @Override public void run() {
+            if (phase == Phase.TRANSCRIBING || phase == Phase.SENDING) fail("Phone not reachable");
+        }
+    };
+
     private void show(Phase next, String statusText, String transcriptText) {
+        main.removeCallbacks(phoneDeadline);
+        if (next == Phase.TRANSCRIBING || next == Phase.SENDING) main.postDelayed(phoneDeadline, PHONE_DEADLINE_MS);
         phase = next;
         status.setText(statusText);
         if (transcriptText != null) transcript.setText(transcriptText);
@@ -214,6 +225,8 @@ public final class DictationActivity extends Activity implements DictationClient
 
     @Override
     public void onBackPressed() {
+        // The reply is already on its way: stay until the result shows (or the deadline)
+        if (phase == Phase.SENDING) return;
         cancel();
     }
 
@@ -245,6 +258,7 @@ public final class DictationActivity extends Activity implements DictationClient
     @Override
     protected void onDestroy() {
         destroyed = true;
+        main.removeCallbacks(phoneDeadline);
         if (recorder != null) recorder.stop();
         DictationHost.setScreen(null);
         super.onDestroy();

@@ -67,6 +67,7 @@ class LinkManager<H>(
     fun start() {
         if (job?.isActive == true) return
         stopped = false
+        backoff.reset()   // a restart begins with short retries (issue #44)
         job = scope.launch { loop() }
     }
 

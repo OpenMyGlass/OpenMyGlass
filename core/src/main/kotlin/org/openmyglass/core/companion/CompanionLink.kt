@@ -62,6 +62,7 @@ class CompanionLink(
         )
     }
 
+    /** @throws java.io.IOException when the link fails while sending */
     suspend fun requestGlassInfo() = send(
         newEnvelope().setGlassInfoRequestC2G(
             GlassInfoRequest.newBuilder()
@@ -74,6 +75,7 @@ class CompanionLink(
         )
     )
 
+    /** @throws java.io.IOException when the link fails while sending */
     suspend fun sendTimeZone(id: String) = send(newEnvelope().setTimezoneC2G(id))
 
     /** Envelopes from Glass until a clean end of stream (completes) or an I/O error (throws). */

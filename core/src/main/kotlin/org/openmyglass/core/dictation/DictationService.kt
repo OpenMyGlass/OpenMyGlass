@@ -85,6 +85,12 @@ class DictationService(
                 return
             }
             r.ended = true
+            // The owner now reviews the transcript: give the full timeout again (a long dictation used most of it)
+            r.expiry?.cancel()
+            r.expiry = scope.launch {
+                delay(timeout)
+                lock.withLock { if (current === r) drop() }
+            }
             r.recognition?.finish()?.trim().orEmpty().also { r.text = it }
         }
         send(transcript(e.requestId, text, if (text.isEmpty()) "Nothing heard" else ""))

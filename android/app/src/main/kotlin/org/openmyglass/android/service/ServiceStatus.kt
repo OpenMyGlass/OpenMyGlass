@@ -7,6 +7,7 @@ object ServiceStatus {
     fun text(bridge: LinkState<*>, companionConnected: Boolean, permissionMissing: Boolean, unavailableReason: String? = null): String = when {
         permissionMissing -> "Bluetooth permission needed"
         bridge is LinkState.Connected<*> -> "Glass connected"
+        unavailableReason == "Bridge is off" && companionConnected -> "Glass connected (bridge off)"
         unavailableReason != null -> unavailableReason
         bridge == LinkState.Connecting || bridge == LinkState.Handshaking -> "Connecting to Glass…"
         bridge == LinkState.Stopped -> "Stopped"

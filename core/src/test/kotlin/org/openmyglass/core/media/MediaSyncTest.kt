@@ -170,4 +170,57 @@ class MediaSyncTest {
         glass(list("a" to 1, "b" to 2))                                                   // run 2 continues normally ("a" was saved by run 1)
         assertEquals("MEDIA_PULL_START", newLink.last().bodyCase.name)
     }
+
+    private fun quickSync() = MediaSync(
+        synced = object : SyncedStore {
+            override fun contains(id: String) = id in synced
+            override fun add(id: String) { synced += id }
+        },
+        downloader = { _, item -> if (item.id in failIds) DownloadResult.Failed("x") else DownloadResult.Saved },
+        autoEnabled = { true }, phoneOnWifi = { true }, scope = scope,
+        replyTimeoutMs = 200, followUpDelayMs = 200)
+
+    @Test
+    fun `a run that Glass never answers times out`() {
+        // Issue #64
+        val q = quickSync()
+        runBlocking { q.attach { sent += it }; q.syncNow() }
+        Thread.sleep(400)
+        assertEquals("Glass did not answer", q.status.value)
+        sent.clear()
+        runBlocking { q.syncNow() }
+        assertEquals(listOf("MEDIA_LIST_REQUEST"), sentKinds())
+    }
+
+    @Test
+    fun `failed items get one follow-up run while conditions hold`() {
+        // Issue #66
+        failIds = setOf("a")
+        val q = quickSync()
+        runBlocking {
+            q.attach { sent += it }
+            q.onFrame(status(charging = true)); q.onFrame(list("a" to 1)); q.onFrame(server)
+        }
+        sent.clear()
+        Thread.sleep(400)
+        assertEquals(listOf("MEDIA_LIST_REQUEST"), sentKinds())
+    }
+
+    @Test
+    fun `a follow-up run does not schedule another one`() {
+        // Review finding: an item failing every time re-ran (and re-downloaded) every 5 minutes forever
+        failIds = setOf("a")
+        val q = quickSync()
+        runBlocking {
+            q.attach { f ->
+                sent += f
+                // Glass answers every list and pull, asynchronously (send() runs under the sync's lock)
+                if (f.hasMediaListRequest()) Thread { runBlocking { q.onFrame(list("a" to 1)) } }.start()
+                if (f.hasMediaPullStart()) Thread { runBlocking { q.onFrame(server) } }.start()
+            }
+            q.onFrame(status(charging = true))
+        }
+        Thread.sleep(900)                       // room for several follow-ups at 200 ms
+        assertEquals(2, sent.count { it.hasMediaListRequest() })   // the first run and exactly one follow-up
+    }
 }

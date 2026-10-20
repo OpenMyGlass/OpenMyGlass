@@ -199,4 +199,16 @@ class LinkManagerTest {
             assertEquals(LinkState.Stopped, history.last(), "history: $history")
         }
     }
+
+    @Test
+    fun `start after stop begins with a fresh backoff`() {
+        // Issue #44
+        val m = manager({ FakeTransport(failures = 100) }, initial = 20.milliseconds, max = 1.seconds); m.start()
+        repeat(3) { m.await { it is LinkState.WaitingToRetry } }
+        m.stop()
+        m.await { it == LinkState.Stopped }
+        m.start()
+        assertEquals(LinkState.WaitingToRetry(1, 20.milliseconds), m.await { it is LinkState.WaitingToRetry })
+        m.stop()
+    }
 }

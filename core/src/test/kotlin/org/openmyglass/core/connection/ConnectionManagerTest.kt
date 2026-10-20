@@ -161,14 +161,17 @@ class ConnectionManagerTest {
     @Test
     fun `stop during a slow connect closes the late channel`() {
         val release = java.util.concurrent.CountDownLatch(1)
+        val entered = java.util.concurrent.CountDownLatch(1)   // connect() is really running (not just the Connecting state)
         val tracked = java.util.concurrent.atomic.AtomicReference<TrackedChannel?>(null)   // written on an IO thread
         transport.steps.add {
+            entered.countDown()
             release.await()
             val g = FakeGlass.open(); transport.glasses += g
             TrackedChannel(g.phoneChannel).also { tracked.set(it) }
         }
         val m = manager(); m.start()
         m.await { it == ConnectionState.Connecting }
+        assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS))
         m.stop()
         release.countDown()
         runBlocking { withTimeout(2.seconds) { while (tracked.get()?.closed != true) kotlinx.coroutines.delay(20) } }

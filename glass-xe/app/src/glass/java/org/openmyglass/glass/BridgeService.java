@@ -45,6 +45,8 @@ public final class BridgeService extends Service {
     private LiveCard liveCard;
     private NavCardState.Card shown;
     private PowerManager.WakeLock wakeLock;
+    /** Separate from navigation's: ending navigation must not cut a notification wake short. */
+    private PowerManager.WakeLock notificationWake;
     private LiveCard notificationCard;
     private AndroidMedia media;
 
@@ -82,6 +84,8 @@ public final class BridgeService extends Service {
         int flags = PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE;
         wakeLock = pm.newWakeLock(flags, "openmyglass:nav");
         wakeLock.setReferenceCounted(false);
+        notificationWake = pm.newWakeLock(flags, "openmyglass:notification");
+        notificationWake.setReferenceCounted(false);
         IconCache icons = new IconCache(64);
         NavCardState state = new NavCardState(icons, new NavCardState.Listener() {
             @Override public void onChanged(final NavCardState.Card card) {
@@ -150,7 +154,7 @@ public final class BridgeService extends Service {
     private void wakeForNotification() {
         if (notificationCard == null) return;
         notificationCard.navigate();
-        wakeLock.acquire(WAKE_MS);
+        notificationWake.acquire(WAKE_MS);
     }
 
     private void end() {
@@ -178,6 +182,7 @@ public final class BridgeService extends Service {
         if (notificationCard != null && notificationCard.isPublished()) notificationCard.unpublish();
         notificationCard = null;
         notifications = null;
+        if (notificationWake != null && notificationWake.isHeld()) notificationWake.release();
         if (media != null) media.stop();
         if (server != null) server.close();
         super.onDestroy();
