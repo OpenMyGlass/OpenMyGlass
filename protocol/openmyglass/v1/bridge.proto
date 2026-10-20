@@ -24,6 +24,13 @@ message Frame {
     Transcript transcript = 12;                   // phone -> glass: the offline transcription, or why there is none
     ReplyConfirm reply_confirm = 13;              // glass -> phone: send or discard the transcript
     ReplyResult reply_result = 14;                // phone -> glass: whether the reply went out
+    GlassStatus glass_status = 15;                // glass -> phone: charging / Wi-Fi changed (and on session start)
+    MediaListRequest media_list_request = 16;     // phone -> glass
+    MediaList media_list = 17;                    // glass -> phone: on request, and when new media appear
+    MediaPullStart media_pull_start = 18;         // phone -> glass: open the media server for one pull
+    MediaServer media_server = 19;                // glass -> phone: where to download (token valid for this pull)
+    MediaServerUnavailable media_server_unavailable = 20; // glass -> phone
+    MediaPullDone media_pull_done = 21;           // phone -> glass: close the media server
   }
 }
 
@@ -145,3 +152,39 @@ message ReplyResult {
   bool ok = 2;
   string message = 3;
 }
+
+// Photo and video sync (plan 6a). Media travel over Wi-Fi HTTP from Glass; the bridge carries only metadata and
+// the per-pull token.
+message GlassStatus {
+  bool charging = 1;
+  bool wifi = 2;
+  string ip = 3;                   // Glass's Wi-Fi address, empty when not on Wi-Fi
+}
+
+message MediaListRequest {}
+
+message MediaItem {
+  string id = 1;                   // stable for the same file (path, size, mtime)
+  string name = 2;
+  bool video = 3;
+  int64 size = 4;
+  int64 taken_at_ms = 5;
+}
+
+message MediaList {
+  repeated MediaItem items = 1;
+}
+
+message MediaPullStart {}
+
+message MediaServer {
+  string ip = 1;
+  uint32 port = 2;
+  string token = 3;                // GET http://ip:port/media/<id>?token=…; Range supported; X-Content-SHA256 header
+}
+
+message MediaServerUnavailable {
+  string reason = 1;
+}
+
+message MediaPullDone {}

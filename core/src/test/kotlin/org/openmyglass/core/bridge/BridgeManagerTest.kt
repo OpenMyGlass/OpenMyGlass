@@ -164,4 +164,25 @@ class BridgeManagerTest {
             m.stop()
         }
     }
+
+    @Test
+    fun `media frames from glass reach media sync`() {
+        val media = org.openmyglass.core.media.MediaSync(
+            synced = object : org.openmyglass.core.media.SyncedStore {
+                override fun contains(id: String) = false
+                override fun add(id: String) {}
+            },
+            downloader = { _, _ -> org.openmyglass.core.media.DownloadResult.Saved },
+            autoEnabled = { true }, phoneOnWifi = { true }, scope = scope)
+        GlassPeer().use { glass ->
+            val m = BridgeManager({ TcpTransport("127.0.0.1", glass.port) }, relay, appVersion = "test", scope = scope,
+                backoff = Backoff(50.milliseconds, 200.milliseconds), onStateChange = { history += it }, media = media)
+            m.start()
+            m.await { it is LinkState.Connected }
+            glass.send(Frame.newBuilder().setGlassStatus(Bridge.GlassStatus.newBuilder().setCharging(true).setWifi(true)).build())
+            var f = glass.next()!!
+            while (!f.hasMediaListRequest()) f = glass.next()!!
+            m.stop()
+        }
+    }
 }

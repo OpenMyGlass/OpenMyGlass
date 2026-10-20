@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.StateFlow
 import org.openmyglass.core.connection.Backoff
 import org.openmyglass.core.dictation.DictationService
+import org.openmyglass.core.media.MediaSync
 import org.openmyglass.core.notif.NotificationRelay
 import org.openmyglass.core.connection.LinkManager
 import org.openmyglass.core.connection.LinkSession
@@ -30,6 +31,7 @@ class BridgeManager(
     stableAfter: kotlin.time.Duration = kotlin.time.Duration.parse("30s"),
     private val notifications: NotificationRelay? = null,
     private val dictation: DictationService? = null,
+    private val media: MediaSync? = null,
 ) {
     private inner class Session(private val link: BridgeLink) : LinkSession<Bridge.Hello> {
         override suspend fun handshake(): Bridge.Hello = link.handshake()
@@ -37,6 +39,7 @@ class BridgeManager(
             // A failed send drops the relay session: close the link so LinkManager reconnects and reattaches
             val attached = relay.attach(onFailure = link::close, send = link::send)
             val attachedNotifications = notifications?.attach(onFailure = link::close, send = link::send)
+            media?.attach(link::send)
             try {
                 link.incoming().collect { frame ->
                     when {
@@ -49,6 +52,8 @@ class BridgeManager(
                         frame.hasNotificationAction() -> notifications?.onAction(frame.notificationAction)
                         frame.hasDictationStart() || frame.hasAudioChunk() || frame.hasDictationEnd() || frame.hasReplyConfirm() ->
                             dictation?.onFrame(frame, link::send)
+                        frame.hasGlassStatus() || frame.hasMediaList() || frame.hasMediaServer() || frame.hasMediaServerUnavailable() ->
+                            media?.onFrame(frame)
                     }
                 }
             } finally {
@@ -57,6 +62,7 @@ class BridgeManager(
                     relay.detach(attached)
                     attachedNotifications?.let { notifications?.detach(it) }
                     dictation?.sessionEnded()
+                    media?.detach()
                 }
             }
         }
