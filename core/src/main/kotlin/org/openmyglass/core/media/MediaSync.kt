@@ -51,6 +51,8 @@ class MediaSync(
     private var phase = Phase.IDLE
     private var manual = false
     private var todo: List<MediaItem> = emptyList()
+    /** Bumped on every attach/detach: a download running for an older session must not touch the new one. */
+    private var generation = 0
 
     private val _status = MutableStateFlow("Idle")
     /** One line for the phone UI. */
@@ -58,13 +60,23 @@ class MediaSync(
 
     suspend fun attach(send: suspend (Frame) -> Unit) = lock.withLock {
         this.send = send
+        generation++
         phase = Phase.IDLE
     }
 
     suspend fun detach() = lock.withLock {
         send = null
         glass = null
+        generation++
         phase = Phase.IDLE
+    }
+
+    /** The phone's Wi-Fi or the owner's auto-sync setting changed: start a run if everything now allows it. */
+    suspend fun conditionsChanged() = lock.withLock {
+        if (phase == Phase.IDLE && autoAllowed()) {
+            manual = false
+            requestList()
+        }
     }
 
     /** On demand, whatever the charging state: lists and pulls everything not yet synced. */
@@ -95,7 +107,7 @@ class MediaSync(
                 } else {
                     phase = Phase.WAITING_SERVER
                     _status.value = "${todo.size} to sync"
-                    send?.invoke(Frame.newBuilder().setMediaPullStart(Bridge.MediaPullStart.getDefaultInstance()).build())
+                    safeSend(Frame.newBuilder().setMediaPullStart(Bridge.MediaPullStart.getDefaultInstance()).build())
                 }
             }
             frame.hasMediaServerUnavailable() -> lock.withLock {
@@ -103,34 +115,53 @@ class MediaSync(
                 _status.value = frame.mediaServerUnavailable.reason
             }
             frame.hasMediaServer() -> {
-                val items = lock.withLock {
+                val (items, gen) = lock.withLock {
                     if (phase != Phase.WAITING_SERVER) return
                     phase = Phase.DOWNLOADING
-                    todo
+                    todo to generation
                 }
                 val server = MediaServerInfo(frame.mediaServer.ip, frame.mediaServer.port, frame.mediaServer.token)
-                scope.launch { download(server, items) }
+                scope.launch { download(server, items, gen) }
             }
         }
     }
 
-    private suspend fun download(server: MediaServerInfo, items: List<MediaItem>) {
+    private suspend fun download(server: MediaServerInfo, items: List<MediaItem>, gen: Int) {
         var done = 0
         var failed = 0
         for (item in items) {
-            val proceed = lock.withLock { send != null && (manual || autoAllowed()) }
+            val proceed = lock.withLock { gen == generation && send != null && (manual || autoAllowed()) }
             if (!proceed) break
             _status.value = "Syncing ${done + failed + 1} of ${items.size}"
-            when (downloader.download(server, item)) {
+            val result = try {
+                downloader.download(server, item)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                DownloadResult.Failed(e.message ?: "download failed")
+            }
+            when (result) {
                 DownloadResult.Saved -> { synced.add(item.id); done++ }
                 is DownloadResult.Failed -> failed++
             }
         }
         lock.withLock {
-            send?.invoke(Frame.newBuilder().setMediaPullDone(Bridge.MediaPullDone.getDefaultInstance()).build())
+            if (gen != generation) return   // a newer session owns the state and the Glass server now
+            safeSend(Frame.newBuilder().setMediaPullDone(Bridge.MediaPullDone.getDefaultInstance()).build())
             phase = Phase.IDLE
         }
         _status.value = if (failed == 0) "Synced $done" else "Synced $done, $failed failed (retried next time)"
+    }
+
+    /** Caller holds the lock. A broken link must not crash the app; the session ends through the bridge anyway. */
+    private suspend fun safeSend(frame: Frame) {
+        val s = send ?: return
+        try {
+            s(frame)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        }
     }
 
     /** Caller holds the lock. */
@@ -141,9 +172,9 @@ class MediaSync(
 
     /** Caller holds the lock. */
     private suspend fun requestList() {
-        val s = send ?: return
+        if (send == null) return
         phase = Phase.LISTING
         _status.value = "Listing Glass media"
-        s(Frame.newBuilder().setMediaListRequest(Bridge.MediaListRequest.getDefaultInstance()).build())
+        safeSend(Frame.newBuilder().setMediaListRequest(Bridge.MediaListRequest.getDefaultInstance()).build())
     }
 }

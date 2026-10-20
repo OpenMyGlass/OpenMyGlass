@@ -21,13 +21,17 @@ class MediaSyncTest {
     private var autoEnabled = true
     private var phoneWifi = true
     private var onDownload: (String) -> Unit = {}
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    private var gate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    private val crashes = Collections.synchronizedList(mutableListOf<Throwable>())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined +
+        kotlinx.coroutines.CoroutineExceptionHandler { _, e -> crashes += e })
     private val sync = MediaSync(
         synced = object : SyncedStore {
             override fun contains(id: String) = id in synced
             override fun add(id: String) { synced += id }
         },
         downloader = { server, item ->
+            gate?.await()
             onDownload(item.id)
             if (item.id in failIds) DownloadResult.Failed("hash mismatch")
             else { downloaded += "${server.token}:${item.id}"; DownloadResult.Saved }
@@ -123,5 +127,47 @@ class MediaSyncTest {
         assertTrue(synced.isEmpty())
         assertEquals("Glass is not on Wi-Fi", sync.status.value)
         assertFalse(sentKinds().contains("MEDIA_PULL_DONE"))
+    }
+
+    @Test
+    fun `a broken link at the end of a run does not crash`() {
+        // Review finding: an exception from send() in the download coroutine was uncaught
+        runBlocking { sync.attach { f -> if (f.hasMediaPullDone()) throw java.io.IOException("link gone") else sent += f } }
+        glass(status(charging = true)); glass(list("a" to 1)); glass(server)
+        assertTrue(crashes.isEmpty(), crashes.toString())
+        assertEquals(setOf("a"), synced.toSet())
+    }
+
+    @Test
+    fun `a throwing downloader fails the item, not the run`() {
+        onDownload = { id -> if (id == "a") throw IllegalStateException("gallery insert failed") }
+        attach(); glass(status(charging = true)); glass(list("a" to 1, "b" to 2)); glass(server)
+        assertTrue(crashes.isEmpty(), crashes.toString())
+        assertEquals(setOf("b"), synced.toSet())
+    }
+
+    @Test
+    fun `phone joining wifi or the setting turning on starts a run`() {
+        // Review finding: only Glass events used to trigger a run
+        phoneWifi = false
+        attach(); glass(status(charging = true))
+        assertTrue(sent.isEmpty())
+        phoneWifi = true
+        runBlocking { sync.conditionsChanged() }
+        assertEquals(listOf("MEDIA_LIST_REQUEST"), sentKinds())
+    }
+
+    @Test
+    fun `a stale run after a reconnect does not touch the new run`() {
+        // Review finding: the old download coroutine sent PullDone over the new link and reset the phase
+        gate = kotlinx.coroutines.CompletableDeferred()
+        attach(); glass(status(charging = true)); glass(list("a" to 1)); glass(server)   // run 1 blocked in download
+        val newLink = Collections.synchronizedList(mutableListOf<Frame>())
+        runBlocking { sync.attach { newLink += it } }
+        glass(status(charging = true))                                                     // run 2 starts listing
+        gate!!.complete(Unit)                                                             // run 1 finishes late
+        assertTrue(newLink.none { it.hasMediaPullDone() }, newLink.map { it.bodyCase }.toString())
+        glass(list("a" to 1, "b" to 2))                                                   // run 2 continues normally ("a" was saved by run 1)
+        assertEquals("MEDIA_PULL_START", newLink.last().bodyCase.name)
     }
 }

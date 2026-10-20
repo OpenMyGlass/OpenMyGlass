@@ -2,7 +2,6 @@ package org.openmyglass.glass.media;
 
 import java.io.BufferedOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -11,8 +10,6 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.security.MessageDigest;
-import java.util.HashMap;
-import java.util.Map;
 
 /**
  * Serves indexed media to the phone over Wi-Fi during one pull: {@code GET /media/<id>?token=<t>}, with Range
@@ -23,8 +20,11 @@ public final class MediaHttpServer {
     private final MediaIndex index;
     private final byte[] token;
     private final int idleMs;
-    private final Map<String, String> hashes = new HashMap<String, String>();
+    private static final int MAX_CONNECTIONS = 4;
+
     private volatile ServerSocket server;
+    private final java.util.concurrent.atomic.AtomicInteger active = new java.util.concurrent.atomic.AtomicInteger();
+    private volatile long lastActivity = System.currentTimeMillis();
 
     public MediaHttpServer(MediaIndex index, String token, int idleMs) {
         this.index = index;
@@ -35,7 +35,7 @@ public final class MediaHttpServer {
     /** Listens on an ephemeral port on all interfaces; returns the port. */
     public int start() throws IOException {
         server = new ServerSocket(0);
-        server.setSoTimeout(idleMs);
+        server.setSoTimeout(Math.min(idleMs, 1_000));   // wake up to check idleness
         Thread accept = new Thread(new Runnable() {
             @Override public void run() { acceptLoop(); }
         }, "media-accept");
@@ -61,11 +61,25 @@ public final class MediaHttpServer {
             try {
                 socket = server.accept();
             } catch (SocketTimeoutException e) {
-                close();   // idle: the pull is over or abandoned
-                return;
+                // Idle only when no transfer is running: a long video must not close the server for the next items
+                if (active.get() == 0 && System.currentTimeMillis() - lastActivity >= idleMs) {
+                    close();
+                    return;
+                }
+                continue;
             } catch (IOException e) {
                 return;
             }
+            if (active.get() >= MAX_CONNECTIONS) {   // the phone pulls one file at a time; refuse floods
+                try {
+                    socket.close();
+                } catch (IOException ignored) {
+                    // closing
+                }
+                continue;
+            }
+            active.incrementAndGet();
+            lastActivity = System.currentTimeMillis();
             Thread t = new Thread(new Runnable() {
                 @Override public void run() { handle(socket); }
             }, "media-request");
@@ -96,6 +110,8 @@ public final class MediaHttpServer {
             } catch (IOException ignored) {
                 // closing
             }
+            lastActivity = System.currentTimeMillis();
+            active.decrementAndGet();
         }
     }
 
@@ -142,40 +158,21 @@ public final class MediaHttpServer {
         h.append("Content-Length: ").append(length - from).append("\r\n");
         if (from > 0) h.append("Content-Range: bytes ").append(from).append('-').append(length - 1).append('/').append(length).append("\r\n");
         h.append("Accept-Ranges: bytes\r\n");
-        h.append("X-Content-SHA256: ").append(sha256(file)).append("\r\n");
+        h.append("X-Content-SHA256: ").append(index.sha256(file)).append("\r\n");
         h.append("Connection: close\r\n\r\n");
         out.write(h.toString().getBytes("US-ASCII"));
         RandomAccessFile raf = new RandomAccessFile(file, "r");
         try {
             raf.seek(from);
             byte[] buf = new byte[64 * 1024];
+            long left = length - from;   // exactly what Content-Length announced, even if the file changed
             int n;
-            while ((n = raf.read(buf)) > 0) out.write(buf, 0, n);
+            while (left > 0 && (n = raf.read(buf, 0, (int) Math.min(buf.length, left))) > 0) {
+                out.write(buf, 0, n);
+                left -= n;
+            }
         } finally {
             raf.close();
-        }
-    }
-
-    private synchronized String sha256(File file) throws IOException {
-        String key = file.getAbsolutePath() + "|" + file.length() + "|" + file.lastModified();
-        String cached = hashes.get(key);
-        if (cached != null) return cached;
-        try {
-            MessageDigest d = MessageDigest.getInstance("SHA-256");
-            InputStream in = new FileInputStream(file);
-            try {
-                byte[] buf = new byte[64 * 1024];
-                int n;
-                while ((n = in.read(buf)) > 0) d.update(buf, 0, n);
-            } finally {
-                in.close();
-            }
-            StringBuilder sb = new StringBuilder();
-            for (byte b : d.digest()) sb.append(String.format("%02x", b));
-            hashes.put(key, sb.toString());
-            return sb.toString();
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IOException(e);
         }
     }
 

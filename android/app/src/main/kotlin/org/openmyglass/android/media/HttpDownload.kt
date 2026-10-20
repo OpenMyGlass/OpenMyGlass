@@ -22,7 +22,8 @@ object HttpDownload {
         val c = URL(url).openConnection() as HttpURLConnection
         return try {
             c.connectTimeout = 10_000
-            c.readTimeout = 30_000
+            // Glass hashes a file the first time it serves it before answering: allow for long videos
+            c.readTimeout = 120_000
             if (have > 0) c.setRequestProperty("Range", "bytes=$have-")
             val code = c.responseCode
             val append = when (code) {

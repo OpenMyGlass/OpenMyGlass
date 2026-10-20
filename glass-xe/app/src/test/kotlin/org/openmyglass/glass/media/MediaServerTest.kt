@@ -35,12 +35,36 @@ class MediaIndexTest {
     @Test
     fun `a changed file gets a new id and unknown ids resolve to nothing`() {
         val dir = tmp.newFolder("Camera")
-        val f = File(dir, "a.jpg").apply { writeBytes(ByteArray(10)) }
+        val f = File(dir, "a.jpg").apply { writeBytes(ByteArray(10)); setLastModified(1_000_000) }
         val index = MediaIndex(dir)
         val before = index.scan().single().id
-        f.writeBytes(ByteArray(11))
+        f.writeBytes(ByteArray(11)); f.setLastModified(2_000_000)
         assertNotEquals(before, index.scan().single().id)
         assertEquals(null, index.file("../../etc/passwd"))
+    }
+}
+
+class MediaIndexSettleTest {
+    @get:Rule val tmp = TemporaryFolder()
+
+    @Test
+    fun `files still being written are not listed`() {
+        // Review finding: a growing video could be synced half-recorded
+        val dir = tmp.newFolder("Camera")
+        File(dir, "recording.mp4").writeBytes(ByteArray(10))          // just written
+        File(dir, "done.jpg").apply { writeBytes(ByteArray(10)); setLastModified(System.currentTimeMillis() - 60_000) }
+        assertEquals(listOf("done.jpg"), MediaIndex(dir, 15_000).scan().map { it.name })
+    }
+
+    @Test
+    fun `the hash of a file is computed once, across pulls`() {
+        // Review finding: every pull re-hashed long videos before answering
+        val dir = tmp.newFolder("Camera")
+        File(dir, "v.mp4").apply { writeBytes(ByteArray(1_000)); setLastModified(1_000_000) }
+        val index = MediaIndex(dir)
+        val f = index.file(index.scan().single().id)
+        assertEquals(index.sha256(f), index.sha256(f))
+        assertEquals(1, index.hashComputations)
     }
 }
 
@@ -51,7 +75,7 @@ class MediaHttpServerTest {
 
     private fun setUp(): Pair<String, Int> {
         val dir = tmp.newFolder("Camera")
-        File(dir, "a.jpg").writeBytes(payload)
+        File(dir, "a.jpg").apply { writeBytes(payload); setLastModified(1_000_000) }
         val index = MediaIndex(dir)
         val id = index.scan().single().id
         server = MediaHttpServer(index, "secret-token", 120_000)
@@ -96,6 +120,23 @@ class MediaHttpServerTest {
     }
 
     @Test
+    fun `a long transfer keeps the server open past the idle time`() {
+        // Review finding: the idle close counted time with no new connection, even during a transfer
+        val dir = tmp.newFolder("Camera")
+        File(dir, "big.mp4").apply { writeBytes(ByteArray(16_000_000)); setLastModified(1_000_000) }
+        val index = MediaIndex(dir)
+        val ids = index.scan().map { it.id }
+        server = MediaHttpServer(index, "t", 300)
+        val port = server.start()
+        val c = get(port, "/media/${ids[0]}?token=t")
+        c.inputStream.use { input ->
+            val buf = ByteArray(1_000_000)
+            repeat(8) { input.read(buf); Thread.sleep(100) }   // a slow reader: ~800 ms, longer than the idle time
+            assertEquals(200, get(port, "/media/${ids[0]}?token=t").responseCode)
+        }
+    }
+
+    @Test
     fun `closes itself when idle`() {
         val dir = tmp.newFolder("Camera")
         server = MediaHttpServer(MediaIndex(dir), "t", 200)
@@ -119,7 +160,7 @@ class MediaHandlerTest {
 
     private fun handler(): MediaHandler {
         val dir = tmp.newFolder("Camera")
-        File(dir, "a.jpg").writeBytes(ByteArray(10))
+        File(dir, "a.jpg").apply { writeBytes(ByteArray(10)); setLastModified(1_000_000) }
         return MediaHandler(MediaIndex(dir), status)
     }
 

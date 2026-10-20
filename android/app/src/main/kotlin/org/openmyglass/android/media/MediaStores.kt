@@ -8,6 +8,7 @@ import org.openmyglass.core.media.MediaDownloader
 import org.openmyglass.core.media.MediaItem
 import org.openmyglass.core.media.MediaServerInfo
 import org.openmyglass.core.media.SyncedStore
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 /** Owner choice: sync automatically while Glass charges on Wi-Fi (architecture §5.4). */
@@ -30,7 +31,10 @@ class SyncedMedia(context: Context) : SyncedStore {
 
 /** Pulls into a resumable partial file in the cache, then saves it to the gallery. */
 class AndroidMediaDownloader(private val context: Context) : MediaDownloader {
-    override suspend fun download(server: MediaServerInfo, item: MediaItem): DownloadResult =
+    /** One download at a time: a late run from an old session must never write the same partial file. */
+    private val oneAtATime = kotlinx.coroutines.sync.Mutex()
+
+    override suspend fun download(server: MediaServerInfo, item: MediaItem): DownloadResult = oneAtATime.withLock {
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             val dir = File(context.cacheDir, "media-partial").apply { mkdirs() }
             val partial = File(dir, item.id)
@@ -43,6 +47,7 @@ class AndroidMediaDownloader(private val context: Context) : MediaDownloader {
                 }
             }
         }
+    }
 }
 
 object PhoneNetwork {

@@ -14,7 +14,8 @@ import java.util.Map;
 /**
  * Photos and videos in the camera folder. Ids are stable for the same file (path, size, modification time), so
  * the phone remembers what it already synced; only ids from the latest scan resolve to files (no paths from
- * the network).
+ * the network). Files modified within {@code settleMs} are left out: a video being recorded is still growing.
+ * SHA-256 hashes are kept per file version, so a long video is hashed once, not on every pull.
  */
 public final class MediaIndex {
 
@@ -36,11 +37,55 @@ public final class MediaIndex {
         }
     }
 
+    public static final long DEFAULT_SETTLE_MS = 15_000;
+
     private final File dir;
+    private final long settleMs;
     private final Map<String, File> byId = new HashMap<String, File>();
+    private final Map<String, String> hashes = new HashMap<String, String>();
+    /** For tests: how many files were hashed. */
+    int hashComputations;
 
     public MediaIndex(File dir) {
+        this(dir, DEFAULT_SETTLE_MS);
+    }
+
+    public MediaIndex(File dir, long settleMs) {
         this.dir = dir;
+        this.settleMs = settleMs;
+    }
+
+    public long settleMs() {
+        return settleMs;
+    }
+
+    /** SHA-256 (hex) of the file's current version; computed once per path, size and modification time. */
+    public String sha256(File file) throws java.io.IOException {
+        String key = file.getAbsolutePath() + "|" + file.length() + "|" + file.lastModified();
+        synchronized (hashes) {
+            String cached = hashes.get(key);
+            if (cached != null) return cached;
+        }
+        try {
+            MessageDigest d = MessageDigest.getInstance("SHA-256");
+            java.io.InputStream in = new java.io.FileInputStream(file);
+            try {
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) d.update(buf, 0, n);
+            } finally {
+                in.close();
+            }
+            StringBuilder sb = new StringBuilder();
+            for (byte b : d.digest()) sb.append(String.format("%02x", b));
+            synchronized (hashes) {
+                hashComputations++;
+                hashes.put(key, sb.toString());
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new java.io.IOException(e);
+        }
     }
 
     public File directory() {
@@ -53,8 +98,10 @@ public final class MediaIndex {
         File[] files = dir.listFiles();
         byId.clear();
         if (files == null) return items;
+        long now = System.currentTimeMillis();
         for (File f : files) {
             if (!f.isFile()) continue;
+            if (now - f.lastModified() < settleMs) continue;   // still being written
             String name = f.getName().toLowerCase(Locale.ROOT);
             boolean photo = name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png");
             boolean video = name.endsWith(".mp4") || name.endsWith(".3gp");

@@ -177,7 +177,10 @@ class SettingsActivity : Activity() {
         content.addView(CheckBox(this).apply {
             text = "Sync automatically while Glass is charging on Wi-Fi"
             isChecked = settings.autoSync
-            setOnCheckedChangeListener { _, on -> settings.autoSync = on }
+            setOnCheckedChangeListener { _, on ->
+                settings.autoSync = on
+                scope.launch { PhoneHub.media.conditionsChanged() }
+            }
         })
         content.addView(Button(this).apply {
             text = "Sync now (Wi-Fi)"

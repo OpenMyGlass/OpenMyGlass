@@ -19,7 +19,11 @@ object GallerySaver {
             put(MediaStore.MediaColumns.DATE_TAKEN, item.takenAt)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
-        val uri = resolver.insert(collection, values) ?: return false
+        val uri = try {
+            resolver.insert(collection, values)
+        } catch (e: Exception) {
+            null
+        } ?: return false
         return try {
             resolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out, 64 * 1024) } }
                 ?: throw java.io.IOException("cannot open gallery item")

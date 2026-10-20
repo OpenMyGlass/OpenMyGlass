@@ -12,7 +12,6 @@ import android.os.FileObserver;
 
 import java.io.File;
 import java.util.Locale;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
@@ -22,7 +21,7 @@ import java.util.concurrent.Executors;
 public final class AndroidMedia implements MediaHandler.Status {
     private final Context context;
     private final String ipOverride;
-    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final java.util.concurrent.ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor();
     private MediaHandler handler;
     private FileObserver observer;
     private Boolean lastCharging;
@@ -46,6 +45,13 @@ public final class AndroidMedia implements MediaHandler.Status {
         this.ipOverride = ipOverride;
     }
 
+    private long settleMs = MediaIndex.DEFAULT_SETTLE_MS;
+
+    public void start(MediaHandler handler, File dir, long settleMs) {
+        this.settleMs = settleMs;
+        start(handler, dir);
+    }
+
     public void start(MediaHandler handler, File dir) {
         this.handler = handler;
         IntentFilter filter = new IntentFilter();
@@ -58,7 +64,9 @@ public final class AndroidMedia implements MediaHandler.Status {
         final MediaHandler h = handler;
         observer = new FileObserver(dir.getAbsolutePath(), FileObserver.CLOSE_WRITE | FileObserver.MOVED_TO) {
             @Override public void onEvent(int event, String path) {
-                worker.execute(new Runnable() { @Override public void run() { h.onNewMedia(); } });
+                // The index leaves out files younger than its settle time: announce once this one has settled
+                worker.schedule(new Runnable() { @Override public void run() { h.onNewMedia(); } },
+                        settleMs + 1_000, java.util.concurrent.TimeUnit.MILLISECONDS);
             }
         };
         observer.startWatching();
