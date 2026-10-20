@@ -32,6 +32,7 @@ class SettingsActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        PhoneHub.init(applicationContext)   // also opened from the service notification
         settings = Settings(this)
         val current = settings.load()
         chosenAddress = current.glassAddress
@@ -84,6 +85,7 @@ class SettingsActivity : Activity() {
             })
             addNotificationSettings(this)
             addSpeechSettings(this)
+            addMediaSettings(this)
         }
         setContentView(ScrollView(this).apply { fitsSystemWindows = true; addView(content) })
         scope.launch { PhoneHub.bridgeStatus.collect { status.text = it } }
@@ -165,6 +167,24 @@ class SettingsActivity : Activity() {
             }
         })
         refresh()
+    }
+
+    /** Photos and videos: automatic sync while Glass charges on Wi-Fi, or now. */
+    private fun addMediaSettings(content: LinearLayout) {
+        val settings = org.openmyglass.android.media.MediaSettings(this)
+        val status = TextView(this)
+        content.addView(TextView(this).apply { text = "Photos and videos from Glass (saved to DCIM/Glass):" })
+        content.addView(CheckBox(this).apply {
+            text = "Sync automatically while Glass is charging on Wi-Fi"
+            isChecked = settings.autoSync
+            setOnCheckedChangeListener { _, on -> settings.autoSync = on }
+        })
+        content.addView(Button(this).apply {
+            text = "Sync now (Wi-Fi)"
+            setOnClickListener { scope.launch { PhoneHub.media.syncNow() } }
+        })
+        content.addView(status)
+        scope.launch { PhoneHub.media.status.collect { status.text = "Sync: $it" } }
     }
 
     override fun onResume() {
