@@ -205,4 +205,22 @@ class MediaSyncTest {
         Thread.sleep(400)
         assertEquals(listOf("MEDIA_LIST_REQUEST"), sentKinds())
     }
+
+    @Test
+    fun `a follow-up run does not schedule another one`() {
+        // Review finding: an item failing every time re-ran (and re-downloaded) every 5 minutes forever
+        failIds = setOf("a")
+        val q = quickSync()
+        runBlocking {
+            q.attach { f ->
+                sent += f
+                // Glass answers every list and pull, asynchronously (send() runs under the sync's lock)
+                if (f.hasMediaListRequest()) Thread { runBlocking { q.onFrame(list("a" to 1)) } }.start()
+                if (f.hasMediaPullStart()) Thread { runBlocking { q.onFrame(server) } }.start()
+            }
+            q.onFrame(status(charging = true))
+        }
+        Thread.sleep(900)                       // room for several follow-ups at 200 ms
+        assertEquals(2, sent.count { it.hasMediaListRequest() })   // the first run and exactly one follow-up
+    }
 }

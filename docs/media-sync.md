@@ -11,6 +11,8 @@ Photos and videos taken on Glass go into the phone's gallery (`DCIM/Glass`). Spe
   - "Sync automatically while Glass is charging on Wi-Fi" is on in the phone's settings (default on).
 
   A run starts when these conditions become true and whenever a new photo or video is written while they hold. If charging stops, the run finishes the current file and stops.
+  - **Retry:** after an automatic run with failures, or with new media during it, one follow-up run starts 5 minutes later if the conditions still hold, and only one.
+  - **Timeout:** if Glass does not answer a list or pull request within 30 s, the run ends ("Glass did not answer").
 - **On demand** with "Sync now (Wi-Fi)" in settings, whatever the charging state.
 - **On demand over Bluetooth** with "Sync now over Bluetooth (slow)". It asks for confirmation with a speed warning, and is meant for when Glass or the phone has no Wi-Fi. It is never automatic.
 - **Files on Glass are kept** unless "Delete from Glass after saving on the phone" is on (default off).

@@ -20,7 +20,7 @@ Phone notifications appear on Glass. You can read them, dismiss them in sync bot
    - `BridgeService` shows the newest one on a LiveCard; tapping opens `NotificationsActivity`: one card per notification, and tapping a card opens a menu with the notification's actions and Dismiss.
    - The `emulator` flavor shows the card with a button bar in place of the menu.
 5. Actions chosen on Glass go back as `NotificationAction`:
-   - **Dismiss** cancels the notification on the phone;
+   - **Dismiss** cancels the notification on the phone. Glass hides the card at once and removes it when the phone confirms; if no confirmation comes within 5 s (the app forbids clearing it), the card comes back;
    - **an action** fires its `PendingIntent`, with background activity start allowed on Android 14+;
    - an action for a notification that is already gone is ignored, and failures are logged.
 
@@ -47,7 +47,8 @@ Phone notifications appear on Glass. You can read them, dismiss them in sync bot
 
 Notification content leaves the phone only over the bridge to the owner's Glass. The relay neither logs nor stores it.
 
-- **Private and secret notifications:** notifications an app marks private or secret on the lock screen (`VISIBILITY_PRIVATE`/`VISIBILITY_SECRET`) are shown in full on Glass. The display is seen only by the wearer, but anyone looking at the prism up close could read it. Mute those apps if that matters. The debug capture tool is opt-in and records only notifications from Google Maps and OsmAnd (to study navigation), all of them, not only the navigation ones. Its file contains your destinations and addresses: delete it after use (the debug screen shows its path).
+- **Private and secret notifications:** notifications an app marks private or secret on the lock screen (`VISIBILITY_PRIVATE`/`VISIBILITY_SECRET`) are shown in full on Glass. The display is seen only by the wearer, but anyone looking at the prism up close could read it. Mute those apps if that matters.
+- **Debug capture:** the debug capture tool is opt-in and records only notifications from Google Maps and OsmAnd (to study navigation), all of them, not only the navigation ones. Its file contains your destinations and addresses: delete it after use (the debug screen shows its path).
 
 ## Bridge messages (`openmyglass.v1`, additive)
 
@@ -85,7 +86,7 @@ A notification action with a `RemoteInput` shows as **Reply** on Glass.
 4. On Send the phone fills the notification's `RemoteInput` and fires its action, then Glass shows "Sent" or why it failed. Possible failures:
    - the notification is gone;
    - the app refused the reply;
-   - the request expired after 60 s.
+   - the request expired: 60 s after the transcript reached Glass.
 
 Errors reach Glass at once: no model downloaded, nothing heard, phone not reachable. One dictation at a time; a new one cancels the older one.
 

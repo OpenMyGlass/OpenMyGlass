@@ -80,6 +80,8 @@ class MediaSync(
     /** Bumped on every phase change: a reply watchdog only fires for the wait it was armed for. */
     private var waitStamp = 0
     private var newMediaDuringRun = false
+    /** The current automatic run is the follow-up of an earlier one: it schedules no further follow-up. */
+    private var followUpRun = false
     @Volatile private var pendingChunk: kotlinx.coroutines.CompletableDeferred<Bridge.MediaChunk>? = null
     @Volatile private var pendingKey: Pair<String, Long>? = null
 
@@ -112,6 +114,15 @@ class MediaSync(
     suspend fun conditionsChanged() = lock.withLock {
         if (phase == Phase.IDLE && autoAllowed()) {
             manual = false
+            followUpRun = false
+            requestList()
+        }
+    }
+
+    private suspend fun followUp() = lock.withLock {
+        if (phase == Phase.IDLE && autoAllowed()) {
+            manual = false
+            followUpRun = true
             requestList()
         }
     }
@@ -135,6 +146,7 @@ class MediaSync(
                 glass = frame.glassStatus
                 if (phase == Phase.IDLE && autoAllowed()) {
                     manual = false
+                    followUpRun = false
                     bluetooth = false
                     requestList()
                 }
@@ -145,7 +157,7 @@ class MediaSync(
                 val wanted = phase == Phase.LISTING || (phase == Phase.IDLE && autoAllowed())
                 if (!wanted) return@withLock
                 waitStamp++
-                if (phase == Phase.IDLE) { manual = false; bluetooth = false }
+                if (phase == Phase.IDLE) { manual = false; bluetooth = false; followUpRun = false }
                 todo = items.filterNot { synced.contains(it.id) }.sortedBy { it.takenAt }
                 if (todo.isEmpty()) {
                     phase = Phase.IDLE
@@ -216,10 +228,10 @@ class MediaSync(
             if (server != null) safeSend(Frame.newBuilder().setMediaPullDone(Bridge.MediaPullDone.getDefaultInstance()).build())
             phase = Phase.IDLE
             // Failed items and media taken meanwhile get one more automatic try (issue #66)
-            if (!manual && (failed > 0 || newMediaDuringRun)) {
+            if (!manual && !followUpRun && (failed > 0 || newMediaDuringRun)) {
                 scope.launch {
                     kotlinx.coroutines.delay(followUpDelayMs)
-                    if (lock.withLock { gen == generation }) conditionsChanged()
+                    if (lock.withLock { gen == generation }) followUp()
                 }
             }
         }
