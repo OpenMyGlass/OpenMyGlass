@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Dictated replies: the microphone is open only while the owner dictates. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Media sync: Wi-Fi state and address for the media server. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:allowBackup="false"

@@ -20,6 +20,9 @@ import org.openmyglass.glass.bridge.BridgeServer;
 import org.openmyglass.glass.bridge.FanOutHandler;
 import org.openmyglass.glass.dictation.DictationActivity;
 import org.openmyglass.glass.dictation.DictationHost;
+import org.openmyglass.glass.media.AndroidMedia;
+import org.openmyglass.glass.media.MediaHandler;
+import org.openmyglass.glass.media.MediaIndex;
 import org.openmyglass.glass.notif.NotificationCards;
 import org.openmyglass.glass.notif.NotificationCommands;
 import org.openmyglass.glass.notif.NotificationState;
@@ -45,6 +48,7 @@ public final class EmulatorCardActivity extends Activity {
     private NotificationState notifications;
     private NavCardState.Card navCard;
     private int selected;
+    private AndroidMedia media;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -83,7 +87,12 @@ public final class EmulatorCardActivity extends Activity {
                 main.post(new Runnable() { @Override public void run() { selected = 0; render(); } });
             }
         }, 20);
-        server = new BridgeServer(PORT, new FanOutHandler(Arrays.<BridgeServer.FrameHandler>asList(state, notifications, DictationHost.CLIENT)));
+        // Media sync from the app's own folder (push test files with adb); the phone is on this device: 127.0.0.1
+        java.io.File mediaDir = new java.io.File(getExternalFilesDir(null), "media");
+        media = new AndroidMedia(this, "127.0.0.1");
+        MediaHandler mediaHandler = new MediaHandler(new MediaIndex(mediaDir), media);
+        media.start(mediaHandler, mediaDir);
+        server = new BridgeServer(PORT, new FanOutHandler(Arrays.<BridgeServer.FrameHandler>asList(state, notifications, DictationHost.CLIENT, mediaHandler)));
         if (android.os.Build.VERSION.SDK_INT >= 23
                 && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[] {android.Manifest.permission.RECORD_AUDIO}, 1);
@@ -159,6 +168,7 @@ public final class EmulatorCardActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (server != null) server.close();
+        if (media != null) media.stop();
         super.onDestroy();
     }
 }
