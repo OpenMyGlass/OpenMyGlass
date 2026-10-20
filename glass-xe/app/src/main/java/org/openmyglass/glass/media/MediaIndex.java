@@ -118,6 +118,12 @@ public final class MediaIndex {
         return items;
     }
 
+    /** The file for an id only if it is still that exact version (same path, size and modification time). */
+    public synchronized File fileIfUnchanged(String id) {
+        File f = file(id);
+        return f != null && f.isFile() && id(f).equals(id) ? f : null;
+    }
+
     /** The file for an id from the latest scan, or null. */
     public synchronized File file(String id) {
         if (byId.isEmpty()) scan();

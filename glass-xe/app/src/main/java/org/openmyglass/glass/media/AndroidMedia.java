@@ -26,6 +26,14 @@ public final class AndroidMedia implements MediaHandler.Status {
     private FileObserver observer;
     private Boolean lastCharging;
     private Boolean lastWifi;
+    private volatile boolean wifiForcedOff;
+
+    /** Debug (emulator): pretend Glass has no Wi-Fi, to exercise the Bluetooth fallback. */
+    public void setWifiForcedOff(boolean off) {
+        wifiForcedOff = off;
+        final MediaHandler h = handler;
+        if (h != null) worker.execute(new Runnable() { @Override public void run() { h.onStatusChanged(); } });
+    }
 
     private final BroadcastReceiver changes = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent intent) {
@@ -92,6 +100,7 @@ public final class AndroidMedia implements MediaHandler.Status {
     @Override
     @SuppressWarnings("deprecation")
     public boolean wifi() {
+        if (wifiForcedOff) return false;
         ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
         NetworkInfo info = cm == null ? null : cm.getActiveNetworkInfo();
         return info != null && info.isConnected() && info.getType() == ConnectivityManager.TYPE_WIFI;
