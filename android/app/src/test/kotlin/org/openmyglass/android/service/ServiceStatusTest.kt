@@ -47,4 +47,11 @@ class ServiceStatusTest {
             ServiceStatus.text(LinkState.WaitingToRetry(1, 1.seconds), false, false, unavailableReason = "Choose your Glass in settings"))
         assertEquals("Glass connected", ServiceStatus.text(hello, false, false, unavailableReason = null))
     }
+
+    @Test
+    fun `bridge off with the companion connected says both`() {
+        // Issue #43
+        assertEquals("Glass connected (bridge off)",
+            ServiceStatus.text(LinkState.Disconnected, companionConnected = true, permissionMissing = false, unavailableReason = "Bridge is off"))
+    }
 }

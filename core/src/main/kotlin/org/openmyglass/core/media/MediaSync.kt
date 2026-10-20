@@ -56,6 +56,10 @@ class MediaSync(
     private val deleteAfterSync: () -> Boolean = { false },
     /** Glass hashes the file before its last chunk: allow for long videos (as the Wi-Fi path does). */
     private val chunkTimeoutMs: Long = 120_000,
+    /** Glass must answer a list or pull request within this, or the run ends ("Glass did not answer"). */
+    private val replyTimeoutMs: Long = 30_000,
+    /** After an automatic run with failures or new media, one more run this much later if conditions hold. */
+    private val followUpDelayMs: Long = 300_000,
 ) {
     companion object {
         /** Chunk payload over the bridge: a frame stays below the 64 KiB cap. */
@@ -73,6 +77,9 @@ class MediaSync(
     /** Bumped on every attach/detach: a download running for an older session must not touch the new one. */
     private var generation = 0
     private var bluetooth = false
+    /** Bumped on every phase change: a reply watchdog only fires for the wait it was armed for. */
+    private var waitStamp = 0
+    private var newMediaDuringRun = false
     @Volatile private var pendingChunk: kotlinx.coroutines.CompletableDeferred<Bridge.MediaChunk>? = null
     @Volatile private var pendingKey: Pair<String, Long>? = null
 
@@ -134,8 +141,10 @@ class MediaSync(
             }
             frame.hasMediaList() -> lock.withLock {
                 val items = frame.mediaList.itemsList.map { MediaItem(it.id, it.name, it.video, it.size, it.takenAtMs) }
+                if (phase == Phase.DOWNLOADING) newMediaDuringRun = true
                 val wanted = phase == Phase.LISTING || (phase == Phase.IDLE && autoAllowed())
                 if (!wanted) return@withLock
+                waitStamp++
                 if (phase == Phase.IDLE) { manual = false; bluetooth = false }
                 todo = items.filterNot { synced.contains(it.id) }.sortedBy { it.takenAt }
                 if (todo.isEmpty()) {
@@ -143,6 +152,7 @@ class MediaSync(
                     _status.value = "Up to date"
                 } else if (bluetooth) {
                     phase = Phase.DOWNLOADING
+                    newMediaDuringRun = false
                     val items2 = todo
                     val gen = generation
                     scope.launch { download(null, items2, gen) }
@@ -150,15 +160,19 @@ class MediaSync(
                     phase = Phase.WAITING_SERVER
                     _status.value = "${todo.size} to sync"
                     safeSend(Frame.newBuilder().setMediaPullStart(Bridge.MediaPullStart.getDefaultInstance()).build())
+                    armReplyWatchdog()
                 }
             }
             frame.hasMediaServerUnavailable() -> lock.withLock {
+                waitStamp++
                 if (phase == Phase.WAITING_SERVER) phase = Phase.IDLE
                 _status.value = frame.mediaServerUnavailable.reason
             }
             frame.hasMediaServer() -> {
                 val (items, gen) = lock.withLock {
                     if (phase != Phase.WAITING_SERVER) return
+                    waitStamp++
+                    newMediaDuringRun = false
                     phase = Phase.DOWNLOADING
                     todo to generation
                 }
@@ -201,6 +215,13 @@ class MediaSync(
             }
             if (server != null) safeSend(Frame.newBuilder().setMediaPullDone(Bridge.MediaPullDone.getDefaultInstance()).build())
             phase = Phase.IDLE
+            // Failed items and media taken meanwhile get one more automatic try (issue #66)
+            if (!manual && (failed > 0 || newMediaDuringRun)) {
+                scope.launch {
+                    kotlinx.coroutines.delay(followUpDelayMs)
+                    if (lock.withLock { gen == generation }) conditionsChanged()
+                }
+            }
         }
         _status.value = if (failed == 0) "Synced $done" else "Synced $done, $failed failed (retried next time)"
     }
@@ -258,5 +279,21 @@ class MediaSync(
         phase = Phase.LISTING
         _status.value = "Listing Glass media"
         safeSend(Frame.newBuilder().setMediaListRequest(Bridge.MediaListRequest.getDefaultInstance()).build())
+        armReplyWatchdog()
+    }
+
+    /** Caller holds the lock. Ends a LISTING/WAITING_SERVER wait that Glass never answers (issue #64). */
+    private fun armReplyWatchdog() {
+        val stamp = ++waitStamp
+        val gen = generation
+        scope.launch {
+            kotlinx.coroutines.delay(replyTimeoutMs)
+            lock.withLock {
+                if (stamp == waitStamp && gen == generation && (phase == Phase.LISTING || phase == Phase.WAITING_SERVER)) {
+                    phase = Phase.IDLE
+                    _status.value = "Glass did not answer"
+                }
+            }
+        }
     }
 }
