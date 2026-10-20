@@ -161,4 +161,15 @@ class DictationServiceTest {
         assertEquals("Speech recognition failed", t.error)
         assertFalse(t.error.contains("secret"))
     }
+
+    @Test
+    fun `the expiry restarts when the transcript is ready`() {
+        // Issue #59: a long dictation left little time to review
+        feed(start(1), chunk(1, 0, "ciao"))
+        Thread.sleep(200)                       // most of the 300 ms timeout spent dictating
+        feed(end(1))
+        Thread.sleep(200)                       // reviewing: 400 ms since start, 200 ms since the transcript
+        feed(confirm(1, true))
+        assertEquals(listOf(Triple("k1", 0, "ciao")), replies.toList())
+    }
 }
