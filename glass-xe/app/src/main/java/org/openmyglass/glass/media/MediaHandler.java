@@ -28,13 +28,20 @@ public final class MediaHandler implements BridgeServer.FrameHandler {
 
     private final MediaIndex index;
     private final Status status;
+    /** Chunks are read (and the file hashed) here, never on the bridge read thread. */
+    private final java.util.concurrent.Executor chunkWorker;
     private final SecureRandom random = new SecureRandom();
     private BridgeServer.Sender sender;
     private MediaHttpServer server;
 
     public MediaHandler(MediaIndex index, Status status) {
+        this(index, status, java.util.concurrent.Executors.newSingleThreadExecutor());
+    }
+
+    public MediaHandler(MediaIndex index, Status status, java.util.concurrent.Executor chunkWorker) {
         this.index = index;
         this.status = status;
+        this.chunkWorker = chunkWorker;
     }
 
     @Override
@@ -71,7 +78,17 @@ public final class MediaHandler implements BridgeServer.FrameHandler {
         } else if (frame.hasMediaPullDone()) {
             closeServer();
         } else if (frame.hasMediaChunkRequest()) {
-            send(Bridge.Frame.newBuilder().setMediaChunk(chunk(frame.getMediaChunkRequest())).build());
+            final Bridge.MediaChunkRequest r = frame.getMediaChunkRequest();
+            final BridgeServer.Sender to = sender;
+            chunkWorker.execute(new Runnable() { @Override public void run() {
+                Bridge.MediaChunk c = chunk(r);
+                if (to == null) return;
+                try {
+                    to.send(Bridge.Frame.newBuilder().setMediaChunk(c).build());
+                } catch (IOException e) {
+                    // the session is ending; the phone resumes from its partial file
+                }
+            } });
         } else if (frame.hasMediaDelete()) {
             String id = frame.getMediaDelete().getId();
             File f = index.fileIfUnchanged(id);   // a changed file has another id: never delete what the phone did not save
@@ -105,7 +122,9 @@ public final class MediaHandler implements BridgeServer.FrameHandler {
         if (f == null) return c.setError("unknown or changed file").build();
         long total = f.length();
         if (r.getOffset() < 0 || r.getOffset() > total) return c.setTotal(total).setError("bad offset").build();
-        int length = (int) Math.min(Math.min(r.getLength(), CHUNK_MAX), total - r.getOffset());
+        long asked = r.getLength() & 0xFFFFFFFFL;   // uint32: values ≥ 2^31 arrive negative in Java
+        if (asked == 0 || asked > Integer.MAX_VALUE) return c.setTotal(total).setError("bad length").build();
+        int length = (int) Math.min(Math.min(asked, CHUNK_MAX), total - r.getOffset());
         try {
             byte[] data = new byte[length];
             RandomAccessFile raf = new RandomAccessFile(f, "r");
@@ -115,7 +134,9 @@ public final class MediaHandler implements BridgeServer.FrameHandler {
             } finally {
                 raf.close();
             }
-            return c.setData(com.google.protobuf.ByteString.copyFrom(data)).setTotal(total).setSha256(index.sha256(f)).build();
+            c.setData(com.google.protobuf.ByteString.copyFrom(data)).setTotal(total);
+            if (r.getOffset() + length == total) c.setSha256(index.sha256(f));   // only the last chunk carries the hash
+            return c.build();
         } catch (IOException e) {
             return c.setTotal(total).setError("read failed").build();
         }

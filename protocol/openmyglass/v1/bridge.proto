@@ -205,7 +205,7 @@ message MediaChunk {
   int64 offset = 2;
   bytes data = 3;                  // empty at the end of the file, or with an error
   int64 total = 4;
-  string sha256 = 5;               // of the whole file, in every chunk (resumes start mid-file)
+  string sha256 = 5;               // of the whole file, only in the chunk that reaches the end (hashing waits until then)
   string error = 6;
 }
 

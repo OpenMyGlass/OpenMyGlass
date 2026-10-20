@@ -54,7 +54,8 @@ class MediaSync(
     private val partials: PartialStore? = null,
     /** Owner setting: delete on Glass after the phone saved and verified the file. */
     private val deleteAfterSync: () -> Boolean = { false },
-    private val chunkTimeoutMs: Long = 30_000,
+    /** Glass hashes the file before its last chunk: allow for long videos (as the Wi-Fi path does). */
+    private val chunkTimeoutMs: Long = 120_000,
 ) {
     companion object {
         /** Chunk payload over the bridge: a frame stays below the 64 KiB cap. */
@@ -73,6 +74,7 @@ class MediaSync(
     private var generation = 0
     private var bluetooth = false
     @Volatile private var pendingChunk: kotlinx.coroutines.CompletableDeferred<Bridge.MediaChunk>? = null
+    @Volatile private var pendingKey: Pair<String, Long>? = null
 
     private val _status = MutableStateFlow("Idle")
     /** One line for the phone UI. */
@@ -82,6 +84,7 @@ class MediaSync(
         this.send = send
         generation++
         phase = Phase.IDLE
+        abandonChunk()
     }
 
     suspend fun detach() = lock.withLock {
@@ -89,6 +92,13 @@ class MediaSync(
         glass = null
         generation++
         phase = Phase.IDLE
+        abandonChunk()
+    }
+
+    /** A chunk request in flight will never be answered on a gone session: fail it now, not at the timeout. */
+    private fun abandonChunk() {
+        pendingChunk?.complete(Bridge.MediaChunk.newBuilder().setError("link lost").build())
+        pendingChunk = null
     }
 
     /** The phone's Wi-Fi or the owner's auto-sync setting changed: start a run if everything now allows it. */
@@ -112,7 +122,8 @@ class MediaSync(
 
     suspend fun onFrame(frame: Frame) {
         when {
-            frame.hasMediaChunk() -> pendingChunk?.complete(frame.mediaChunk)
+            // Only the answer to the request in flight: a late answer to an earlier (timed-out) request is dropped
+            frame.hasMediaChunk() -> if (pendingKey == frame.mediaChunk.id to frame.mediaChunk.offset) pendingChunk?.complete(frame.mediaChunk)
             frame.hasGlassStatus() -> lock.withLock {
                 glass = frame.glassStatus
                 if (phase == Phase.IDLE && autoAllowed()) {
@@ -184,7 +195,10 @@ class MediaSync(
             }
         }
         lock.withLock {
-            if (gen != generation) return   // a newer session owns the state and the Glass server now
+            if (gen != generation) {   // a newer session owns the state and the Glass server now
+                if (phase == Phase.IDLE) _status.value = "Sync interrupted (link lost), $failed failed, retried next time"
+                return
+            }
             if (server != null) safeSend(Frame.newBuilder().setMediaPullDone(Bridge.MediaPullDone.getDefaultInstance()).build())
             phase = Phase.IDLE
         }
@@ -197,6 +211,7 @@ class MediaSync(
         var offset = store.length(item.id)
         while (true) {
             val answer = kotlinx.coroutines.CompletableDeferred<Bridge.MediaChunk>()
+            pendingKey = item.id to offset
             pendingChunk = answer
             val sentOk = lock.withLock {
                 if (gen != generation || send == null) false
@@ -207,9 +222,9 @@ class MediaSync(
             val chunk = kotlinx.coroutines.withTimeoutOrNull(chunkTimeoutMs) { answer.await() }
                 ?: return DownloadResult.Failed("Glass did not answer")   // the partial file is kept for resuming
             pendingChunk = null
-            if (chunk.id != item.id || chunk.offset != offset) return DownloadResult.Failed("unexpected chunk")
+            // A partial longer than the file (it changed, or two writers): start over next time
+            if (chunk.total > 0 && offset > chunk.total) { store.reset(item.id); return DownloadResult.Failed("file changed on Glass") }
             if (chunk.error.isNotEmpty()) return DownloadResult.Failed(chunk.error)
-            if (offset > chunk.total) { store.reset(item.id); return DownloadResult.Failed("file changed on Glass") }
             if (chunk.data.isEmpty) {
                 return if (offset == chunk.total) store.complete(item, chunk.sha256) else DownloadResult.Failed("short chunk")
             }

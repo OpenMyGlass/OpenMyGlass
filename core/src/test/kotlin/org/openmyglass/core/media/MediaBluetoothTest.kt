@@ -53,6 +53,7 @@ class MediaBluetoothTest {
     )
     private val sent = Collections.synchronizedList(mutableListOf<Frame>())
     private var requests = 0
+    private var stale: Frame? = null
 
     @AfterEach
     fun tearDown() = scope.cancel()
@@ -67,8 +68,10 @@ class MediaBluetoothTest {
                 val r = f.mediaChunkRequest
                 val from = r.offset.toInt(); val to = minOf(content.size, from + r.length)
                 val data = content.copyOfRange(from, to).also { if (requests >= corruptFrom) it[0] = (it[0] + 1).toByte() }
+                stale?.let { sync.onFrame(it); stale = null }   // a late answer to an earlier request arrives first
                 sync.onFrame(Frame.newBuilder().setMediaChunk(Bridge.MediaChunk.newBuilder().setId(r.id).setOffset(r.offset)
-                    .setData(ByteString.copyFrom(data)).setTotal(content.size.toLong()).setSha256(sha)).build())
+                    .setData(ByteString.copyFrom(data)).setTotal(content.size.toLong())
+                    .setSha256(if (to == content.size) sha else "")).build())
             }
         }
     }
@@ -144,5 +147,60 @@ class MediaBluetoothTest {
             wifiSync.onFrame(Frame.newBuilder().setMediaServer(Bridge.MediaServer.newBuilder().setIp("1.2.3.4").setPort(1).setToken("t")).build())
         }
         assertEquals("p1", frames.first { it.hasMediaDelete() }.mediaDelete.id)
+    }
+
+    @Test
+    fun `a late chunk from an earlier request is ignored`() {
+        // Review finding: one late answer made every following item fail
+        attach()
+        stale = Frame.newBuilder().setMediaChunk(Bridge.MediaChunk.newBuilder().setId("old").setOffset(4096)
+            .setData(ByteString.copyFrom(ByteArray(10))).setTotal(99)).build()
+        runBlocking { sync.syncNow(overBluetooth = true) }
+        list()
+        assertEquals(listOf("v1"), store.saved)
+    }
+
+    @Test
+    fun `a partial longer than the file is reset`() {
+        // Review finding: the "bad offset" error was checked before the reset, so the item failed forever
+        store.append("v1", ByteArray(content.size + 10))
+        val sync2 = MediaSync(
+            synced = object : SyncedStore {
+                override fun contains(id: String) = false
+                override fun add(id: String) {}
+            },
+            downloader = { _, _ -> DownloadResult.Failed("") }, autoEnabled = { false }, phoneOnWifi = { false }, scope = scope,
+            partials = store, chunkTimeoutMs = 2_000)
+        runBlocking {
+            sync2.attach { f ->
+                if (f.hasMediaChunkRequest()) sync2.onFrame(Frame.newBuilder().setMediaChunk(Bridge.MediaChunk.newBuilder()
+                    .setId("v1").setOffset(f.mediaChunkRequest.offset).setTotal(content.size.toLong()).setError("bad offset")).build())
+            }
+            sync2.syncNow(overBluetooth = true)
+            sync2.onFrame(Frame.newBuilder().setMediaList(Bridge.MediaList.newBuilder().addItems(Bridge.MediaItem.newBuilder().setId("v1").setName("v1.mp4"))).build())
+        }
+        assertEquals(0, store.length("v1"))
+    }
+
+    @Test
+    fun `losing the session mid-chunk fails the item at once`() {
+        // With a 120 s chunk timeout, a detach must not leave the run waiting that long
+        val slow = MediaSync(
+            synced = object : SyncedStore {
+                override fun contains(id: String) = false
+                override fun add(id: String) {}
+            },
+            downloader = { _, _ -> DownloadResult.Failed("") }, autoEnabled = { false }, phoneOnWifi = { false }, scope = scope,
+            partials = store, chunkTimeoutMs = 60_000)
+        runBlocking {
+            slow.attach { }                                  // Glass never answers chunk requests
+            slow.syncNow(overBluetooth = true)
+            slow.onFrame(Frame.newBuilder().setMediaList(Bridge.MediaList.newBuilder().addItems(Bridge.MediaItem.newBuilder().setId("v1").setName("v1.mp4"))).build())
+        }
+        val started = System.nanoTime()
+        runBlocking { slow.detach() }
+        Thread.sleep(300)
+        assertTrue(slow.status.value.contains("failed"), slow.status.value)
+        assertTrue((System.nanoTime() - started) / 1_000_000 < 5_000)
     }
 }

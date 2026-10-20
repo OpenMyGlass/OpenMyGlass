@@ -28,7 +28,7 @@ class MediaChunkTest {
         file = File(dir, "v.mp4").apply { writeBytes(payload); setLastModified(1_000_000) }
         val index = MediaIndex(dir)
         id = index.scan().single().id
-        handler = MediaHandler(index, status)
+        handler = MediaHandler(index, status, java.util.concurrent.Executor { it.run() })
         handler.onSessionStarted(BridgeServer.Sender { sent += it })
         sent.clear()
     }
@@ -37,8 +37,11 @@ class MediaChunkTest {
         Bridge.MediaChunkRequest.newBuilder().setId(id).setOffset(offset).setLength(length)).build())
 
     @Test
-    fun `chunks are served from the offset, capped, with the file hash`() {
+    fun `chunks are served from the offset, capped, the hash only in the last one`() {
         setUp()
+        request(id, 0, 1_000)
+        assertEquals("", sent.single().mediaChunk.sha256)   // hashing waits for the end of the file
+        sent.clear()
         request(id, 90_000, 1_000_000)
         val c = sent.single().mediaChunk
         assertEquals(10_000, c.data.size())
@@ -67,7 +70,7 @@ class MediaChunkTest {
         setUp()
         request(id, 100_000, 1000)
         val c = sent.single().mediaChunk
-        assertTrue(c.data.isEmpty); assertEquals("", c.error); assertEquals(100_000, c.total)
+        assertTrue(c.data.isEmpty); assertEquals("", c.error); assertEquals(100_000, c.total); assertEquals(64, c.sha256.length)
     }
 
     @Test
@@ -86,5 +89,30 @@ class MediaChunkTest {
         handler.onFrame(Bridge.Frame.newBuilder().setMediaDelete(Bridge.MediaDelete.newBuilder().setId(id)).build())
         assertFalse(sent.single().mediaDeleted.ok)
         assertTrue(file.exists())
+    }
+
+    @Test
+    fun `a huge length is an error, not a crash`() {
+        // Review finding: uint32 >= 2^31 arrives as a negative int in Java
+        setUp()
+        request(id, 0, -1)
+        assertTrue(sent.single().mediaChunk.error.isNotEmpty())
+    }
+
+    @Test
+    fun `chunk requests do not block other frames`() {
+        // Review finding: hashing a big video on the session thread stalled navigation and notifications
+        val dir = tmp.newFolder("Camera2")
+        File(dir, "v.mp4").apply { writeBytes(payload); setLastModified(1_000_000) }
+        val index = MediaIndex(dir)
+        val queued = mutableListOf<Runnable>()
+        val h = MediaHandler(index, status, java.util.concurrent.Executor { queued += it })
+        h.onSessionStarted(BridgeServer.Sender { sent += it })
+        sent.clear()
+        h.onFrame(Bridge.Frame.newBuilder().setMediaChunkRequest(Bridge.MediaChunkRequest.newBuilder().setId(index.scan().single().id).setLength(1000)).build())
+        h.onFrame(Bridge.Frame.newBuilder().setMediaListRequest(Bridge.MediaListRequest.getDefaultInstance()).build())
+        assertTrue(sent.single().hasMediaList())   // answered while the chunk is still queued
+        queued.single().run()
+        assertTrue(sent.last().hasMediaChunk())
     }
 }
