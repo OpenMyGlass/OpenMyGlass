@@ -19,7 +19,8 @@ class MapsNavigationSource : NavigationSource {
     override val available: StateFlow<Boolean> = MutableStateFlow(true)
 
     fun onPosted(text: NotificationText) {
-        _current.value = MapsNotificationParser.parse(text)
+        // An update with nothing in it keeps the last state: only the notification's removal ends navigation
+        MapsNotificationParser.parse(text)?.let { _current.value = it }
     }
 
     fun onRemoved() {

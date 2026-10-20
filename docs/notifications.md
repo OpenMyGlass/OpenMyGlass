@@ -45,7 +45,9 @@ Phone notifications appear on Glass. You can read them, dismiss them in sync bot
 
 ## Privacy
 
-Notification content leaves the phone only over the bridge to the owner's Glass. The relay neither logs nor stores it. The debug capture tool is opt-in and records only notifications from Google Maps and OsmAnd (to study navigation), all of them, not only the navigation ones; delete its file after use.
+Notification content leaves the phone only over the bridge to the owner's Glass. The relay neither logs nor stores it.
+
+- **Private and secret notifications:** notifications an app marks private or secret on the lock screen (`VISIBILITY_PRIVATE`/`VISIBILITY_SECRET`) are shown in full on Glass. The display is seen only by the wearer, but anyone looking at the prism up close could read it. Mute those apps if that matters. The debug capture tool is opt-in and records only notifications from Google Maps and OsmAnd (to study navigation), all of them, not only the navigation ones. Its file contains your destinations and addresses: delete it after use (the debug screen shows its path).
 
 ## Bridge messages (`openmyglass.v1`, additive)
 

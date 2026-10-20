@@ -11,6 +11,8 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        // Vosk ships native code for six ABIs: keep phones (arm) and x86_64 emulators only (issue #57)
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

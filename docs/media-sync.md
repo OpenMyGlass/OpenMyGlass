@@ -38,7 +38,7 @@ Photos and videos taken on Glass go into the phone's gallery (`DCIM/Glass`). Spe
 
 ## Delete after sync
 
-When enabled, every saved and verified item is followed by `MediaDelete{id}`. Glass deletes only if the current file still has that id, and answers `MediaDeleted{id, ok}`.
+When enabled, every item saved and verified **from then on** is followed by `MediaDelete{id}`. Files synced while the setting was off stay on Glass (they are not deleted later). Glass deletes only if the current file still has that id, and answers `MediaDeleted{id, ok}`.
 
 ## Security
 

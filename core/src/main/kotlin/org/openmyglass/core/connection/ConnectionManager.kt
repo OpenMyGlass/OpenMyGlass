@@ -80,8 +80,10 @@ class ConnectionManager(
     /** Skips the current retry wait, e.g. on a Bluetooth bond/ACL event or a firmware ping. */
     fun reconnectNow() = manager.reconnectNow()
 
+    /** @throws IllegalStateException when not connected; @throws java.io.IOException when the link drops meanwhile */
     suspend fun requestGlassInfo() = connectedLink().requestGlassInfo()
 
+    /** @throws IllegalStateException when not connected; @throws java.io.IOException when the link drops meanwhile */
     suspend fun sendTimeZone(id: String) = connectedLink().sendTimeZone(id)
 
     private fun connectedLink(): CompanionLink {
