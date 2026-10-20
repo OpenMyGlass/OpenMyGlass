@@ -19,6 +19,9 @@ import org.openmyglass.glass.bridge.BridgeServer;
 import org.openmyglass.glass.bridge.BridgeChannels;
 import org.openmyglass.glass.bridge.FanOutHandler;
 import org.openmyglass.glass.dictation.DictationHost;
+import org.openmyglass.glass.media.AndroidMedia;
+import org.openmyglass.glass.media.MediaHandler;
+import org.openmyglass.glass.media.MediaIndex;
 import org.openmyglass.glass.notif.NotificationCards;
 import org.openmyglass.glass.notif.NotificationState;
 import org.openmyglass.glass.nav.CardBinder;
@@ -43,6 +46,17 @@ public final class BridgeService extends Service {
     private NavCardState.Card shown;
     private PowerManager.WakeLock wakeLock;
     private LiveCard notificationCard;
+    private AndroidMedia media;
+
+    /** Photo/video sync from the camera folder (XE24: DCIM/Camera, to verify on hardware). */
+    private MediaHandler mediaHandler() {
+        java.io.File camera = new java.io.File(android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DCIM), "Camera");
+        media = new AndroidMedia(this, null);
+        MediaHandler handler = new MediaHandler(new MediaIndex(camera), media);
+        media.start(handler, camera);
+        return handler;
+    }
 
     /** For NotificationsActivity: the running service's notifications, and change callbacks on the main thread. */
     private static volatile NotificationState notifications;
@@ -88,7 +102,7 @@ public final class BridgeService extends Service {
         // RFCOMM for the phone (bonding authenticates it); the unauthenticated TCP debug port only on debuggable builds
         boolean debuggable = (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
         server = new BridgeServer(BridgeChannels.forBuild(new RfcommServerChannel(), PORT, debuggable),
-                new FanOutHandler(Arrays.<BridgeServer.FrameHandler>asList(state, notifications, DictationHost.CLIENT)),
+                new FanOutHandler(Arrays.<BridgeServer.FrameHandler>asList(state, notifications, DictationHost.CLIENT, mediaHandler())),
                 BridgeServer.DEFAULT_HELLO_TIMEOUT_MS);
         server.start();
     }
@@ -164,6 +178,7 @@ public final class BridgeService extends Service {
         if (notificationCard != null && notificationCard.isPublished()) notificationCard.unpublish();
         notificationCard = null;
         notifications = null;
+        if (media != null) media.stop();
         if (server != null) server.close();
         super.onDestroy();
     }

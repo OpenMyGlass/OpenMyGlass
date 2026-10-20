@@ -22,8 +22,11 @@
         <package android:name="net.osmand.dev" />
     </queries>
 
+    <!-- usesCleartextTraffic: photos and videos come from the Glass media server over the Wi-Fi LAN (plain HTTP,
+         one-time token per pull, see docs/media-sync.md). -->
     <application
         android:allowBackup="false"
+        android:usesCleartextTraffic="true"
         android:label="OpenMyGlass">
         <activity
             android:name=".DebugActivity"

@@ -19,6 +19,11 @@ import org.openmyglass.android.speech.ModelStore
 import org.openmyglass.android.speech.SpeechSettings
 import org.openmyglass.android.speech.VoskSpeechToText
 import org.openmyglass.core.dictation.DictationService
+import org.openmyglass.core.media.MediaSync
+import org.openmyglass.android.media.AndroidMediaDownloader
+import org.openmyglass.android.media.MediaSettings
+import org.openmyglass.android.media.PhoneNetwork
+import org.openmyglass.android.media.SyncedMedia
 import org.openmyglass.android.notifications.NotificationSettings
 import org.openmyglass.core.bridge.NavigationRelay
 import org.openmyglass.core.notif.NotificationFilter
@@ -50,6 +55,8 @@ object PhoneHub {
     lateinit var notifications: NotificationRelay
         private set
     lateinit var dictation: DictationService
+        private set
+    lateinit var media: MediaSync
         private set
 
     /** One engine per process: it keeps the loaded speech model. */
@@ -88,6 +95,13 @@ object PhoneHub {
                     .also { speech = it }
             },
             replies = { key, index, text -> NotificationReplies.reply(app, key, index, text) },
+            scope = scope,
+        )
+        media = MediaSync(
+            synced = SyncedMedia(app),
+            downloader = AndroidMediaDownloader(app),
+            autoEnabled = { MediaSettings(app).autoSync },
+            phoneOnWifi = { PhoneNetwork.onWifi(app) },
             scope = scope,
         )
         initialized = true

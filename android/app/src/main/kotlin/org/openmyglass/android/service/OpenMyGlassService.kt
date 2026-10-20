@@ -63,6 +63,13 @@ class OpenMyGlassService : Service() {
         }
     }
 
+    /** The phone joining Wi-Fi can make an automatic media sync possible (architecture §5.4). */
+    private val networkChanges = object : android.net.ConnectivityManager.NetworkCallback() {
+        override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
+            scope?.launch { PhoneHub.media.conditionsChanged() }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -75,6 +82,7 @@ class OpenMyGlassService : Service() {
         }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(bluetoothEvents, filter, RECEIVER_NOT_EXPORTED)
         else registerReceiver(bluetoothEvents, filter)
+        runCatching { getSystemService(android.net.ConnectivityManager::class.java).registerDefaultNetworkCallback(networkChanges) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -118,6 +126,7 @@ class OpenMyGlassService : Service() {
             onError = { android.util.Log.w(TAG, "bridge link: $it") },
             notifications = PhoneHub.notifications,
             dictation = PhoneHub.dictation,
+            media = PhoneHub.media,
         ).also { this.bridge = it }
         val companionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
         if (settings.load().companionEnabled) {
@@ -157,6 +166,7 @@ class OpenMyGlassService : Service() {
 
     override fun onDestroy() {
         unregisterReceiver(bluetoothEvents)
+        runCatching { getSystemService(android.net.ConnectivityManager::class.java).unregisterNetworkCallback(networkChanges) }
         stopLinks()
         PhoneHub.setBridgeStatus("bridge: service stopped")
         super.onDestroy()
