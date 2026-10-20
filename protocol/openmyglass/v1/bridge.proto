@@ -31,6 +31,10 @@ message Frame {
     MediaServer media_server = 19;                // glass -> phone: where to download (token valid for this pull)
     MediaServerUnavailable media_server_unavailable = 20; // glass -> phone
     MediaPullDone media_pull_done = 21;           // phone -> glass: close the media server
+    MediaChunkRequest media_chunk_request = 22;   // phone -> glass: Bluetooth pull, one chunk at a time
+    MediaChunk media_chunk = 23;                  // glass -> phone
+    MediaDelete media_delete = 24;                // phone -> glass: saved and verified, delete (owner setting)
+    MediaDeleted media_deleted = 25;              // glass -> phone
   }
 }
 
@@ -188,3 +192,29 @@ message MediaServerUnavailable {
 }
 
 message MediaPullDone {}
+
+// Bluetooth fallback (plan 6b): on demand only, one chunk in flight, data ≤ 48 KiB so a frame stays < 64 KiB.
+message MediaChunkRequest {
+  string id = 1;
+  int64 offset = 2;
+  uint32 length = 3;
+}
+
+message MediaChunk {
+  string id = 1;
+  int64 offset = 2;
+  bytes data = 3;                  // empty at the end of the file, or with an error
+  int64 total = 4;
+  string sha256 = 5;               // of the whole file, only in the chunk that reaches the end (hashing waits until then)
+  string error = 6;
+}
+
+// The id names one version of a file (path, size, mtime): a changed file has another id and is not deleted.
+message MediaDelete {
+  string id = 1;
+}
+
+message MediaDeleted {
+  string id = 1;
+  bool ok = 2;
+}

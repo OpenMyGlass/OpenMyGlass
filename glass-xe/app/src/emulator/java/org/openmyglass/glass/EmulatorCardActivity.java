@@ -64,6 +64,18 @@ public final class EmulatorCardActivity extends Activity {
         idle.setGravity(Gravity.CENTER);
         cardArea.addView(idle);
         root.addView(cardArea, cardLayoutParams());
+        final Button wifiToggle = new Button(this);
+        wifiToggle.setText("Glass Wi-Fi: on (test)");
+        wifiToggle.setOnClickListener(new View.OnClickListener() {
+            boolean off;
+            @Override public void onClick(View v) {
+                off = !off;
+                media.setWifiForcedOff(off);
+                wifiToggle.setText(off ? "Glass Wi-Fi: off (test)" : "Glass Wi-Fi: on (test)");
+            }
+        });
+        root.addView(wifiToggle, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
         menuBar = new LinearLayout(this);
         menuBar.setOrientation(LinearLayout.HORIZONTAL);
         root.addView(menuBar, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,

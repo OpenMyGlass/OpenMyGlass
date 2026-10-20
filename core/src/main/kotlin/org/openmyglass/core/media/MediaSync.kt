@@ -24,6 +24,14 @@ fun interface MediaDownloader {
     suspend fun download(server: MediaServerInfo, item: MediaItem): DownloadResult
 }
 
+/** Resumable partial files for Bluetooth pulls; [complete] verifies the SHA-256 and saves to the gallery. */
+interface PartialStore {
+    fun length(id: String): Long
+    fun append(id: String, bytes: ByteArray)
+    fun reset(id: String)
+    fun complete(item: MediaItem, sha256: String): DownloadResult
+}
+
 /** Ids already in the phone gallery. */
 interface SyncedStore {
     fun contains(id: String): Boolean
@@ -42,7 +50,18 @@ class MediaSync(
     private val autoEnabled: () -> Boolean,
     private val phoneOnWifi: () -> Boolean,
     private val scope: CoroutineScope,
+    /** Bluetooth fallback (on demand only); null disables it. */
+    private val partials: PartialStore? = null,
+    /** Owner setting: delete on Glass after the phone saved and verified the file. */
+    private val deleteAfterSync: () -> Boolean = { false },
+    /** Glass hashes the file before its last chunk: allow for long videos (as the Wi-Fi path does). */
+    private val chunkTimeoutMs: Long = 120_000,
 ) {
+    companion object {
+        /** Chunk payload over the bridge: a frame stays below the 64 KiB cap. */
+        const val CHUNK_BYTES = 48 * 1024
+    }
+
     private enum class Phase { IDLE, LISTING, WAITING_SERVER, DOWNLOADING }
 
     private val lock = Mutex()
@@ -53,6 +72,9 @@ class MediaSync(
     private var todo: List<MediaItem> = emptyList()
     /** Bumped on every attach/detach: a download running for an older session must not touch the new one. */
     private var generation = 0
+    private var bluetooth = false
+    @Volatile private var pendingChunk: kotlinx.coroutines.CompletableDeferred<Bridge.MediaChunk>? = null
+    @Volatile private var pendingKey: Pair<String, Long>? = null
 
     private val _status = MutableStateFlow("Idle")
     /** One line for the phone UI. */
@@ -62,6 +84,7 @@ class MediaSync(
         this.send = send
         generation++
         phase = Phase.IDLE
+        abandonChunk()
     }
 
     suspend fun detach() = lock.withLock {
@@ -69,6 +92,13 @@ class MediaSync(
         glass = null
         generation++
         phase = Phase.IDLE
+        abandonChunk()
+    }
+
+    /** A chunk request in flight will never be answered on a gone session: fail it now, not at the timeout. */
+    private fun abandonChunk() {
+        pendingChunk?.complete(Bridge.MediaChunk.newBuilder().setError("link lost").build())
+        pendingChunk = null
     }
 
     /** The phone's Wi-Fi or the owner's auto-sync setting changed: start a run if everything now allows it. */
@@ -79,19 +109,26 @@ class MediaSync(
         }
     }
 
-    /** On demand, whatever the charging state: lists and pulls everything not yet synced. */
-    suspend fun syncNow() = lock.withLock {
+    /**
+     * On demand, whatever the charging state: lists and pulls everything not yet synced, over Wi-Fi, or over the
+     * Bluetooth bridge when [overBluetooth] (slow; the owner confirmed).
+     */
+    suspend fun syncNow(overBluetooth: Boolean = false) = lock.withLock {
         if (phase != Phase.IDLE) return@withLock
         manual = true
+        bluetooth = overBluetooth && partials != null
         requestList()
     }
 
     suspend fun onFrame(frame: Frame) {
         when {
+            // Only the answer to the request in flight: a late answer to an earlier (timed-out) request is dropped
+            frame.hasMediaChunk() -> if (pendingKey == frame.mediaChunk.id to frame.mediaChunk.offset) pendingChunk?.complete(frame.mediaChunk)
             frame.hasGlassStatus() -> lock.withLock {
                 glass = frame.glassStatus
                 if (phase == Phase.IDLE && autoAllowed()) {
                     manual = false
+                    bluetooth = false
                     requestList()
                 }
             }
@@ -99,11 +136,16 @@ class MediaSync(
                 val items = frame.mediaList.itemsList.map { MediaItem(it.id, it.name, it.video, it.size, it.takenAtMs) }
                 val wanted = phase == Phase.LISTING || (phase == Phase.IDLE && autoAllowed())
                 if (!wanted) return@withLock
-                if (phase == Phase.IDLE) manual = false
+                if (phase == Phase.IDLE) { manual = false; bluetooth = false }
                 todo = items.filterNot { synced.contains(it.id) }.sortedBy { it.takenAt }
                 if (todo.isEmpty()) {
                     phase = Phase.IDLE
                     _status.value = "Up to date"
+                } else if (bluetooth) {
+                    phase = Phase.DOWNLOADING
+                    val items2 = todo
+                    val gen = generation
+                    scope.launch { download(null, items2, gen) }
                 } else {
                     phase = Phase.WAITING_SERVER
                     _status.value = "${todo.size} to sync"
@@ -126,7 +168,8 @@ class MediaSync(
         }
     }
 
-    private suspend fun download(server: MediaServerInfo, items: List<MediaItem>, gen: Int) {
+    /** [server] null: Bluetooth chunks over the bridge. */
+    private suspend fun download(server: MediaServerInfo?, items: List<MediaItem>, gen: Int) {
         var done = 0
         var failed = 0
         for (item in items) {
@@ -134,23 +177,62 @@ class MediaSync(
             if (!proceed) break
             _status.value = "Syncing ${done + failed + 1} of ${items.size}"
             val result = try {
-                downloader.download(server, item)
+                if (server != null) downloader.download(server, item) else pullOverBridge(item, gen)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
                 DownloadResult.Failed(e.message ?: "download failed")
             }
             when (result) {
-                DownloadResult.Saved -> { synced.add(item.id); done++ }
+                DownloadResult.Saved -> {
+                    synced.add(item.id)
+                    done++
+                    if (deleteAfterSync()) lock.withLock {
+                        if (gen == generation) safeSend(Frame.newBuilder().setMediaDelete(Bridge.MediaDelete.newBuilder().setId(item.id)).build())
+                    }
+                }
                 is DownloadResult.Failed -> failed++
             }
         }
         lock.withLock {
-            if (gen != generation) return   // a newer session owns the state and the Glass server now
-            safeSend(Frame.newBuilder().setMediaPullDone(Bridge.MediaPullDone.getDefaultInstance()).build())
+            if (gen != generation) {   // a newer session owns the state and the Glass server now
+                if (phase == Phase.IDLE) _status.value = "Sync interrupted (link lost), $failed failed, retried next time"
+                return
+            }
+            if (server != null) safeSend(Frame.newBuilder().setMediaPullDone(Bridge.MediaPullDone.getDefaultInstance()).build())
             phase = Phase.IDLE
         }
         _status.value = if (failed == 0) "Synced $done" else "Synced $done, $failed failed (retried next time)"
+    }
+
+    /** Pulls one item in chunks, resuming from the partial file; the store verifies the hash and saves. */
+    private suspend fun pullOverBridge(item: MediaItem, gen: Int): DownloadResult {
+        val store = partials ?: return DownloadResult.Failed("Bluetooth sync unavailable")
+        var offset = store.length(item.id)
+        while (true) {
+            val answer = kotlinx.coroutines.CompletableDeferred<Bridge.MediaChunk>()
+            pendingKey = item.id to offset
+            pendingChunk = answer
+            val sentOk = lock.withLock {
+                if (gen != generation || send == null) false
+                else { safeSend(Frame.newBuilder().setMediaChunkRequest(Bridge.MediaChunkRequest.newBuilder()
+                    .setId(item.id).setOffset(offset).setLength(CHUNK_BYTES)).build()); true }
+            }
+            if (!sentOk) return DownloadResult.Failed("link lost")
+            val chunk = kotlinx.coroutines.withTimeoutOrNull(chunkTimeoutMs) { answer.await() }
+                ?: return DownloadResult.Failed("Glass did not answer")   // the partial file is kept for resuming
+            pendingChunk = null
+            // A partial longer than the file (it changed, or two writers): start over next time
+            if (chunk.total > 0 && offset > chunk.total) { store.reset(item.id); return DownloadResult.Failed("file changed on Glass") }
+            if (chunk.error.isNotEmpty()) return DownloadResult.Failed(chunk.error)
+            if (chunk.data.isEmpty) {
+                return if (offset == chunk.total) store.complete(item, chunk.sha256) else DownloadResult.Failed("short chunk")
+            }
+            store.append(item.id, chunk.data.toByteArray())
+            offset += chunk.data.size()
+            if (offset == chunk.total) return store.complete(item, chunk.sha256)
+            _status.value = "Bluetooth: ${item.name} ${offset * 100 / chunk.total}%"
+        }
     }
 
     /** Caller holds the lock. A broken link must not crash the app; the session ends through the bridge anyway. */

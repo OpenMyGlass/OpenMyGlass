@@ -18,6 +18,11 @@ class MediaSettings(context: Context) {
     var autoSync: Boolean
         get() = prefs.getBoolean("auto_sync", true)
         set(value) = prefs.edit().putBoolean("auto_sync", value).apply()
+
+    /** Delete on Glass once a file is saved and verified on the phone (default off). */
+    var deleteAfterSync: Boolean
+        get() = prefs.getBoolean("delete_after_sync", false)
+        set(value) = prefs.edit().putBoolean("delete_after_sync", value).apply()
 }
 
 /** Ids already saved to the gallery. */
@@ -55,5 +60,39 @@ object PhoneNetwork {
     fun onWifi(context: Context): Boolean {
         val cm = context.getSystemService(ConnectivityManager::class.java) ?: return false
         return cm.getNetworkCapabilities(cm.activeNetwork)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+    }
+}
+
+/** Partial files for Bluetooth pulls, shared with the HTTP path (same names): a transfer resumes on either. */
+class FilePartialStore(private val dir: File, private val save: (MediaItem, File) -> Boolean) : org.openmyglass.core.media.PartialStore {
+    private fun file(id: String) = File(dir.apply { mkdirs() }, id)
+
+    override fun length(id: String) = file(id).let { if (it.isFile) it.length() else 0L }
+
+    override fun append(id: String, bytes: ByteArray) = java.io.FileOutputStream(file(id), true).use { it.write(bytes) }
+
+    override fun reset(id: String) {
+        file(id).delete()
+    }
+
+    override fun complete(item: MediaItem, sha256: String): DownloadResult {
+        val f = file(item.id)
+        if (!f.isFile) return DownloadResult.Failed("missing partial file")
+        val actual = java.security.MessageDigest.getInstance("SHA-256").let { d ->
+            f.inputStream().use { input ->
+                val buf = ByteArray(64 * 1024)
+                while (true) { val n = input.read(buf); if (n < 0) break; d.update(buf, 0, n) }
+            }
+            d.digest().joinToString("") { "%02x".format(it) }
+        }
+        return try {
+            when {
+                actual != sha256 -> DownloadResult.Failed("checksum mismatch")
+                save(item, f) -> DownloadResult.Saved
+                else -> DownloadResult.Failed("gallery write failed")
+            }
+        } finally {
+            f.delete()
+        }
     }
 }

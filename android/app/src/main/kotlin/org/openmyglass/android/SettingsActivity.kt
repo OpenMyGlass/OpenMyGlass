@@ -182,9 +182,27 @@ class SettingsActivity : Activity() {
                 scope.launch { PhoneHub.media.conditionsChanged() }
             }
         })
+        content.addView(CheckBox(this).apply {
+            text = "Delete from Glass after saving on the phone"
+            isChecked = settings.deleteAfterSync
+            setOnCheckedChangeListener { _, on -> settings.deleteAfterSync = on }
+        })
         content.addView(Button(this).apply {
             text = "Sync now (Wi-Fi)"
             setOnClickListener { scope.launch { PhoneHub.media.syncNow() } }
+        })
+        content.addView(Button(this).apply {
+            text = "Sync now over Bluetooth (slow)"
+            setOnClickListener {
+                // Architecture §5.4: Bluetooth only on demand, with a warning about speed
+                android.app.AlertDialog.Builder(this@SettingsActivity)
+                    .setTitle("Sync over Bluetooth?")
+                    .setMessage("Bluetooth is much slower than Wi-Fi (a one-minute video can take several minutes) " +
+                        "and uses Glass's battery. Navigation and notifications keep working meanwhile.")
+                    .setPositiveButton("Sync") { _, _ -> scope.launch { PhoneHub.media.syncNow(overBluetooth = true) } }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
         })
         content.addView(status)
         scope.launch { PhoneHub.media.status.collect { status.text = "Sync: $it" } }

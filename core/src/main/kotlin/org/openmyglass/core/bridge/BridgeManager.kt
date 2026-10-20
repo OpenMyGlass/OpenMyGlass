@@ -52,7 +52,8 @@ class BridgeManager(
                         frame.hasNotificationAction() -> notifications?.onAction(frame.notificationAction)
                         frame.hasDictationStart() || frame.hasAudioChunk() || frame.hasDictationEnd() || frame.hasReplyConfirm() ->
                             dictation?.onFrame(frame, link::send)
-                        frame.hasGlassStatus() || frame.hasMediaList() || frame.hasMediaServer() || frame.hasMediaServerUnavailable() ->
+                        frame.hasGlassStatus() || frame.hasMediaList() || frame.hasMediaServer() ||
+                            frame.hasMediaServerUnavailable() || frame.hasMediaChunk() || frame.hasMediaDeleted() ->
                             media?.onFrame(frame)
                     }
                 }

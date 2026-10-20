@@ -103,6 +103,10 @@ object PhoneHub {
             autoEnabled = { MediaSettings(app).autoSync },
             phoneOnWifi = { PhoneNetwork.onWifi(app) },
             scope = scope,
+            partials = org.openmyglass.android.media.FilePartialStore(java.io.File(app.cacheDir, "media-partial")) { item, file ->
+                org.openmyglass.android.media.GallerySaver.save(app, item, file)
+            },
+            deleteAfterSync = { MediaSettings(app).deleteAfterSync },
         )
         initialized = true
     }

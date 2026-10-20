@@ -1,6 +1,8 @@
 package org.openmyglass.glass.media;
 
+import java.io.File;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.security.SecureRandom;
 import java.util.List;
 
@@ -21,16 +23,25 @@ public final class MediaHandler implements BridgeServer.FrameHandler {
     }
 
     private static final int IDLE_MS = 120_000;
+    /** Keeps a chunk frame below the bridge's 64 KiB cap. */
+    private static final int CHUNK_MAX = 48 * 1024;
 
     private final MediaIndex index;
     private final Status status;
+    /** Chunks are read (and the file hashed) here, never on the bridge read thread. */
+    private final java.util.concurrent.Executor chunkWorker;
     private final SecureRandom random = new SecureRandom();
     private BridgeServer.Sender sender;
     private MediaHttpServer server;
 
     public MediaHandler(MediaIndex index, Status status) {
+        this(index, status, java.util.concurrent.Executors.newSingleThreadExecutor());
+    }
+
+    public MediaHandler(MediaIndex index, Status status, java.util.concurrent.Executor chunkWorker) {
         this.index = index;
         this.status = status;
+        this.chunkWorker = chunkWorker;
     }
 
     @Override
@@ -66,6 +77,24 @@ public final class MediaHandler implements BridgeServer.FrameHandler {
             }
         } else if (frame.hasMediaPullDone()) {
             closeServer();
+        } else if (frame.hasMediaChunkRequest()) {
+            final Bridge.MediaChunkRequest r = frame.getMediaChunkRequest();
+            final BridgeServer.Sender to = sender;
+            chunkWorker.execute(new Runnable() { @Override public void run() {
+                Bridge.MediaChunk c = chunk(r);
+                if (to == null) return;
+                try {
+                    to.send(Bridge.Frame.newBuilder().setMediaChunk(c).build());
+                } catch (IOException e) {
+                    // the session is ending; the phone resumes from its partial file
+                }
+            } });
+        } else if (frame.hasMediaDelete()) {
+            String id = frame.getMediaDelete().getId();
+            File f = index.fileIfUnchanged(id);   // a changed file has another id: never delete what the phone did not save
+            boolean ok = f != null && f.delete();
+            if (ok) index.scan();
+            send(Bridge.Frame.newBuilder().setMediaDeleted(Bridge.MediaDeleted.newBuilder().setId(id).setOk(ok)).build());
         }
     }
 
@@ -84,6 +113,33 @@ public final class MediaHandler implements BridgeServer.FrameHandler {
     /** Charging or Wi-Fi changed. */
     public synchronized void onStatusChanged() {
         if (sender != null) sendStatus();
+    }
+
+    /** One chunk of an indexed file (Bluetooth fallback); errors come back as an empty chunk with a reason. */
+    private Bridge.MediaChunk chunk(Bridge.MediaChunkRequest r) {
+        Bridge.MediaChunk.Builder c = Bridge.MediaChunk.newBuilder().setId(r.getId()).setOffset(r.getOffset());
+        File f = index.fileIfUnchanged(r.getId());
+        if (f == null) return c.setError("unknown or changed file").build();
+        long total = f.length();
+        if (r.getOffset() < 0 || r.getOffset() > total) return c.setTotal(total).setError("bad offset").build();
+        long asked = r.getLength() & 0xFFFFFFFFL;   // uint32: values ≥ 2^31 arrive negative in Java
+        if (asked == 0 || asked > Integer.MAX_VALUE) return c.setTotal(total).setError("bad length").build();
+        int length = (int) Math.min(Math.min(asked, CHUNK_MAX), total - r.getOffset());
+        try {
+            byte[] data = new byte[length];
+            RandomAccessFile raf = new RandomAccessFile(f, "r");
+            try {
+                raf.seek(r.getOffset());
+                raf.readFully(data);
+            } finally {
+                raf.close();
+            }
+            c.setData(com.google.protobuf.ByteString.copyFrom(data)).setTotal(total);
+            if (r.getOffset() + length == total) c.setSha256(index.sha256(f));   // only the last chunk carries the hash
+            return c.build();
+        } catch (IOException e) {
+            return c.setTotal(total).setError("read failed").build();
+        }
     }
 
     private void sendStatus() {
