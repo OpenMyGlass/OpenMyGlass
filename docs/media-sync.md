@@ -1,6 +1,6 @@
 # Photo and video sync
 
-Photos and videos taken on Glass go into the phone's gallery (`DCIM/Glass`). Spec: [`architecture.md`](architecture.md) §5.4, §6. The Bluetooth fallback and delete-after-sync come in plan 6b.
+Photos and videos taken on Glass go into the phone's gallery (`DCIM/Glass`). Spec: [`architecture.md`](architecture.md) §5.4, §6.
 
 ## When
 
@@ -12,7 +12,10 @@ Photos and videos taken on Glass go into the phone's gallery (`DCIM/Glass`). Spe
 
   A run starts when these conditions become true and whenever a new photo or video is written while they hold. If charging stops, the run finishes the current file and stops.
 - **On demand** with "Sync now (Wi-Fi)" in settings, whatever the charging state.
-- Files on Glass are kept.
+- **On demand over Bluetooth** with "Sync now over Bluetooth (slow)". It asks for confirmation with a speed warning, and is meant for when Glass or the phone has no Wi-Fi. It is never automatic.
+- **Files on Glass are kept** unless "Delete from Glass after saving on the phone" is on (default off).
+  - A file is deleted only after the phone saved and verified it.
+  - It is deleted only if it has not changed since: the delete names the file's id, which covers path, size and modification time.
 
 ## How
 
@@ -25,6 +28,17 @@ Photos and videos taken on Glass go into the phone's gallery (`DCIM/Glass`). Spe
    - **Resume:** a broken transfer keeps the partial file and continues with `Range` next time.
    - **Check:** the received length is verified, then the whole file's SHA-256 against Glass's `X-Content-SHA256`. A mismatch discards the file, which is retried next time.
 5. **Save:** a verified file is written through `MediaStore` with `IS_PENDING` (never visible half-written), into `DCIM/Glass`, then marked synced.
+
+## Bluetooth fallback
+
+- **Transfer:** the phone requests one chunk at a time (`MediaChunkRequest{id, offset, length}`) and Glass answers with `MediaChunk{data ≤ 48 KiB, total, sha256}`, so frames stay under the 64 KiB cap. Navigation and notification frames interleave between chunks.
+- **Resume:** partial files are shared with the Wi-Fi path, so a transfer interrupted on one transport resumes on the other.
+- **Check:** the whole-file SHA-256 travels in every chunk and is checked before saving.
+- **Abuse:** Glass answers unknown or changed ids and out-of-range offsets with an error chunk.
+
+## Delete after sync
+
+When enabled, every saved and verified item is followed by `MediaDelete{id}`. Glass deletes only if the current file still has that id, and answers `MediaDeleted{id, ok}`.
 
 ## Security
 
@@ -48,9 +62,12 @@ Photos and videos taken on Glass go into the phone's gallery (`DCIM/Glass`). Spe
 - **No duplicates** in the gallery.
 - **Resume:** the resume path and hash-mismatch handling are covered by unit tests against a local HTTP server (`HttpDownloadTest`).
 
+- **Bluetooth path (2026-10-20):** with charging off and the emulator flavor's "Glass Wi-Fi: off (test)" toggle, "Sync now over Bluetooth" moved an 83 KB video in two chunks, SHA-256 identical. With "Delete from Glass" on, the file was then removed from the Glass folder. Files synced earlier stayed.
+
 ## Not verified yet (hardware checklist)
 
 - XE24 camera folder and file names.
 - Large video sizes and Wi-Fi throughput.
 - Battery and temperature while charging and serving.
+- Real RFCOMM throughput for Bluetooth pulls.
 - `FileObserver` on XE24 storage.
