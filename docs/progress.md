@@ -12,7 +12,8 @@ Current plan: [`superpowers/plans/2026-10-19-phase-0-2-reverse-engineering.md`](
 | 2 — Reverse engineering and mapping | ✅ done (2026-10-19): [`feature-inventory.md`](feature-inventory.md), [`protocol/`](protocol/), [`glass-internals.md`](glass-internals.md), [`cloud-dependencies.md`](cloud-dependencies.md), [`prior-art.md`](prior-art.md) — **waiting for the owner's review of the inventory** |
 | 3 — Architecture | ✅ approved by the owner (2026-10-19): option **C (hybrid)**, [`architecture.md`](architecture.md) |
 | 4 — Android implementation | 🔄 4a done (core, CompanionLink, sim-glass); 4b done: navigation sources on the phone (OsmAnd AIDL source, notification capture), measured in [`navigation-sources.md`](navigation-sources.md); 4c done: notification parsers, bridge protocol `openmyglass.v1`, `BridgeLink`, `NavigationRelay`, phone relay verified end to end against `sim-glass --bridge`; 4d done: Glass bridge app (`glass-xe/`, flavors `glass` LiveCard and `emulator`), verified end to end on the emulator ([`glass-app.md`](glass-app.md)); 4e done: Bluetooth RFCOMM bridge (Glass listener + phone transport), phone foreground service with automatic reconnection for the bridge and companion links, boot start on Glass, verified on the emulator over TCP; link reliability fixes (12 review issues) merged |
-| 5 — Notifications | 🔄 5a done: phone notifications on Glass (read, dismiss both ways, actions), filter and settings, verified on the emulator ([`notifications.md`](notifications.md)); 5b done: dictated replies, transcribed offline on the phone with Vosk (Italian/English), verified end to end on the emulator; next: media sync or minimap |
+| 5 — Notifications | 🔄 5a done: phone notifications on Glass (read, dismiss both ways, actions), filter and settings, verified on the emulator ([`notifications.md`](notifications.md)); 5b done: dictated replies, transcribed offline on the phone with Vosk (Italian/English), verified end to end on the emulator; done |
+| 6 — Media | 🔄 6a done: photo/video sync over Wi-Fi (automatic while Glass charges on Wi-Fi, or on demand; resumable, SHA-256 verified, into DCIM/Glass), verified on the emulator ([`media-sync.md`](media-sync.md)); next: 6b Bluetooth fallback and delete-after-sync |
 | 5 — iOS plan | ⏳ (only on request) |
 
 ## Phase 0 — Tool inventory (macOS arm64, 2026-10-19)
@@ -80,6 +81,7 @@ Things verified only against `sim-glass` so far; to confirm on a real Glass XE24
 - [ ] Battery cost of the idle links (bridge + companion connected, no navigation) on phone and Glass; decide whether the companion link should be on demand.
 - [ ] Notifications on XE24: the notification LiveCard, `NotificationsActivity` swipes (touchpad → D-pad/Tab keys) and the options menu; wake for a new message; battery with a chatty group chat.
 - [ ] Dictated replies on XE24: microphone quality and 16 kHz support, silence detection in real noise (street, car), latency over RFCOMM, Italian accuracy with the small Vosk model.
+- [ ] Media sync on XE24: camera folder (`DCIM/Camera`?), FileObserver on its storage, Wi-Fi address reporting, throughput with real videos, battery/temperature while charging and serving.
 - [ ] Navigation updates keep coming while the phone projects to Android Auto **in a real car** (verified on the emulator with the Desktop Head Unit, 2026-10-19: both OsmAnd AIDL and the Maps notification keep working).
 
 ## Later phases (agreed with the owner, 2026-10-19)
