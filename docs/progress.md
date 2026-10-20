@@ -14,6 +14,7 @@ Current plan: [`superpowers/plans/2026-10-19-phase-0-2-reverse-engineering.md`](
 | 4 — Android implementation | 🔄 4a done (core, CompanionLink, sim-glass); 4b done: navigation sources on the phone (OsmAnd AIDL source, notification capture), measured in [`navigation-sources.md`](navigation-sources.md); 4c done: notification parsers, bridge protocol `openmyglass.v1`, `BridgeLink`, `NavigationRelay`, phone relay verified end to end against `sim-glass --bridge`; 4d done: Glass bridge app (`glass-xe/`, flavors `glass` LiveCard and `emulator`), verified end to end on the emulator ([`glass-app.md`](glass-app.md)); 4e done: Bluetooth RFCOMM bridge (Glass listener + phone transport), phone foreground service with automatic reconnection for the bridge and companion links, boot start on Glass, verified on the emulator over TCP; link reliability fixes (12 review issues) merged |
 | 5 — Notifications | 🔄 5a done: phone notifications on Glass (read, dismiss both ways, actions), filter and settings, verified on the emulator ([`notifications.md`](notifications.md)); 5b done: dictated replies, transcribed offline on the phone with Vosk (Italian/English), verified end to end on the emulator; done |
 | 6 — Media | 🔄 6a done: photo/video sync over Wi-Fi (automatic while Glass charges on Wi-Fi, or on demand; resumable, SHA-256 verified, into DCIM/Glass), verified on the emulator ([`media-sync.md`](media-sync.md)); 6b done: on-demand Bluetooth fallback (chunks over the bridge) and delete-after-sync (hash-guarded), verified on the emulator |
+| 7 — ROM and kernel (optional track) | 🔄 hardware-free work done, see [Where we stopped](#where-we-stopped-2026-10-20) |
 | 5 — iOS plan | ⏳ (only on request) |
 
 ## Phase 0 — Tool inventory (macOS arm64, 2026-10-19)
@@ -83,6 +84,28 @@ Things verified only against `sim-glass` so far; to confirm on a real Glass XE24
 - [ ] Dictated replies on XE24: microphone quality and 16 kHz support, silence detection in real noise (street, car), latency over RFCOMM, Italian accuracy with the small Vosk model.
 - [ ] Media sync on XE24: camera folder (`DCIM/Camera`?), FileObserver on its storage, Wi-Fi address reporting, throughput with real videos, battery/temperature while charging and serving.
 - [ ] Navigation updates keep coming while the phone projects to Android Auto **in a real car** (verified on the emulator with the Desktop Head Unit, 2026-10-19: both OsmAnd AIDL and the Maps notification keep working).
+
+## Where we stopped (2026-10-20)
+
+Work is paused. Everything below is merged on `main` in each repo; nothing has run on a real Glass yet.
+
+**Organization:** [OpenMyGlass](https://github.com/OpenMyGlass). `main` is protected in all three repos (ruleset `protect-main`: pull request required, no force push or deletion, required CI checks).
+
+| Repo | License | State |
+|---|---|---|
+| [OpenMyGlass](https://github.com/OpenMyGlass/OpenMyGlass) (this one) | GPL-3.0 | Phases 4a–6b and fix round 2 merged, verified on the emulator. Hardware checklist above. |
+| [glass-rom](https://github.com/OpenMyGlass/glass-rom) | GPL-3.0 | Phase 1: factory image fetch + SHA-256 check, boot image unpack/repack (stock XE24 round-trips byte-identical), insecure boot image (`ro.secure=0`), `fastboot-guard.sh` partition allowlist. Phase 2: offline inventory of system apps and a debloat list checked against manifests: 37 keep, 3 remove, 5 to check on a device. |
+| [glass-kernel](https://github.com/OpenMyGlass/glass-kernel) | GPL-2.0-only | Phase 1: bit-identical build of `glass-omap-xrx13b` (Linux 3.4.94, `notle_defconfig`) in a pinned container on CI. Phase 2: `tuned` variant (deadline I/O scheduler, debug statistics off) and runtime profiles `stock` / `balanced` / `cool` (`tuning/omg-tune.sh`), not measured yet. |
+
+**Next steps, in order:**
+
+1. **Needs the Glass and the owner's explicit ok for each step** (unlock wipes user data; never write `bootloader`, `xloader` or `fpga`):
+   1. `fastboot boot` the insecure image (RAM only) and check whether `adb root` works.
+   2. Read `/proc/version` and `/proc/config.gz` to confirm the kernel source matches XE24.
+   3. Read the governor values on a fresh boot, then measure the tuning profiles (glass-kernel `docs/tuning.md`).
+   4. `pm disable` the removal candidates and check the 5 unknown packages (glass-rom `docs/xe24-packages.md`).
+   5. This repo's hardware checklist (above).
+2. **Hardware-free, any time:** open minor issues (this repo: 37; glass-rom: 8; glass-kernel: 4), minimap (4f, optional), CompanionLink extras (Wi-Fi setup, location, screencast), iOS on request.
 
 ## Later phases (agreed with the owner, 2026-10-19)
 
