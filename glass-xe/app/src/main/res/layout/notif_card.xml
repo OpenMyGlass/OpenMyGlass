@@ -29,7 +29,7 @@
         android:textColor="#FFFFFFFF" android:textSize="34sp" />
 
     <TextView android:id="@+id/notif_text" android:layout_width="match_parent" android:layout_height="0dp"
-        android:layout_weight="1" android:layout_marginTop="8dp" android:ellipsize="end"
+        android:layout_weight="1" android:layout_marginTop="8dp" android:maxLines="4" android:ellipsize="end"
         android:textColor="#FFDDDDDD" android:textSize="26sp" />
 
     <TextView android:id="@+id/notif_footer" android:layout_width="match_parent" android:layout_height="wrap_content"
