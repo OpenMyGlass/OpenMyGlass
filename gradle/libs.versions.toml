@@ -3,12 +3,15 @@ kotlin = "2.4.21"
 protobuf = "4.36.2"
 protobuf-plugin = "0.10.0"
 coroutines = "1.11.0"
+# Offline speech recognition (Apache 2.0); JNA comes as an aar
+vosk = "0.3.75"
 junit = "6.1.3"
 agp = "9.4.1"
 androidx-annotation = "1.11.0"
 junit4 = "4.13.2"
 
 [libraries]
+vosk-android = { module = "com.alphacephei:vosk-android", version.ref = "vosk" }
 protobuf-javalite = { module = "com.google.protobuf:protobuf-javalite", version.ref = "protobuf" }
 protoc = { module = "com.google.protobuf:protoc", version.ref = "protobuf" }
 coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }

@@ -145,4 +145,23 @@ class BridgeManagerTest {
             m.stop()
         }
     }
+
+    @Test
+    fun `dictation frames from glass reach the dictation service`() {
+        val dictation = org.openmyglass.core.dictation.DictationService(
+            engine = { throw org.openmyglass.core.dictation.SpeechUnavailable("no model") },
+            replies = { _, _, _ -> org.openmyglass.core.dictation.ReplyOutcome(true, "") }, scope = scope)
+        GlassPeer().use { glass ->
+            val m = BridgeManager({ TcpTransport("127.0.0.1", glass.port) }, relay, appVersion = "test", scope = scope,
+                backoff = Backoff(50.milliseconds, 200.milliseconds), onStateChange = { history += it }, dictation = dictation)
+            m.start()
+            m.await { it is LinkState.Connected }
+            glass.send(Frame.newBuilder().setDictationStart(Bridge.DictationStart.newBuilder().setRequestId(7).setSampleRate(16_000)).build())
+            var f = glass.next()!!
+            while (!f.hasTranscript()) f = glass.next()!!
+            assertEquals(7, f.transcript.requestId)
+            assertEquals("no model", f.transcript.error)
+            m.stop()
+        }
+    }
 }

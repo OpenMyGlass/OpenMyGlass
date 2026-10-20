@@ -13,6 +13,12 @@ import org.openmyglass.android.nav.AndroidOsmAndBinder
 import org.openmyglass.android.nav.MapsNavigationSource
 import org.openmyglass.android.nav.OsmAndNavigationSource
 import org.openmyglass.android.notifications.NotificationActions
+import org.openmyglass.android.notifications.NotificationReplies
+import org.openmyglass.android.speech.ModelCatalog
+import org.openmyglass.android.speech.ModelStore
+import org.openmyglass.android.speech.SpeechSettings
+import org.openmyglass.android.speech.VoskSpeechToText
+import org.openmyglass.core.dictation.DictationService
 import org.openmyglass.android.notifications.NotificationSettings
 import org.openmyglass.core.bridge.NavigationRelay
 import org.openmyglass.core.notif.NotificationFilter
@@ -43,6 +49,11 @@ object PhoneHub {
         private set
     lateinit var notifications: NotificationRelay
         private set
+    lateinit var dictation: DictationService
+        private set
+
+    /** One engine per process: it keeps the loaded speech model. */
+    @Volatile private var speech: VoskSpeechToText? = null
 
     /** App icons for notifications by SHA-256 (hex) → 48 px PNG. */
     private val appIcons = ConcurrentHashMap<String, ByteArray>()
@@ -70,6 +81,14 @@ object PhoneHub {
             },
             icons = { appIcons[it] },
             onAction = { key, request -> NotificationActions.perform(app, key, request) },
+        )
+        dictation = DictationService(
+            engine = {
+                speech ?: VoskSpeechToText(ModelStore(app), model = { ModelCatalog.forLanguage(SpeechSettings(app).language) })
+                    .also { speech = it }
+            },
+            replies = { key, index, text -> NotificationReplies.reply(app, key, index, text) },
+            scope = scope,
         )
         initialized = true
     }

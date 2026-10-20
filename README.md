@@ -27,3 +27,5 @@ and implementation, which is original code. `tools/check-clean-room.sh` guards a
 ## License
 
 [GPL-3.0](LICENSE)
+
+Third-party components and their licenses: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

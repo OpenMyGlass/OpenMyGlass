@@ -7,3 +7,5 @@
 
 Build: `./gradlew :android:app:assembleDebug` (needs `local.properties` with `sdk.dir=…`, not committed).
 Unit tests: `./gradlew :android:app:testDebugUnitTest`.
+
+Third-party components bundled in the app, and the speech models it downloads, are listed in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).

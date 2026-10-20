@@ -4,6 +4,7 @@
         <activity
             android:name=".EmulatorCardActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:launchMode="singleTask"
             android:exported="true"
             android:label="OpenMyGlass (emulator)">
             <intent-filter>

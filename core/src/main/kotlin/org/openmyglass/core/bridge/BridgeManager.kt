@@ -1,8 +1,11 @@
 package org.openmyglass.core.bridge
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.StateFlow
 import org.openmyglass.core.connection.Backoff
+import org.openmyglass.core.dictation.DictationService
 import org.openmyglass.core.notif.NotificationRelay
 import org.openmyglass.core.connection.LinkManager
 import org.openmyglass.core.connection.LinkSession
@@ -26,6 +29,7 @@ class BridgeManager(
     onError: (Throwable) -> Unit = {},
     stableAfter: kotlin.time.Duration = kotlin.time.Duration.parse("30s"),
     private val notifications: NotificationRelay? = null,
+    private val dictation: DictationService? = null,
 ) {
     private inner class Session(private val link: BridgeLink) : LinkSession<Bridge.Hello> {
         override suspend fun handshake(): Bridge.Hello = link.handshake()
@@ -43,11 +47,17 @@ class BridgeManager(
                             notifications?.onIconRequest(sha)
                         }
                         frame.hasNotificationAction() -> notifications?.onAction(frame.notificationAction)
+                        frame.hasDictationStart() || frame.hasAudioChunk() || frame.hasDictationEnd() || frame.hasReplyConfirm() ->
+                            dictation?.onFrame(frame, link::send)
                     }
                 }
             } finally {
-                relay.detach(attached)
-                attachedNotifications?.let { notifications?.detach(it) }
+                // Also when stop() cancelled us: the relays and an open dictation must let go of this session
+                withContext(NonCancellable) {
+                    relay.detach(attached)
+                    attachedNotifications?.let { notifications?.detach(it) }
+                    dictation?.sessionEnded()
+                }
             }
         }
         override fun close() = link.close()

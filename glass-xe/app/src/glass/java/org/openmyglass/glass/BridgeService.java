@@ -18,6 +18,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import org.openmyglass.glass.bridge.BridgeServer;
 import org.openmyglass.glass.bridge.BridgeChannels;
 import org.openmyglass.glass.bridge.FanOutHandler;
+import org.openmyglass.glass.dictation.DictationHost;
 import org.openmyglass.glass.notif.NotificationCards;
 import org.openmyglass.glass.notif.NotificationState;
 import org.openmyglass.glass.nav.CardBinder;
@@ -87,7 +88,7 @@ public final class BridgeService extends Service {
         // RFCOMM for the phone (bonding authenticates it); the unauthenticated TCP debug port only on debuggable builds
         boolean debuggable = (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
         server = new BridgeServer(BridgeChannels.forBuild(new RfcommServerChannel(), PORT, debuggable),
-                new FanOutHandler(Arrays.<BridgeServer.FrameHandler>asList(state, notifications)),
+                new FanOutHandler(Arrays.<BridgeServer.FrameHandler>asList(state, notifications, DictationHost.CLIENT)),
                 BridgeServer.DEFAULT_HELLO_TIMEOUT_MS);
         server.start();
     }

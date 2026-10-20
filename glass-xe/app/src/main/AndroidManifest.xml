@@ -1,11 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Bridge server (TCP; RFCOMM comes in plan 4e). -->
+    <!-- Bridge server: TCP debug port (RFCOMM permissions are in the glass flavor). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Dictated replies: the microphone is open only while the owner dictates. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:allowBackup="false"
-        android:label="OpenMyGlass" />
+        android:label="OpenMyGlass">
+        <activity
+            android:name=".dictation.DictationActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
+    </application>
 </manifest>
