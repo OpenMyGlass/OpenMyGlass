@@ -23,8 +23,10 @@ class LocationRelayTest {
         @Volatile var running = 0
         @Volatile var refuse: String? = null
         @Volatile var initialFix: LocationFix? = null
+        @Volatile var securityException = false
         override fun start(request: LocationRequest, callback: LocationCallback): AutoCloseable {
             refuse?.let { throw LocationUnavailableException(it) }
+            if (securityException) throw SecurityException("revoked")
             requests += request
             this.callback = callback
             running++
@@ -38,12 +40,13 @@ class LocationRelayTest {
     private val relay = LocationRelay(source, scope, noFixTimeout = 300.milliseconds, retryEvery = 200.milliseconds)
     private val sent = Collections.synchronizedList(mutableListOf<Frame>())
     private val send: suspend (Frame) -> Unit = { sent += it }
+    private val session = Any()
 
     @AfterEach
     fun tearDown() = scope.cancel()
 
     private fun subscribe(intervalMs: Int, high: Boolean = false) = relay.onSubscribe(
-        Bridge.LocationSubscribe.newBuilder().setIntervalMs(intervalMs).setHighAccuracy(high).build(), send)
+        Bridge.LocationSubscribe.newBuilder().setIntervalMs(intervalMs).setHighAccuracy(high).build(), session, send)
 
     private val fix = LocationFix(45.4642, 9.19, accuracyM = 8f, altitudeM = 120.5, bearingDeg = 90f, speedMps = null,
         fixTimeMs = 1_790_000_000_000, provider = "gps")
@@ -116,7 +119,7 @@ class LocationRelayTest {
     @Test
     fun `the session ending stops the source`() {
         subscribe(2_000)
-        relay.sessionEnded()
+        relay.sessionEnded(session)
         assertEquals(0, source.running)
     }
 
@@ -153,7 +156,7 @@ class LocationRelayTest {
     fun `no retry after the subscription ended`() {
         source.refuse = LocationUnavailable.DISABLED
         subscribe(5_000)
-        relay.sessionEnded()
+        relay.sessionEnded(session)
         source.refuse = null
         Thread.sleep(400)
         assertEquals(0, source.running)
@@ -180,7 +183,7 @@ class LocationRelayTest {
     @Test
     fun `a failing send does not stop the feed`() {
         var failures = 1
-        relay.onSubscribe(Bridge.LocationSubscribe.newBuilder().setIntervalMs(1_000).build()) {
+        relay.onSubscribe(Bridge.LocationSubscribe.newBuilder().setIntervalMs(1_000).build(), session) {
             if (failures-- > 0) throw java.io.IOException("link down")
             sent += it
         }
@@ -188,5 +191,43 @@ class LocationRelayTest {
         source.callback!!.onFix(fix.copy(fixTimeMs = 2))
         await("second update") { sent.size == 1 }
         assertEquals(2L, sent.single().locationUpdate.fixTimeMs)
+    }
+
+    @Test
+    fun `an old session ending after a new one subscribed keeps the new subscription`() {
+        val old = Any()
+        val new = Any()
+        relay.onSubscribe(Bridge.LocationSubscribe.newBuilder().setIntervalMs(2_000).build(), old) {}
+        relay.onSubscribe(Bridge.LocationSubscribe.newBuilder().setIntervalMs(3_000).build(), new, send)
+        relay.sessionEnded(old)   // the old session's cleanup runs late
+        assertEquals(1, source.running)
+        source.callback!!.onFix(fix)
+        await("update on the new session") { sent.any { it.hasLocationUpdate() } }
+        relay.sessionEnded(new)
+        assertEquals(0, source.running)
+    }
+
+    @Test
+    fun `no no-fix while location is reported off`() {
+        subscribe(5_000)
+        source.callback!!.onUnavailable(LocationUnavailable.DISABLED)
+        Thread.sleep(500)   // past the no-fix timeout
+        assertEquals(listOf("disabled"), sent.map { it.locationUnavailable.reason })
+    }
+
+    @Test
+    fun `no no-fix while the start is refused`() {
+        source.refuse = LocationUnavailable.DISABLED
+        subscribe(5_000)
+        Thread.sleep(500)
+        assertEquals(listOf("disabled"), sent.map { it.locationUnavailable.reason })
+    }
+
+    @Test
+    fun `a SecurityException from the source is reported as permission`() {
+        source.securityException = true
+        subscribe(5_000)
+        await("unavailable") { sent.any { it.hasLocationUnavailable() } }
+        assertEquals("permission", sent.single().locationUnavailable.reason)
     }
 }

@@ -59,7 +59,7 @@ class BridgeManager(
                         frame.hasGlassStatus() || frame.hasMediaList() || frame.hasMediaServer() ||
                             frame.hasMediaServerUnavailable() || frame.hasMediaChunk() || frame.hasMediaDeleted() ->
                             media?.onFrame(frame)
-                        frame.hasLocationSubscribe() -> location?.onSubscribe(frame.locationSubscribe, link::send)
+                        frame.hasLocationSubscribe() -> location?.onSubscribe(frame.locationSubscribe, link, link::send)
                     }
                 }
             } finally {
@@ -69,7 +69,7 @@ class BridgeManager(
                     attachedNotifications?.let { notifications?.detach(it) }
                     dictation?.sessionEnded()
                     media?.detach()
-                    location?.sessionEnded()
+                    location?.sessionEnded(link)
                 }
             }
         }

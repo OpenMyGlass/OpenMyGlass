@@ -27,7 +27,7 @@ This is the bridge path (our Glass app). The XE24 firmware's own path over the c
 4. **Unavailable (phone → Glass):** `LocationUnavailable{reason}`:
    - `permission`: the owner has not granted location to OpenMyGlass on the phone;
    - `disabled`: location is turned off on the phone;
-   - `no-fix`: no fix within 60 s of starting.
+   - `no-fix`: no fix within 60 s of starting. It is not sent while `permission` or `disabled` is the current report.
 
    The subscription stays active. The phone retries a refused start every 60 s, and fixes resume when the cause goes away. The same reason is not sent twice in a row.
 5. **End:** the subscription ends with the bridge session. After a reconnect Glass subscribes again if it still wants location.
@@ -41,13 +41,13 @@ This is the bridge path (our Glass app). The XE24 firmware's own path over the c
   - With only approximate location granted, GPS is not used.
 - **Permission:** `ACCESS_FINE_LOCATION` (with `ACCESS_COARSE_LOCATION`, as Android 12+ requires), from the "Share the phone's location with Glass" button in settings.
 - **Background:** the connection service also takes the `location` foreground-service type when location is granted. Then fixes keep flowing with the app in the background.
-  - On Android 14+ that type is refused when the service starts from the background (at boot, sticky restart). The service then runs without it until the app is next opened, and the phone may send `permission` or no fixes in the meantime.
+  - On Android 14+ that type is refused when the service starts from the background (at boot, sticky restart). The service then runs without it, and the phone may send `permission` or no fixes with the app in the background. Merely opening the app does not restore the type. "Save and connect" or "Share the phone's location with Glass" in settings restarts the service with it.
   - The phone does not ask for background location (`ACCESS_BACKGROUND_LOCATION`).
 - **Battery:** the phone's location runs only between a subscribe and its stop or the session's end. Nothing polls.
 
 ## Privacy
 
-- Fixes travel only over the paired bridge (bonded RFCOMM, or the debug TCP link). They never reach a server.
+- Fixes travel only over the paired bridge (bonded RFCOMM, or the debug TCP link, which is plaintext on the local network). They never reach a server.
 - The phone sends fixes only while Glass holds a subscription. It neither stores nor logs them.
 - Glass keeps nothing beyond the last fix, in memory. It writes no location history and drops the fix when the bridge app stops.
 

@@ -10,6 +10,7 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.os.SystemClock
 import org.openmyglass.core.location.LocationCallback
 import org.openmyglass.core.location.LocationFix
 import org.openmyglass.core.location.LocationRequest
@@ -51,9 +52,10 @@ class AndroidLocationSource(context: Context) : LocationSource {
         } else {
             manager.requestLocationUpdates(provider, request.intervalMs, 0f, listener, Looper.getMainLooper())
         }
-        // A recent last fix gives Glass a position right away instead of after the first new fix
-        manager.getLastKnownLocation(provider)
-            ?.takeIf { System.currentTimeMillis() - it.time in 0..LAST_FIX_MAX_AGE_MS }
+        // A recent last fix gives Glass a position right away instead of after the first new fix. Its age comes from
+        // the monotonic clock (the fix's wall time may be off). Best effort: a failure here must not leak the listener.
+        runCatching { manager.getLastKnownLocation(provider) }.getOrNull()
+            ?.takeIf { (SystemClock.elapsedRealtimeNanos() - it.elapsedRealtimeNanos) / 1_000_000 in 0..LAST_FIX_MAX_AGE_MS }
             ?.let { callback.onFix(it.toFix(provider)) }
         return AutoCloseable { manager.removeUpdates(listener) }
     }

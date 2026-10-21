@@ -26,7 +26,7 @@ class LocationRelay(
     private val retryEvery: Duration = 60.seconds,
     private val minIntervalMs: Long = MIN_INTERVAL_MS,
 ) {
-    private inner class Subscription(val request: LocationRequest, val send: suspend (Frame) -> Unit) : LocationCallback {
+    private inner class Subscription(val session: Any, val request: LocationRequest, val send: suspend (Frame) -> Unit) : LocationCallback {
         // Frames go out in order from one coroutine; a stalled link drops the oldest rather than piling up
         val outbox = Channel<Frame>(16, BufferOverflow.DROP_OLDEST)
         val pump: Job = scope.launch {
@@ -70,19 +70,22 @@ class LocationRelay(
     private val lock = Any()
     private var current: Subscription? = null
 
-    /** Glass sent a LocationSubscribe on the session that [send] writes to. */
-    fun onSubscribe(s: Bridge.LocationSubscribe, send: suspend (Frame) -> Unit) {
+    /** Glass sent a LocationSubscribe on [session] (any identity token, e.g. its link), which [send] writes to. */
+    fun onSubscribe(s: Bridge.LocationSubscribe, session: Any, send: suspend (Frame) -> Unit) {
         synchronized(lock) {
             stop()
             if (s.intervalMs == 0) return
             val interval = s.intervalMs.toUInt().toLong().coerceAtLeast(minIntervalMs)
-            tryStart(Subscription(LocationRequest(interval, s.highAccuracy), send).also { current = it })
+            tryStart(Subscription(session, LocationRequest(interval, s.highAccuracy), send).also { current = it })
         }
     }
 
-    /** The bridge session ended: the subscription ends with it. */
-    fun sessionEnded() {
-        synchronized(lock) { stop() }
+    /**
+     * [session] ended: its subscription ends with it. A newer session's subscription is kept (it may have subscribed
+     * before the old session finished cleaning up).
+     */
+    fun sessionEnded(session: Any) {
+        synchronized(lock) { if (current?.session === session) stop() }
     }
 
     /** Caller holds the lock. */
@@ -102,7 +105,10 @@ class LocationRelay(
         }
         if (!sub.gotFix) sub.timer = scope.launch {
             delay(noFixTimeout)
-            synchronized(lock) { if (current === sub && !sub.gotFix) sub.unavailable(LocationUnavailable.NO_FIX) }
+            // Not while a cause is already reported (location off, no permission): no-fix would hide it
+            synchronized(lock) {
+                if (current === sub && !sub.gotFix && sub.lastReason == null) sub.unavailable(LocationUnavailable.NO_FIX)
+            }
         }
     }
 
