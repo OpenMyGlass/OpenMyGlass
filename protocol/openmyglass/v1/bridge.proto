@@ -121,11 +121,17 @@ message NotificationAction {
 
 // Dictated replies (plan 5b). Audio is PCM 16-bit little-endian mono at sample_rate, in chunks of about 100 ms.
 // A newer request_id replaces an older one; the phone forgets a request after 60 s.
+// Free dictation (free = true): speech that is not a notification reply (a note, a voice command argument). key and
+// action_index are ignored. DictationEnd must come within the 60 s (audio does not extend it); after that the phone
+// sends nothing. The flow ends with the final Transcript: the phone forgets the request then, Glass sends no
+// ReplyConfirm and no reply is sent. The phone lists "dictation-free" in its Hello when it supports this; an older
+// phone ignores the field, transcribes anyway and waits for a ReplyConfirm until the request expires.
 message DictationStart {
   uint32 request_id = 1;
-  string key = 2;                  // notification key
-  uint32 action_index = 3;         // the reply action's index on the phone
+  string key = 2;                  // notification key (unused when free)
+  uint32 action_index = 3;         // the reply action's index on the phone (unused when free)
   uint32 sample_rate = 4;          // 16000
+  bool free = 5;                   // free dictation, not a notification reply
 }
 
 message AudioChunk {

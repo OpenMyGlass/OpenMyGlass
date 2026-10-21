@@ -8,6 +8,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.openmyglass.core.companion.FakeGlass
@@ -41,6 +42,7 @@ class BridgeLinkTest {
         val ours = peerReceive()
         assertEquals(1, ours.hello.protocolVersion)
         assertEquals("0.1.0", ours.hello.appVersion)
+        assertTrue(ours.hello.capabilitiesList.contains("dictation-free"))
         peerSend(Frame.newBuilder().setHello(glassHello).build())
         assertEquals(glassHello, pending.await())
     }

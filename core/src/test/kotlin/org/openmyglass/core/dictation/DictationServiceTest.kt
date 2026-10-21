@@ -49,8 +49,8 @@ class DictationServiceTest {
     @AfterEach
     fun tearDown() = scope.cancel()
 
-    private fun start(id: Int, key: String = "k1", index: Int = 0) = Frame.newBuilder().setDictationStart(
-        Bridge.DictationStart.newBuilder().setRequestId(id).setKey(key).setActionIndex(index).setSampleRate(16_000)).build()
+    private fun start(id: Int, key: String = "k1", index: Int = 0, free: Boolean = false) = Frame.newBuilder().setDictationStart(
+        Bridge.DictationStart.newBuilder().setRequestId(id).setKey(key).setActionIndex(index).setSampleRate(16_000).setFree(free)).build()
     private fun chunk(id: Int, seq: Int, text: String) = Frame.newBuilder().setAudioChunk(
         Bridge.AudioChunk.newBuilder().setRequestId(id).setSeq(seq).setPcm(ByteString.copyFromUtf8(text))).build()
     private fun end(id: Int, cancelled: Boolean = false) = Frame.newBuilder().setDictationEnd(
@@ -171,5 +171,17 @@ class DictationServiceTest {
         Thread.sleep(200)                       // reviewing: 400 ms since start, 200 ms since the transcript
         feed(confirm(1, true))
         assertEquals(listOf(Triple("k1", 0, "ciao")), replies.toList())
+    }
+
+    @Test
+    fun `free dictation ends with the transcript and never replies`() {
+        feed(start(1, key = "", free = true), chunk(1, 0, "comprare il latte"), end(1))
+        val t = transcripts().single()
+        assertEquals("comprare il latte", t.text); assertTrue(t.final); assertEquals("", t.error)
+        // The request is already forgotten: a stray confirm cannot turn the note into a reply
+        feed(confirm(1, true))
+        assertTrue(replies.isEmpty())
+        assertFalse(results().single().ok)
+        assertTrue(engine.cancelled.isEmpty())
     }
 }

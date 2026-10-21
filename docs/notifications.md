@@ -94,12 +94,19 @@ Bridge messages (Frame fields 9–14):
 
 | Message | Direction |
 |---|---|
-| `DictationStart{request_id, key, action_index, sample_rate}` | Glass → phone |
+| `DictationStart{request_id, key, action_index, sample_rate, free}` | Glass → phone |
 | `AudioChunk{request_id, seq, pcm}` | Glass → phone |
 | `DictationEnd{request_id, cancelled}` | Glass → phone |
 | `Transcript{request_id, text, final, error}` | phone → Glass |
 | `ReplyConfirm{request_id, send}` | Glass → phone |
 | `ReplyResult{request_id, ok, message}` | phone → Glass |
+
+**Free dictation** (`DictationStart.free = true`): speech that is not a notification reply, such as a note or a voice command argument for the Glass apps (glass-services `docs/api.md`, purpose `"free"`).
+- `key` and `action_index` are ignored.
+- The flow ends with the final `Transcript`: the phone forgets the request at once, Glass sends no `ReplyConfirm`, and no reply is sent. A stray `ReplyConfirm` with `send` gets `ReplyResult{ok: false}`; one without `send` gets no answer.
+- Limit: the phone forgets any request 60 s after `DictationStart`, and the expiry is not extended while audio arrives. A free dictation must therefore end (`DictationEnd`) within 60 s; after that the phone sends nothing, so Glass needs its own timeout. Today's Glass recorder stops at 30 s.
+- The phone lists the capability `dictation-free` in its bridge Hello. Glass should check it before offering free dictation. An older phone ignores `free`: it still transcribes, but keeps the request waiting for a `ReplyConfirm` until it expires (60 s), and a confirm with `send` would try to reply to an empty notification key and fail.
+- The Glass side (setting `free`, skipping the confirm step) is not implemented yet.
 
 **Verified on the emulator (2026-10-20):**
 - Model download: Italian model from settings in 12 s, checksum ok.

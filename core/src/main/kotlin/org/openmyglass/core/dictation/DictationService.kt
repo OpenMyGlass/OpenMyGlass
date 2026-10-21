@@ -15,6 +15,7 @@ import kotlin.time.Duration.Companion.seconds
  * Phone side of a dictated reply: Glass streams audio, the phone transcribes it offline with [engine], Glass
  * confirms, and [replies] fires the notification's RemoteInput. One request at a time (a newer one cancels the
  * older); a request is forgotten after [timeout]. Audio and text are never logged or stored.
+ * A free dictation ([Bridge.DictationStart.getFree]) ends with its transcript: nothing is kept for a confirm.
  */
 class DictationService(
     private val engine: () -> SpeechToText,
@@ -22,7 +23,7 @@ class DictationService(
     private val scope: CoroutineScope,
     private val timeout: Duration = 60.seconds,
 ) {
-    private class Request(val id: Int, val key: String, val actionIndex: Int, val recognition: Recognition?) {
+    private class Request(val id: Int, val key: String, val actionIndex: Int, val free: Boolean, val recognition: Recognition?) {
         var text: String? = null      // set when transcribed; "" means nothing usable
         var ended = false
         var expiry: Job? = null
@@ -66,7 +67,7 @@ class DictationService(
             } catch (e: SpeechUnavailable) {
                 return@withLock e.message ?: "Speech recognition unavailable"
             }
-            current = Request(s.requestId, s.key, s.actionIndex, recognition).also { r ->
+            current = Request(s.requestId, s.key, s.actionIndex, s.free, recognition).also { r ->
                 r.expiry = scope.launch {
                     delay(timeout)
                     lock.withLock { if (current === r) drop() }
@@ -83,6 +84,13 @@ class DictationService(
             if (e.cancelled) {
                 drop()
                 return
+            }
+            if (r.free) {
+                // No confirm follows a free dictation: forget it as soon as the transcript is out
+                val text = r.recognition?.finish()?.trim().orEmpty()
+                r.ended = true
+                drop()
+                return@withLock text
             }
             r.ended = true
             // The owner now reviews the transcript: give the full timeout again (a long dictation used most of it)
