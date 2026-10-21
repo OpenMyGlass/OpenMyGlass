@@ -62,6 +62,7 @@ class BridgeLink(private val channel: Channel, private val appVersion: String) {
         const val RFCOMM_NAME = "OpenMyGlass Bridge"
         /** Kept small for BLE (iOS path, architecture §10). */
         const val MAX_FRAME_BYTES = 64 * 1024
-        val CAPABILITIES = listOf("nav", "icons")
+        /** "dictation-free": DictationStart.free is understood (transcript only, no reply). */
+        val CAPABILITIES = listOf("nav", "icons", "dictation-free")
     }
 }
