@@ -93,7 +93,7 @@ class OpenMyGlassService : Service() {
         // stops without startForeground crashes the app. Without BLUETOOTH_CONNECT this throws on API 34+
         // (connectedDevice prerequisite), and a sticky restart may be refused the foreground: stop cleanly.
         val foreground = try {
-            startForeground(NOTIFICATION_ID, notification("Starting…", ongoing = true), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            startForegroundWithLocationIfAllowed()
             true
         } catch (e: Exception) {
             android.util.Log.w(TAG, "cannot start in the foreground: $e")
@@ -115,6 +115,25 @@ class OpenMyGlassService : Service() {
         return START_STICKY
     }
 
+    /**
+     * The location type lets the phone's location reach Glass while the app is in the background (docs/location.md).
+     * It needs a location permission, and on API 34+ it is refused when the service starts from the background (boot,
+     * sticky restart): then the service runs without it and Glass gets fixes only while the app is in use.
+     */
+    private fun startForegroundWithLocationIfAllowed() {
+        val notification = notification("Starting…", ongoing = true)
+        if (org.openmyglass.android.location.AndroidLocationSource.hasPermission(this)) {
+            try {
+                startForeground(NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+                return
+            } catch (e: SecurityException) {
+                android.util.Log.i(TAG, "foreground without the location type: $e")
+            }
+        }
+        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+    }
+
     /** (Re)creates both links from the current settings; called on every start, so saving settings applies them. */
     private fun restartLinks() {
         stopLinks()
@@ -130,6 +149,7 @@ class OpenMyGlassService : Service() {
             notifications = PhoneHub.notifications,
             dictation = PhoneHub.dictation,
             media = PhoneHub.media,
+            location = PhoneHub.location,
         ).also { this.bridge = it }
         val companionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
         if (settings.load().companionEnabled) {

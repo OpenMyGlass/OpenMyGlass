@@ -145,6 +145,7 @@ interface Transport {            // one bidirectional byte stream to the glasses
 - The original `photoG2C` (field 28) thumbnails are not needed.
 
 ### 5.5 Location — A
+- **Bridge path (B, decided 2026-10-22):** Glass uses the phone's location over the bridge (`LocationSubscribe` / `LocationUpdate`), not its own GPS chip; glass-services exposes it as a location feed and registers it as an Android location provider on Glass. See [`location.md`](location.md). The companion path below stays for the stock firmware.
 - Glass requests location with `locationRequestG2C` and the phone streams `locationMessageC2G` while requested; the phone stops its own GPS when Glass stops asking (battery).
 - **[unverified]** whether third-party GDK apps on Glass see these locations through Android's `LocationManager`. The bridge app does not need them for navigation (Maps on the phone does the routing). Exposing a mock location provider for other Glass apps is out of scope unless needed later.
 

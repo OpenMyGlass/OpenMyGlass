@@ -19,13 +19,17 @@ import kotlin.time.Duration.Companion.seconds
  * One session of the OpenMyGlass bridge protocol (`openmyglass.v1`) over a [Channel].
  * The bridge app on Glass is ours, so the phone speaks first.
  */
-class BridgeLink(private val channel: Channel, private val appVersion: String) {
+class BridgeLink(
+    private val channel: Channel,
+    private val appVersion: String,
+    private val capabilities: List<String> = CAPABILITIES,
+) {
     private val writeLock = Mutex()
 
     suspend fun handshake(timeout: Duration = 10.seconds): Hello {
         try {
             send(Frame.newBuilder().setHello(
-                Hello.newBuilder().setProtocolVersion(PROTOCOL_VERSION).setAppVersion(appVersion).addAllCapabilities(CAPABILITIES)
+                Hello.newBuilder().setProtocolVersion(PROTOCOL_VERSION).setAppVersion(appVersion).addAllCapabilities(capabilities)
             ).build())
             val frame = channel.readFrameWithTimeout(timeout, "bridge handshake")?.let(Frame::parseFrom)
                 ?: throw IOException("Glass closed the bridge link during the handshake")
@@ -64,5 +68,7 @@ class BridgeLink(private val channel: Channel, private val appVersion: String) {
         const val MAX_FRAME_BYTES = 64 * 1024
         /** "dictation-free": DictationStart.free is understood (transcript only, no reply). */
         val CAPABILITIES = listOf("nav", "icons", "dictation-free")
+        /** Added to [CAPABILITIES] when the phone serves LocationSubscribe (docs/location.md). */
+        const val CAPABILITY_LOCATION = "location"
     }
 }

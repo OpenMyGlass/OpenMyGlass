@@ -62,6 +62,13 @@ class SettingsActivity : Activity() {
                 text = "Grant Bluetooth and notification permissions"
                 setOnClickListener { requestPermissions() }
             })
+            addView(Button(this@SettingsActivity).apply {
+                text = "Share the phone's location with Glass"
+                setOnClickListener {
+                    requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                        REQUEST_LOCATION)
+                }
+            })
             addView(TextView(this@SettingsActivity).apply { text = "Glass (paired devices):" })
             addView(devices)
             addView(modes)
@@ -216,6 +223,9 @@ class SettingsActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         listBondedDevices()
+        // A running service entered the foreground without the location type: restart it so it gets it
+        if (requestCode == REQUEST_LOCATION && org.openmyglass.android.location.AndroidLocationSource.hasPermission(this) &&
+            settings.load().autoStart) OpenMyGlassService.start(this)
     }
 
     private fun requestPermissions() {
@@ -247,5 +257,9 @@ class SettingsActivity : Activity() {
     override fun onDestroy() {
         scope.cancel()
         super.onDestroy()
+    }
+
+    private companion object {
+        const val REQUEST_LOCATION = 2
     }
 }
