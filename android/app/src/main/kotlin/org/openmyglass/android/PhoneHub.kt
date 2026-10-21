@@ -19,6 +19,8 @@ import org.openmyglass.android.speech.ModelStore
 import org.openmyglass.android.speech.SpeechSettings
 import org.openmyglass.android.speech.VoskSpeechToText
 import org.openmyglass.core.dictation.DictationService
+import org.openmyglass.core.location.LocationRelay
+import org.openmyglass.android.location.AndroidLocationSource
 import org.openmyglass.core.media.MediaSync
 import org.openmyglass.android.media.AndroidMediaDownloader
 import org.openmyglass.android.media.MediaSettings
@@ -57,6 +59,9 @@ object PhoneHub {
     lateinit var dictation: DictationService
         private set
     lateinit var media: MediaSync
+        private set
+    /** The phone's location for Glass, only while Glass subscribes (docs/location.md). */
+    lateinit var location: LocationRelay
         private set
 
     /** One engine per process: it keeps the loaded speech model. */
@@ -108,6 +113,7 @@ object PhoneHub {
             },
             deleteAfterSync = { MediaSettings(app).deleteAfterSync },
         )
+        location = LocationRelay(AndroidLocationSource(app), scope)
         initialized = true
     }
 

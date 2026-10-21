@@ -35,6 +35,9 @@ message Frame {
     MediaChunk media_chunk = 23;                  // glass -> phone
     MediaDelete media_delete = 24;                // phone -> glass: saved and verified, delete (owner setting)
     MediaDeleted media_deleted = 25;              // glass -> phone
+    LocationSubscribe location_subscribe = 26;    // glass -> phone: start, change or stop location updates
+    LocationUpdate location_update = 27;          // phone -> glass: a fix, while subscribed
+    LocationUnavailable location_unavailable = 28; // phone -> glass: no fixes for now, and why
   }
 }
 
@@ -223,4 +226,30 @@ message MediaDelete {
 message MediaDeleted {
   string id = 1;
   bool ok = 2;
+}
+
+// Location (docs/location.md): Glass uses the phone's location, not its own GPS chip. The phone lists "location" in
+// its Hello when it supports this. The phone sends updates only while Glass has a subscription: a new
+// LocationSubscribe replaces the previous one, interval_ms = 0 stops it, and it also ends with the session (Glass
+// subscribes again after a reconnect). Fixes are never stored on the phone or logged.
+message LocationSubscribe {
+  uint32 interval_ms = 1;          // wanted time between updates; 0 = stop. The phone may raise it (minimum 1000)
+  bool high_accuracy = 2;          // true: GPS-grade (more phone battery); false: balanced (network or fused)
+}
+
+message LocationUpdate {
+  double latitude_deg = 1;         // WGS 84
+  double longitude_deg = 2;
+  float accuracy_m = 3;            // horizontal, 68 % radius; 0 = unknown
+  optional double altitude_m = 4;  // above the WGS 84 ellipsoid
+  optional float bearing_deg = 5;  // 0-360, clockwise from true north
+  optional float speed_mps = 6;
+  int64 fix_time_ms = 7;           // UTC ms of the fix (not of sending)
+  string provider = 8;             // "gps", "network", "fused"
+}
+
+// Sent when a subscription cannot be served, or stops being served; the subscription stays active and fixes resume
+// (LocationUpdate) when the cause goes away.
+message LocationUnavailable {
+  string reason = 1;               // "permission" (not granted on the phone), "disabled" (location off), "no-fix"
 }

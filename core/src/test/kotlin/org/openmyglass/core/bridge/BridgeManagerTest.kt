@@ -44,6 +44,7 @@ class BridgeManagerTest {
         val server = ServerSocket(0)
         val port get() = server.localPort
         val frames = LinkedBlockingQueue<Frame>()
+        val phoneHellos = LinkedBlockingQueue<Bridge.Hello>()
         @Volatile var socket: Socket? = null
         private val thread = Thread {
             while (!server.isClosed) {
@@ -53,6 +54,7 @@ class BridgeManagerTest {
                     while (true) {
                         val bytes = DelimitedFraming.readFrame(s.getInputStream()) ?: break
                         val frame = Frame.parseFrom(bytes)
+                        if (frame.hasHello()) phoneHellos += frame.hello
                         if (frame.hasHello()) DelimitedFraming.writeFrame(s.getOutputStream(), Frame.newBuilder()
                             .setHello(Bridge.Hello.newBuilder().setProtocolVersion(1).addCapabilities("nav")).build().toByteArray())
                         else frames += frame
@@ -182,6 +184,34 @@ class BridgeManagerTest {
             glass.send(Frame.newBuilder().setGlassStatus(Bridge.GlassStatus.newBuilder().setCharging(true).setWifi(true)).build())
             var f = glass.next()!!
             while (!f.hasMediaListRequest()) f = glass.next()!!
+            m.stop()
+        }
+    }
+
+    @Test
+    fun `with a location relay the phone advertises location and glass subscriptions reach it`() {
+        val started = LinkedBlockingQueue<org.openmyglass.core.location.LocationRequest>()
+        val stopped = java.util.concurrent.CountDownLatch(1)
+        val location = org.openmyglass.core.location.LocationRelay(
+            source = { request, callback ->
+                started += request
+                callback.onFix(org.openmyglass.core.location.LocationFix(1.0, 2.0, 3f, fixTimeMs = 4, provider = "fused"))
+                AutoCloseable { stopped.countDown() }
+            },
+            scope = scope)
+        GlassPeer().use { glass ->
+            val m = BridgeManager({ TcpTransport("127.0.0.1", glass.port) }, relay, appVersion = "test", scope = scope,
+                backoff = Backoff(50.milliseconds, 200.milliseconds), onStateChange = { history += it }, location = location)
+            m.start()
+            m.await { it is LinkState.Connected }
+            assertTrue(glass.phoneHellos.poll(3, TimeUnit.SECONDS)!!.capabilitiesList.contains("location"))
+            glass.send(Frame.newBuilder().setLocationSubscribe(Bridge.LocationSubscribe.newBuilder().setIntervalMs(2_000)).build())
+            assertEquals(org.openmyglass.core.location.LocationRequest(2_000, false), started.poll(3, TimeUnit.SECONDS))
+            var f = glass.next()!!
+            while (!f.hasLocationUpdate()) f = glass.next()!!
+            assertEquals("fused", f.locationUpdate.provider)
+            glass.dropConnection()
+            assertTrue(stopped.await(3, TimeUnit.SECONDS), "the subscription ends with the session")
             m.stop()
         }
     }

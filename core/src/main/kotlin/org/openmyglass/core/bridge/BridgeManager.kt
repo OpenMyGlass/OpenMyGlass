@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.StateFlow
 import org.openmyglass.core.connection.Backoff
 import org.openmyglass.core.dictation.DictationService
+import org.openmyglass.core.location.LocationRelay
 import org.openmyglass.core.media.MediaSync
 import org.openmyglass.core.notif.NotificationRelay
 import org.openmyglass.core.connection.LinkManager
@@ -32,7 +33,10 @@ class BridgeManager(
     private val notifications: NotificationRelay? = null,
     private val dictation: DictationService? = null,
     private val media: MediaSync? = null,
+    private val location: LocationRelay? = null,
 ) {
+    private val capabilities = BridgeLink.CAPABILITIES + listOfNotNull(BridgeLink.CAPABILITY_LOCATION.takeIf { location != null })
+
     private inner class Session(private val link: BridgeLink) : LinkSession<Bridge.Hello> {
         override suspend fun handshake(): Bridge.Hello = link.handshake()
         override suspend fun run() {
@@ -55,6 +59,7 @@ class BridgeManager(
                         frame.hasGlassStatus() || frame.hasMediaList() || frame.hasMediaServer() ||
                             frame.hasMediaServerUnavailable() || frame.hasMediaChunk() || frame.hasMediaDeleted() ->
                             media?.onFrame(frame)
+                        frame.hasLocationSubscribe() -> location?.onSubscribe(frame.locationSubscribe, link::send)
                     }
                 }
             } finally {
@@ -64,13 +69,14 @@ class BridgeManager(
                     attachedNotifications?.let { notifications?.detach(it) }
                     dictation?.sessionEnded()
                     media?.detach()
+                    location?.sessionEnded()
                 }
             }
         }
         override fun close() = link.close()
     }
 
-    private val manager = LinkManager(transport, { channel: Channel -> Session(BridgeLink(channel, appVersion)) },
+    private val manager = LinkManager(transport, { channel: Channel -> Session(BridgeLink(channel, appVersion, capabilities)) },
         scope, backoff, onStateChange, onError, stableAfter)
 
     val state: StateFlow<LinkState<Bridge.Hello>> = manager.state
