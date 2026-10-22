@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # PRs share a group per branch; each push to main gets its own group, so none is dropped while queued
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # No Google binary, no _re/ file, nothing with the bytes of a factory-image .apk/.odex/.jar/.so:
+  # checked on the tree and on every commit the push or PR brings in.
+  clean-room:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Guard on the checked-out tree
+        run: bash tools/check-clean-room.sh
+      - name: Guard on every new commit
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -u
+          # The guard and hash list of this checkout judge every commit, so an older commit cannot weaken them
+          cp tools/check-clean-room.sh tools/factory-blobs.sha256 "$RUNNER_TEMP/"
+          export FACTORY_HASHES="$RUNNER_TEMP/factory-blobs.sha256"
+          if [ -z "${BASE:-}" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            range="$HEAD"  # first push or unknown base: every commit reachable from HEAD
+          else
+            range="$BASE..$HEAD"
+          fi
+          fail=0
+          for c in $(git rev-list "$range"); do
+            git checkout -q --detach "$c" || { echo "::error::cannot check out $c"; fail=1; continue; }
+            out="$(bash "$RUNNER_TEMP/check-clean-room.sh" 2>&1)" || { echo "::error::commit $c"; echo "$out"; fail=1; }
+          done
+          git checkout -q --detach "$HEAD"
+          [ $fail -eq 0 ] && echo "all commits in $range are clean"
+          exit $fail
+
+  # Shell and Python tests of the scripts under tools/ (clean-room guard, nano2proto, apk-info, simulate-route)
+  tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            21
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - name: Build a signed sample APK for test-apk-info.sh
+        run: |
+          ./gradlew :glass-xe:app:assembleEmulatorDebug
+          echo "APK_SAMPLE=$(ls "$PWD"/glass-xe/app/build/outputs/apk/emulator/debug/*.apk | head -1)" >> "$GITHUB_ENV"
+      - name: Run tools/tests
+        run: |
+          fail=0
+          for t in tools/tests/test-*.sh; do echo "== $t"; bash "$t" || fail=1; done
+          exit $fail
+
+  # Gradle builds and unit tests, one job per part of the repo
+  gradle:
+    name: ${{ matrix.part }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: protocol
+            tasks: ":protocol:check"
+          - part: core
+            tasks: ":core:check"
+          - part: sim-glass
+            tasks: ":tools:sim-glass:check"
+          - part: android
+            tasks: ":android:app:testDebugUnitTest :android:app:assembleDebug :android:osmand-api:assembleDebug"
+          - part: glass-xe
+            # Google's GDK jar is never downloaded in CI: the glass flavor builds against OpenMyGlass's own stubs
+            tasks: "-PgdkStubs=true :glass-xe:app:testGlassDebugUnitTest :glass-xe:app:testEmulatorDebugUnitTest :glass-xe:app:assembleGlassDebug :glass-xe:app:assembleEmulatorDebug"
+            sdk: "platforms;android-19"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          # 17 for the Kotlin/Java toolchain, 21 runs Gradle
+          java-version: |
+            17
+            21
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - name: Install extra Android SDK packages
+        if: matrix.sdk
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "${{ matrix.sdk }}" > /dev/null
+      - name: Gradle ${{ matrix.tasks }}
+        run: ./gradlew --stacktrace ${{ matrix.tasks }}

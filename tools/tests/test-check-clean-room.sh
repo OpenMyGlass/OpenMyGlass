@@ -10,6 +10,10 @@ expect() { # expect <name> <expected exit> <command...>
   if [ "$got" = "$want" ]; then echo "PASS $name"; pass=$((pass+1)); else echo "FAIL $name (exit $got, expected $want)"; echo "$out" | sed 's/^/    /'; fail=$((fail+1)); fi
 }
 repo() { rm -rf "$TMP/r" && mkdir "$TMP/r" && git -C "$TMP/r" init -q; }
+# A stand-in for tools/factory-blobs.sha256: the hash of the bytes "factory-blob"
+printf 'factory-blob' > "$TMP/blob"
+if command -v sha256sum >/dev/null 2>&1; then sha256sum "$TMP/blob"; else shasum -a 256 "$TMP/blob"; fi | sed 's|  .*|  system/lib/libfake.so|' > "$TMP/hashes"
+export FACTORY_HASHES="$TMP/hashes"
 
 repo; echo "# ok" > "$TMP/r/README.md"; git -C "$TMP/r" add README.md
 expect "clean repo accepted" 0 bash -c "cd '$TMP/r' && bash '$GUARD'"
@@ -58,5 +62,29 @@ expect "heap dump rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
 
 repo; dd if=/dev/zero of="$TMP/r/big.bin" bs=1048576 count=51 2>/dev/null; git -C "$TMP/r" add -f big.bin
 expect "file over 50 MB rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; printf 'x' > "$TMP/r/libfoo.so"; git -C "$TMP/r" add -f libfoo.so
+expect "so rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; cp "$TMP/blob" "$TMP/r/notes.txt"; git -C "$TMP/r" add notes.txt
+expect "renamed factory binary rejected by hash" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; echo "# ok" > "$TMP/r/README.md"; git -C "$TMP/r" add README.md
+expect "missing hash list fails closed" 1 bash -c "cd '$TMP/r' && FACTORY_HASHES='$TMP/none' bash '$GUARD'"
+
+repo; echo "# ok" > "$TMP/r/README.md"; git -C "$TMP/r" add README.md; echo junk > "$TMP/junk"
+expect "hash list without hashes fails closed" 1 bash -c "cd '$TMP/r' && FACTORY_HASHES='$TMP/junk' bash '$GUARD'"
+
+repo; cp "$TMP/blob" "$TMP/r/a\"b.txt"; git -C "$TMP/r" add -f .
+expect "factory binary with a quote in its name rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; printf 'x' > "$TMP/r/c"$'\t'"d.txt"; git -C "$TMP/r" add -f .
+expect "name with a control character rejected" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; cp "$TMP/blob" "$TMP/r/staged.txt"; git -C "$TMP/r" add staged.txt; echo changed > "$TMP/r/staged.txt"
+expect "staged factory binary rejected though the working copy changed" 1 bash -c "cd '$TMP/r' && bash '$GUARD'"
+
+repo; mkdir "$TMP/r/sub"; cp "$TMP/blob" "$TMP/r/x.txt"; git -C "$TMP/r" add x.txt; cp "$TMP/hashes" "$TMP/r/sub/h.list"
+expect "relative FACTORY_HASHES resolved from the caller" 1 bash -c "cd '$TMP/r/sub' && FACTORY_HASHES=h.list bash '$GUARD'"
 
 echo "$pass passed, $fail failed"; [ $fail -eq 0 ]

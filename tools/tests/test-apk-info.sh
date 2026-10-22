@@ -3,7 +3,8 @@
 set -u
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/re/apk-info.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-SAMPLE="$(find "${ANDROID_HOME:-$HOME/Library/Android/sdk}/emulator" -name '*.apk' 2>/dev/null | head -1)"
+# Any signed APK; CI passes one it builds (APK_SAMPLE), locally the SDK emulator ships some
+SAMPLE="${APK_SAMPLE:-$(find "${ANDROID_HOME:-$HOME/Library/Android/sdk}/emulator" -name '*.apk' 2>/dev/null | head -1)}"
 pass=0; fail=0
 ok() { echo "PASS $1"; pass=$((pass+1)); }
 ko() { echo "FAIL $1"; echo "$2" | sed 's/^/    /'; fail=$((fail+1)); }
