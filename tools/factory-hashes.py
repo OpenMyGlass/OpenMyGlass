@@ -26,7 +26,12 @@ def debugfs_bin():
 
 
 def debugfs(dbg, image, cmd):
-    return subprocess.run([dbg, "-R", cmd, image], capture_output=True, check=True).stdout
+    r = subprocess.run([dbg, "-R", cmd, image], capture_output=True, check=True)
+    # debugfs exits 0 on most errors: treat any message other than its version banner as one
+    err = [l for l in r.stderr.decode("utf-8", "replace").splitlines() if l.strip() and not l.startswith("debugfs ")]
+    if err:
+        sys.exit(f"debugfs {cmd!r}: {err[0]}")
+    return r.stdout
 
 
 def walk(dbg, image, path):
@@ -66,7 +71,10 @@ def main():
         dbg = debugfs_bin()
         for f in walk(dbg, system, "/"):
             if f.lower().endswith(EXTS):
-                rows.append((hashlib.sha256(debugfs(dbg, system, f'cat "{f}"')).hexdigest(), "system" + f))
+                data = debugfs(dbg, system, f'cat "{f}"')
+                if not data:
+                    sys.exit(f"empty read from {f}: refusing to list the hash of empty input")
+                rows.append((hashlib.sha256(data).hexdigest(), "system" + f))
     ramdisk = os.path.join(root, "ramdisk")
     for d, _, files in os.walk(ramdisk):
         for n in files:

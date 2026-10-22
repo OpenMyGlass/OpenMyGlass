@@ -4,9 +4,17 @@
 # (tools/factory-blobs.sha256, override with FACTORY_HASHES=<file>).
 set -u
 HASHES="${FACTORY_HASHES:-$(cd "$(dirname "$0")" && pwd)/factory-blobs.sha256}"
+case "$HASHES" in /*) ;; *) HASHES="$PWD/$HASHES" ;; esac
 cd "$(git rev-parse --show-toplevel)" || exit 1
 fail=0
-files="$(git -c core.quotePath=false ls-files --cached)"
+# NUL-separated, so names are never C-quoted; names with control characters are refused outright
+files=""; odd=""
+while IFS= read -r -d '' f; do
+  case "$f" in *[[:cntrl:]]*) odd="$odd$(printf '%q' "$f")"$'\n'; continue ;; esac
+  files="$files$f"$'\n'
+done < <(git ls-files -z --cached)
+files="${files%$'\n'}"
+if [ -n "$odd" ]; then echo "Tracked names with control characters:"; printf '%s' "$odd"; fail=1; fi
 bad_ext="$(printf '%s\n' "$files" | grep -Ei '\.(apk|apks|xapk|dex|odex|oat|vdex|img|jar|aar|class|zip|tgz|so)$' | grep -v 'gradle/wrapper/gradle-wrapper.jar$' || true)"
 if [ -n "$bad_ext" ]; then echo "Tracked binaries:"; echo "$bad_ext"; fail=1; fi
 leaks=""
@@ -32,19 +40,23 @@ while IFS= read -r f; do
   [ "$size" -gt 52428800 ] && big="$big$f ($size bytes)"$'\n'
 done < <(printf '%s\n' "$files")
 if [ -n "$big" ]; then echo "Files over 50 MB:"; printf '%s' "$big"; fail=1; fi
-# Same bytes as a factory-image binary, whatever the file is called
-if [ -f "$HASHES" ]; then
-  if command -v sha256sum >/dev/null 2>&1; then sha() { sha256sum "$@"; }; else sha() { shasum -a 256 "$@"; }; fi
-  known="$(grep -Eo '^[0-9a-f]{64}' "$HASHES" | sort -u)"
-  hits=""
-  while IFS= read -r f; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    h="$(sha "$f" | cut -d' ' -f1)"
-    printf '%s\n' "$known" | grep -qx "$h" && hits="$hits$f ($h)"$'\n'
-  done < <(printf '%s\n' "$files")
-  if [ -n "$hits" ]; then echo "Files identical to a factory-image binary:"; printf '%s' "$hits"; fail=1; fi
+# Same bytes as a factory-image binary, whatever the file is called (hashes the staged blobs)
+known="$( { grep -Eo '^[0-9a-f]{64}' "$HASHES" || true; } 2>/dev/null | sort -u)"
+if [ -z "$known" ]; then
+  echo "factory hash list missing or without hashes: $HASHES"; fail=1
 else
-  echo "factory hash list not found: $HASHES"; fail=1
+  if command -v sha256sum >/dev/null 2>&1; then sha() { sha256sum; }; else sha() { shasum -a 256; }; fi
+  hits=""; errs=""
+  while IFS= read -r -d '' entry; do
+    meta="${entry%%$'\t'*}"; f="${entry#*$'\t'}"
+    mode="${meta%% *}"; oid="$(printf '%s' "$meta" | cut -d' ' -f2)"
+    [ "$mode" = 160000 ] && continue  # submodule, no blob
+    h="$(git cat-file blob "$oid" | sha | cut -d' ' -f1)"
+    if ! printf '%s' "$h" | grep -Eqx '[0-9a-f]{64}'; then errs="$errs$f"$'\n'; continue; fi
+    printf '%s\n' "$known" | grep -qx "$h" && hits="$hits$f ($h)"$'\n'
+  done < <(git ls-files -s -z --cached)
+  if [ -n "$errs" ]; then echo "Could not hash:"; printf '%s' "$errs"; fail=1; fi
+  if [ -n "$hits" ]; then echo "Files identical to a factory-image binary:"; printf '%s' "$hits"; fail=1; fi
 fi
 [ $fail -eq 0 ] && echo "clean-room ok"
 exit $fail

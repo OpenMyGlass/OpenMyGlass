@@ -11,7 +11,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Only PR runs are cancelled: every push to main must check its own commits
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # No Google binary, no _re/ file, nothing with the bytes of a factory-image .apk/.odex/.jar/.so:
@@ -41,7 +42,7 @@ jobs:
           fi
           fail=0
           for c in $(git rev-list "$range"); do
-            git checkout -q --detach "$c"
+            git checkout -q --detach "$c" || { echo "::error::cannot check out $c"; fail=1; continue; }
             out="$(bash "$RUNNER_TEMP/check-clean-room.sh" 2>&1)" || { echo "::error::commit $c"; echo "$out"; fail=1; }
           done
           git checkout -q --detach "$HEAD"
