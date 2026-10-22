@@ -51,7 +51,7 @@ else
     meta="${entry%%$'\t'*}"; f="${entry#*$'\t'}"
     mode="${meta%% *}"; oid="$(printf '%s' "$meta" | cut -d' ' -f2)"
     [ "$mode" = 160000 ] && continue  # submodule, no blob
-    h="$(git cat-file blob "$oid" | sha | cut -d' ' -f1)"
+    h="$(set -o pipefail; git cat-file blob "$oid" | sha | cut -d' ' -f1)" || h=""
     if ! printf '%s' "$h" | grep -Eqx '[0-9a-f]{64}'; then errs="$errs$f"$'\n'; continue; fi
     printf '%s\n' "$known" | grep -qx "$h" && hits="$hits$f ($h)"$'\n'
   done < <(git ls-files -s -z --cached)
