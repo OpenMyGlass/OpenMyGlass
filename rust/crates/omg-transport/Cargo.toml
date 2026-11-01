@@ -1,0 +1,29 @@
+[package]
+name = "omg-transport"
+description = "OpenMyGlass link transport: power-aware selection over Bluetooth RFCOMM (primary) and Wi-Fi/TCP (fallback), with length-delimited frame codec."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+omg-protocol = { path = "../omg-protocol" }
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+# Real Linux Bluetooth RFCOMM via BlueZ. Not implemented yet (the BT transport is a
+# stub behind the Transport trait). When implemented this pulls in `bluer`.
+linux-bt = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "io-util", "net", "time", "sync"] }

@@ -26,8 +26,32 @@ OpenMyGlass is licensed under GPL-3.0 (see [`LICENSE`](LICENSE)). The phone app 
 - Protocol Buffers Java Lite (BSD-3-Clause).
 - The `glass` flavor compiles against Google's GDK (`gdk.jar`, under the GDK license), which is **not** included in the APK or this repository (`compileOnly`). See [`glass-xe/README.md`](glass-xe/README.md).
 
+## Cross-platform companion core (`rust/`)
+
+The Rust workspace links the crates below (and their transitive dependencies). All are
+permissively licensed and compatible with GPL-3.0. Exact versions are pinned in
+[`rust/Cargo.lock`](rust/Cargo.lock).
+
+| Crate | License | Role |
+|---|---|---|
+| [serde](https://github.com/serde-rs/serde) / serde_json | MIT OR Apache-2.0 | Message (de)serialization |
+| [postcard](https://github.com/jamesmunns/postcard) | MIT OR Apache-2.0 | Compact wire encoding |
+| [tokio](https://github.com/tokio-rs/tokio) / tokio-util | MIT | Async runtime + framed codec |
+| [futures](https://github.com/rust-lang/futures-rs) | MIT OR Apache-2.0 | Async sink/stream helpers |
+| [bytes](https://github.com/tokio-rs/bytes) | MIT | Frame buffers |
+| [async-trait](https://github.com/dtolnay/async-trait) | MIT OR Apache-2.0 | Async `Transport` trait |
+| [ed25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek) | BSD-3-Clause | Identity signatures (pairing/auth) |
+| [curve25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek) | BSD-3-Clause | Elliptic-curve backend |
+| [getrandom](https://github.com/rust-random/getrandom) / rand_core | MIT OR Apache-2.0 | OS randomness (keys, nonces) |
+| [base64](https://github.com/marshallpierce/rust-base64) | MIT OR Apache-2.0 | Key/nonce/bootstrap encoding |
+| [qrcode](https://github.com/kennytm/qrcode-rust) | MIT OR Apache-2.0 | Wi-Fi bootstrap QR rendering |
+| [clap](https://github.com/clap-rs/clap) | MIT OR Apache-2.0 | CLI argument parsing |
+| [tracing](https://github.com/tokio-rs/tracing) / tracing-subscriber | MIT | Logging |
+| [thiserror](https://github.com/dtolnay/thiserror) / [anyhow](https://github.com/dtolnay/anyhow) | MIT OR Apache-2.0 | Error types |
+
 ## License texts
 
 - Apache-2.0: <https://www.apache.org/licenses/LICENSE-2.0.txt>
 - BSD-3-Clause: <https://opensource.org/license/bsd-3-clause>
+- MIT: <https://opensource.org/license/mit>
 - GPL-3.0: [`LICENSE`](LICENSE)
