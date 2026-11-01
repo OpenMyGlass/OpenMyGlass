@@ -17,6 +17,9 @@ btsnoop_hci.log
 # Build
 build/
 .gradle/
+# Rust
+rust/target/
+target/
 local.properties
 *.iml
 .idea/

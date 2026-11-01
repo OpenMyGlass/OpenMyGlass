@@ -1,0 +1,16 @@
+[package]
+name = "omg-qr"
+description = "OpenMyGlass Wi-Fi QR bootstrap: render a WifiBootstrap payload as a scannable QR (terminal + SVG), offline."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+omg-protocol = { path = "../omg-protocol" }
+# default-features off to avoid pulling in the heavy `image` crate; we only need
+# terminal (unicode) and SVG rendering.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+thiserror.workspace = true

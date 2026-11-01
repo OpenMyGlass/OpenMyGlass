@@ -1,0 +1,359 @@
+//! `omg` — the OpenMyGlass companion CLI/daemon.
+//!
+//! This is a thin frontend over the shared Rust core (`omg-core`). The same core will
+//! sit behind the Android/desktop UI later. Commands:
+//!
+//! * `omg identity`   — show (create on first use) the companion's identity key.
+//! * `omg qr`         — generate an offline Wi-Fi bootstrap QR for the Glass camera.
+//! * `omg sim-glass`  — run a simulated Glass peer (for pairing/testing without hardware).
+//! * `omg link`       — connect, pair if needed, and run the backbone once (demo).
+//! * `omg daemon`     — connect and keep the link up (heartbeat + event stream).
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use omg_core::{
+    session::{PairingMode, Session, SessionConfig},
+    simglass::{self, SimGlassState},
+    Store,
+};
+use omg_protocol::{
+    bootstrap::{WifiAuth, WifiBootstrap},
+    Frame, Locale, Notification, NotificationPosted, SetLocale, StatusRequest,
+};
+use omg_qr::BootstrapQr;
+use omg_transport::{TcpListenerTransport, TcpTransport, Transport};
+use tracing::info;
+
+#[derive(Parser)]
+#[command(name = "omg", version, about = "OpenMyGlass companion (phone/PC)")]
+struct Cli {
+    /// Path to the persistent state file (identity + bonded peer).
+    #[arg(long, global = true)]
+    store: Option<PathBuf>,
+
+    #[command(subcommand)]
+    cmd: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Show the companion identity (created on first use).
+    Identity,
+    /// Generate an offline Wi-Fi bootstrap QR for the Glass camera.
+    Qr(QrArgs),
+    /// Run a simulated Glass peer (listens for a companion).
+    SimGlass(ListenArgs),
+    /// Connect to a Glass, pair if needed, and run the backbone once.
+    Link(ConnectArgs),
+    /// Connect and keep the link up (heartbeat + event stream).
+    Daemon(ConnectArgs),
+}
+
+#[derive(Args)]
+struct QrArgs {
+    /// Wi-Fi SSID.
+    #[arg(long)]
+    ssid: String,
+    /// Pre-shared key (omit for an open network).
+    #[arg(long)]
+    psk: Option<String>,
+    /// Authentication type.
+    #[arg(long, value_enum, default_value_t = AuthKind::Wpa)]
+    auth: AuthKind,
+    /// Direct companion address hint `ip:port` (otherwise the Glass uses mDNS).
+    #[arg(long)]
+    addr: Option<String>,
+    /// mDNS service to discover the companion by.
+    #[arg(long, default_value = "_openmyglass._tcp.local")]
+    mdns: String,
+    /// One-time pairing bootstrap token to embed.
+    #[arg(long)]
+    token: Option<String>,
+    /// Also write the QR as SVG to this file.
+    #[arg(long)]
+    svg: Option<PathBuf>,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum AuthKind {
+    Open,
+    Wep,
+    Wpa,
+    Wpa3,
+}
+
+#[derive(Args)]
+struct ListenArgs {
+    /// Address to listen on, e.g. `0.0.0.0:7700`.
+    #[arg(long, default_value = "127.0.0.1:7700")]
+    listen: String,
+    /// Friendly device name to advertise.
+    #[arg(long, default_value = "OpenMyGlass-Sim")]
+    name: String,
+}
+
+#[derive(Args)]
+struct ConnectArgs {
+    /// Glass address to connect to, e.g. `10.10.10.42:7700`.
+    #[arg(long)]
+    connect: String,
+    /// Friendly name of this companion.
+    #[arg(long, default_value = "openmyglass-companion")]
+    name: String,
+    /// Force a (re)pairing even if a peer is already bonded.
+    #[arg(long)]
+    pair: bool,
+    /// After the handshake, push this UI locale to the Glass.
+    #[arg(long, value_enum)]
+    locale: Option<LocaleArg>,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum LocaleArg {
+    It,
+    En,
+    Fr,
+    Es,
+}
+
+impl From<LocaleArg> for Locale {
+    fn from(l: LocaleArg) -> Self {
+        match l {
+            LocaleArg::It => Locale::It,
+            LocaleArg::En => Locale::En,
+            LocaleArg::Fr => Locale::Fr,
+            LocaleArg::Es => Locale::Es,
+        }
+    }
+}
+
+fn default_store_path() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".config/openmyglass/companion.json")
+    } else {
+        PathBuf::from("omg-state.json")
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "omg=info,omg_core=info,omg_transport=warn".into()),
+        )
+        .init();
+
+    let cli = Cli::parse();
+    let store_path = cli.store.unwrap_or_else(default_store_path);
+
+    match cli.cmd {
+        Command::Identity => cmd_identity(&store_path),
+        Command::Qr(args) => cmd_qr(args),
+        Command::SimGlass(args) => cmd_sim_glass(&store_path, args).await,
+        Command::Link(args) => cmd_link(&store_path, args).await,
+        Command::Daemon(args) => cmd_daemon(&store_path, args).await,
+    }
+}
+
+fn cmd_identity(store_path: &Path) -> Result<()> {
+    let store = Store::load_or_create(store_path).context("load store")?;
+    println!("store:    {}", store_path.display());
+    println!("identity: {}", store.identity().public_b64());
+    match store.paired() {
+        Some(p) => println!("paired:   {} ({})", p.peer_name, p.peer_pub),
+        None => println!("paired:   <none> (run `omg link --pair` to bond)"),
+    }
+    Ok(())
+}
+
+fn cmd_qr(args: QrArgs) -> Result<()> {
+    let auth = match args.auth {
+        AuthKind::Open => WifiAuth::Open,
+        AuthKind::Wep => WifiAuth::Wep,
+        AuthKind::Wpa => WifiAuth::WpaPsk,
+        AuthKind::Wpa3 => WifiAuth::Wpa3Sae,
+    };
+    let bootstrap = WifiBootstrap {
+        version: omg_protocol::bootstrap::BOOTSTRAP_VERSION,
+        ssid: args.ssid,
+        auth,
+        psk: args.psk,
+        hidden: false,
+        companion_addr: args.addr,
+        mdns_service: Some(args.mdns),
+        pair_token: args.token,
+    };
+    let qr = BootstrapQr::from_bootstrap(&bootstrap).context("render QR")?;
+    println!("{}", qr.to_terminal());
+    println!("payload: {}", qr.payload);
+    println!("(Glass decodes the OMG1: payload; see omg_protocol::bootstrap)");
+    if let Some(path) = args.svg {
+        std::fs::write(&path, qr.to_svg()).with_context(|| format!("write {}", path.display()))?;
+        println!("svg:     {}", path.display());
+    }
+    Ok(())
+}
+
+async fn cmd_sim_glass(store_path: &Path, args: ListenArgs) -> Result<()> {
+    let listener = TcpListenerTransport::bind(&args.listen)
+        .await
+        .with_context(|| format!("bind {}", args.listen))?;
+    info!(addr = %args.listen, "sim-glass listening");
+
+    loop {
+        let link = listener.accept().await.context("accept")?;
+        // Reload the store each connection so a fresh pairing persists for the next one.
+        let mut store = Store::load_or_create(store_path)?;
+        let state = SimGlassState {
+            device_name: args.name.clone(),
+            ..Default::default()
+        };
+        let id = store.identity().clone();
+        let bonded = store.paired().cloned();
+        match simglass::run(link, id, bonded, state).await {
+            Ok(rec) => {
+                if store.paired().is_none() {
+                    store.set_paired(rec.peer_pub.clone(), rec.peer_name.clone())?;
+                    info!(companion = %rec.peer_name, "sim-glass: bonded and persisted");
+                }
+            }
+            Err(e) => info!(error = %e, "sim-glass: session ended"),
+        }
+    }
+}
+
+/// Dial, handshake (pairing if needed), and persist a new bond. Returns the session.
+async fn connect_and_handshake(
+    store: &mut Store,
+    args: &ConnectArgs,
+) -> Result<Session<omg_transport::BoxStream>> {
+    let link = TcpTransport::new(&args.connect)
+        .dial()
+        .await
+        .with_context(|| format!("connect {}", args.connect))?;
+
+    let was_paired = store.paired().is_some();
+    let mode = if args.pair || !was_paired {
+        PairingMode::AllowNew
+    } else {
+        PairingMode::ReuseOnly
+    };
+
+    let mut session = Session::new(
+        link,
+        store.identity().clone(),
+        store.paired().cloned(),
+        SessionConfig::companion(&args.name),
+    );
+    let rec = session.handshake(mode).await.context("handshake")?;
+    if !was_paired || args.pair {
+        store.set_paired(rec.peer_pub.clone(), rec.peer_name.clone())?;
+        info!(glass = %rec.peer_name, "paired and persisted");
+    } else {
+        info!(glass = %rec.peer_name, "reconnected to bonded Glass");
+    }
+    Ok(session)
+}
+
+async fn cmd_link(store_path: &Path, args: ConnectArgs) -> Result<()> {
+    let mut store = Store::load_or_create(store_path)?;
+    let mut session = connect_and_handshake(&mut store, &args).await?;
+
+    // Ask for status, push the locale (optional), and forward a demo notification.
+    session
+        .send(Frame::StatusRequest(StatusRequest::default()))
+        .await?;
+    if let Some(l) = args.locale {
+        session
+            .send(Frame::SetLocale(SetLocale { locale: l.into() }))
+            .await?;
+    }
+    session
+        .send(Frame::NotificationPosted(NotificationPosted {
+            notification: Notification {
+                key: "demo-1".into(),
+                app_name: "OpenMyGlass".into(),
+                title: "Linked".into(),
+                text: "Backbone is up".into(),
+                posted_at_ms: omg_core::now_ms(),
+                icon_sha256: None,
+                actions: vec![],
+                wake: false,
+            },
+        }))
+        .await?;
+
+    // Drain the replies (battery push, status, locale ack, notif action).
+    for _ in 0..5 {
+        match tokio::time::timeout(Duration::from_millis(400), session.recv_app()).await {
+            Ok(Ok(Some(frame))) => print_event(&frame),
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => break, // no more frames within the window
+        }
+    }
+
+    // Heartbeat last, so the pong is not racing the backbone replies.
+    let rtt = session.heartbeat().await?;
+    println!("heartbeat: {rtt} ms");
+
+    session.close("done").await?;
+    Ok(())
+}
+
+async fn cmd_daemon(store_path: &Path, args: ConnectArgs) -> Result<()> {
+    let mut store = Store::load_or_create(store_path)?;
+    let mut session = connect_and_handshake(&mut store, &args).await?;
+    if let Some(l) = args.locale {
+        session
+            .send(Frame::SetLocale(SetLocale { locale: l.into() }))
+            .await?;
+    }
+    session
+        .send(Frame::StatusRequest(StatusRequest::default()))
+        .await?;
+    info!("daemon running; Ctrl-C to stop");
+
+    let mut hb = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("shutting down");
+                session.close("companion shutting down").await.ok();
+                break;
+            }
+            _ = hb.tick() => {
+                match session.heartbeat().await {
+                    Ok(rtt) => info!(rtt_ms = rtt, "heartbeat"),
+                    Err(e) => { info!(error = %e, "heartbeat failed, link lost"); break; }
+                }
+            }
+            frame = session.recv_app() => {
+                match frame {
+                    Ok(Some(f)) => print_event(&f),
+                    Ok(None) => { info!("link closed by Glass"); break; }
+                    Err(e) => { info!(error = %e, "link error"); break; }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_event(frame: &Frame) {
+    match frame {
+        Frame::Status(s) => println!(
+            "status: battery={:?}% charging={:?} ver={:?} locale={:?}",
+            s.battery_percent, s.charging, s.software_version, s.locale
+        ),
+        Frame::BatteryStatus(b) => println!("battery: {}% charging={}", b.percent, b.charging),
+        Frame::LocaleChanged(l) => println!("locale now: {}", l.locale.code()),
+        Frame::NotificationAction(a) => println!("notif action on {}: {:?}", a.key, a.choice),
+        Frame::RadioState(r) => println!("radios: {r:?}"),
+        other => println!("event: {}", other.wire_name()),
+    }
+}
