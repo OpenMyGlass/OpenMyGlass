@@ -10,7 +10,7 @@
 
 use omg_protocol::{
     BatteryStatus, Frame, GlassStatus, Locale, LocaleChanged, NotificationAction,
-    NotificationChoice, RadioState,
+    NotificationChoice, RadioState, Settings,
 };
 use omg_transport::{Link, Stream};
 use tracing::{debug, info};
@@ -33,6 +33,8 @@ pub struct SimGlassState {
     pub charging: bool,
     /// Active locale.
     pub locale: Locale,
+    /// The settings a companion reads and changes.
+    pub settings: Settings,
     /// glassd/ROM version.
     pub software_version: String,
 }
@@ -44,6 +46,7 @@ impl Default for SimGlassState {
             battery_percent: 73,
             charging: false,
             locale: Locale::En,
+            settings: Settings::default(),
             software_version: "glassd-sim/0.1.0".into(),
         }
     }
@@ -105,6 +108,14 @@ pub async fn run<S: Stream>(
                         }),
                         locale: Some(state.locale),
                     }))
+                    .await?;
+            }
+            Frame::SettingsGet | Frame::SettingsSet(_) => {
+                if let Frame::SettingsSet(change) = &frame {
+                    state.settings.merge(change);
+                }
+                session
+                    .send(Frame::Settings(state.settings.clone()))
                     .await?;
             }
             Frame::SetLocale(set) => {

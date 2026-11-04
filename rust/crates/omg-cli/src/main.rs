@@ -21,7 +21,7 @@ use omg_core::{
 };
 use omg_protocol::{
     bootstrap::{WifiAuth, WifiBootstrap},
-    Frame, Locale, Notification, NotificationPosted, SetLocale, StatusRequest,
+    Frame, Locale, Notification, NotificationPosted, SetLocale, Settings, StatusRequest,
 };
 use omg_qr::BootstrapQr;
 use omg_transport::{TcpListenerTransport, TcpTransport, Transport};
@@ -109,6 +109,21 @@ struct ConnectArgs {
     /// After the handshake, push this UI locale to the Glass.
     #[arg(long, value_enum)]
     locale: Option<LocaleArg>,
+    /// After the handshake, read the Glass settings.
+    #[arg(long)]
+    get_settings: bool,
+    /// After the handshake, set the earpiece volume (0-100).
+    #[arg(long)]
+    volume: Option<u8>,
+    /// After the handshake, set 24-hour (true) or 12-hour (false) time.
+    #[arg(long)]
+    time_24h: Option<bool>,
+    /// After the handshake, set the time zone (index in the Glass's table).
+    #[arg(long)]
+    timezone: Option<u32>,
+    /// After the handshake, turn on-head detection on or off.
+    #[arg(long)]
+    on_head: Option<bool>,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -272,6 +287,19 @@ async fn cmd_link(store_path: &Path, args: ConnectArgs) -> Result<()> {
             .send(Frame::SetLocale(SetLocale { locale: l.into() }))
             .await?;
     }
+    let change = Settings {
+        audio_volume: args.volume,
+        time_24h: args.time_24h,
+        timezone_id: args.timezone,
+        on_head_detection: args.on_head,
+        ..Default::default()
+    };
+    if change != Settings::default() {
+        session.send(Frame::SettingsSet(change)).await?;
+    }
+    if args.get_settings {
+        session.send(Frame::SettingsGet).await?;
+    }
     session
         .send(Frame::NotificationPosted(NotificationPosted {
             notification: Notification {
@@ -352,6 +380,7 @@ fn print_event(frame: &Frame) {
         ),
         Frame::BatteryStatus(b) => println!("battery: {}% charging={}", b.percent, b.charging),
         Frame::LocaleChanged(l) => println!("locale now: {}", l.locale.code()),
+        Frame::Settings(s) => println!("settings: {s:?}"),
         Frame::NotificationAction(a) => println!("notif action on {}: {:?}", a.key, a.choice),
         Frame::RadioState(r) => println!("radios: {r:?}"),
         other => println!("event: {}", other.wire_name()),
