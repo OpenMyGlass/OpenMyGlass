@@ -86,6 +86,25 @@ impl<S: Stream> Session<S> {
         }
     }
 
+    /// Add a capability to advertise in our Hello. Call before the handshake.
+    pub fn advertise(&mut self, capability: &str) {
+        if !self.cfg.capabilities.iter().any(|c| c == capability) {
+            self.cfg.capabilities.push(capability.to_string());
+        }
+    }
+
+    /// Whether the peer advertised this capability (false before the Hello exchange).
+    pub fn peer_supports(&self, capability: &str) -> bool {
+        self.peer_hello
+            .as_ref()
+            .is_some_and(|h| h.capabilities.iter().any(|c| c == capability))
+    }
+
+    /// Give up the session after the handshake, keeping the link.
+    pub fn into_link(self) -> Link<S> {
+        self.link
+    }
+
     /// The peer's Hello (available after [`exchange_hello`](Session::exchange_hello)).
     pub fn peer_hello(&self) -> Option<&Hello> {
         self.peer_hello.as_ref()

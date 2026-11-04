@@ -4,7 +4,10 @@
 //! (see [`omg_protocol::wire`]). This is the exact format glassd must implement.
 
 use bytes::{Buf, BufMut, BytesMut};
-use futures::{SinkExt, StreamExt};
+use futures::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use omg_protocol::{wire, Frame, MAX_FRAME_LEN};
 use tokio_util::codec::{Decoder, Encoder, Framed};
 
@@ -79,6 +82,19 @@ impl<S: Stream> Link<S> {
             Some(r) => r.map(Some),
             None => Ok(None),
         }
+    }
+
+    /// Split into independent send and receive halves, so a peer can keep reading while
+    /// it writes. Long transfers need this: if both sides only read between their
+    /// writes, full socket buffers can deadlock them.
+    #[allow(clippy::type_complexity)]
+    pub fn split(
+        self,
+    ) -> (
+        SplitSink<Framed<S, FrameCodec>, Frame>,
+        SplitStream<Framed<S, FrameCodec>>,
+    ) {
+        self.inner.split()
     }
 }
 

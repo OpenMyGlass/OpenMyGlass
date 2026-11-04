@@ -44,6 +44,7 @@ permissively licensed and compatible with GPL-3.0. Exact versions are pinned in
 | [curve25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek) | BSD-3-Clause | Elliptic-curve backend |
 | [getrandom](https://github.com/rust-random/getrandom) / rand_core | MIT OR Apache-2.0 | OS randomness (keys, nonces) |
 | [base64](https://github.com/marshallpierce/rust-base64) | MIT OR Apache-2.0 | Key/nonce/bootstrap encoding |
+| [sha2](https://github.com/RustCrypto/hashes) | MIT OR Apache-2.0 | SHA-256 for note sync (already linked through ed25519-dalek) |
 | [qrcode](https://github.com/kennytm/qrcode-rust) | MIT OR Apache-2.0 | Wi-Fi bootstrap QR rendering |
 | [clap](https://github.com/clap-rs/clap) | MIT OR Apache-2.0 | CLI argument parsing |
 | [tracing](https://github.com/tokio-rs/tracing) / tracing-subscriber | MIT | Logging |
