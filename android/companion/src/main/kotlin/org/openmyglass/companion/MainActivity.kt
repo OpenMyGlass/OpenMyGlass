@@ -261,6 +261,14 @@ class MainActivity : Activity() {
         number("deep_sleep_idle", "Idle before deep sleep (s)", 5, 1800, { it.deepSleepIdleS }) {
             GlassSettings(deepSleepIdleS = it)
         }
+        // 0 first on the bar means never; glassd allows up to 12 hours.
+        number(
+            "off_head_power_off",
+            "Power off when removed (min, 0 = never)",
+            0,
+            720,
+            { it.offHeadPowerOffMin },
+        ) { GlassSettings(offHeadPowerOffMin = it) }
 
         heading("Time and language")
         toggle("time_24h", "24-hour clock", { it.time24h }) { GlassSettings(time24h = it) }

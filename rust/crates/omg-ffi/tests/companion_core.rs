@@ -206,6 +206,7 @@ fn settings_can_be_read_and_changed_and_the_bond_survives_a_restart() {
     phone.change_settings(GlassSettings {
         audio_volume: Some(55),
         deep_sleep: Some(true),
+        off_head_power_off_min: Some(0),
         locale: Some(NoteLocale::It),
         ..Default::default()
     });
@@ -214,6 +215,7 @@ fn settings_can_be_read_and_changed_and_the_bond_survives_a_restart() {
     });
     let changed = settings_of(&app.events.lock().unwrap()).unwrap();
     assert_eq!(changed.deep_sleep, Some(true));
+    assert_eq!(changed.off_head_power_off_min, Some(0), "0 means never");
     assert_eq!(changed.locale, Some(NoteLocale::It));
     assert_eq!(changed.screen_timeout_s, Some(15), "untouched fields stay");
     // Radios have their own frames, and are reported apart from the settings.

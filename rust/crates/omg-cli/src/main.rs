@@ -208,6 +208,9 @@ struct ConnectArgs {
     /// After the handshake, turn on-head detection on or off.
     #[arg(long)]
     on_head: Option<bool>,
+    /// After the handshake, set the minutes off the head before powering off (0 = never).
+    #[arg(long)]
+    off_head_power_off_min: Option<u32>,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -407,6 +410,7 @@ async fn cmd_link(store_path: &Path, args: ConnectArgs) -> Result<()> {
         time_24h: args.time_24h,
         timezone_id: args.timezone,
         on_head_detection: args.on_head,
+        off_head_power_off_min: args.off_head_power_off_min,
         ..Default::default()
     };
     if change != Settings::default() {

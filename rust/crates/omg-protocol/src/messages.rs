@@ -1131,6 +1131,18 @@ pub struct Settings {
     pub locale: Option<Locale>,
     /// Radio state (read-only here; use [`SetRadio`]/[`SetAirplaneMode`] to change).
     pub radios: Option<RadioState>,
+    /// Minutes off the head before the Glass powers off: 0 = never, at most 720.
+    #[serde(default, deserialize_with = "absent_at_the_end")]
+    pub off_head_power_off_min: Option<u32>,
+}
+
+/// Decodes a field added at the end of [`Settings`], which this struct carried on the wire
+/// before the field existed. postcard is positional, but a frame is length-delimited and the
+/// struct ends it, so the two ages still understand each other: an older peer ignores the
+/// extra bytes, and when an older peer's frame ends here the field is `None`. Later fields
+/// must go after this one and decode the same way.
+fn absent_at_the_end<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+    Ok(Option::<u32>::deserialize(d).unwrap_or(None))
 }
 
 impl Settings {
@@ -1153,7 +1165,8 @@ impl Settings {
             wink,
             screen_timeout_s,
             nudge,
-            locale
+            locale,
+            off_head_power_off_min
         );
     }
 }
@@ -1297,6 +1310,76 @@ mod settings_tests {
         assert_eq!(s.audio_volume, Some(40));
         assert_eq!(s.time_24h, Some(true));
         assert_eq!(s.radios, None);
+    }
+
+    #[test]
+    fn merge_copies_the_power_off_time_even_when_it_is_never() {
+        let mut s = Settings {
+            off_head_power_off_min: Some(30),
+            ..Default::default()
+        };
+        s.merge(&Settings::default());
+        assert_eq!(s.off_head_power_off_min, Some(30));
+        s.merge(&Settings {
+            off_head_power_off_min: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(s.off_head_power_off_min, Some(0));
+    }
+
+    /// The frame an older peer sends: the same bytes without the last field. `None` is one
+    /// byte in postcard.
+    fn from_an_older_peer(s: &Settings) -> Vec<u8> {
+        assert_eq!(s.off_head_power_off_min, None);
+        let mut bytes = postcard::to_allocvec(&Frame::Settings(s.clone())).unwrap();
+        assert_eq!(bytes.pop(), Some(0));
+        bytes
+    }
+
+    #[test]
+    fn a_settings_frame_from_an_older_peer_still_decodes() {
+        for s in [
+            Settings::default(),
+            Settings {
+                audio_volume: Some(87),
+                screen_timeout_s: Some(15),
+                locale: Some(Locale::It),
+                radios: Some(RadioState {
+                    wifi_on: true,
+                    bt_on: false,
+                    airplane_mode: false,
+                    wifi_ssid: Some("home".into()),
+                    wifi_ip: None,
+                }),
+                ..Default::default()
+            },
+        ] {
+            let bytes = from_an_older_peer(&s);
+            assert_eq!(
+                crate::decode_payload(&bytes).unwrap(),
+                Frame::Settings(s.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn the_new_field_survives_the_wire_and_the_json_projection() {
+        for minutes in [0, 30, 720] {
+            let f = Frame::SettingsSet(Settings {
+                off_head_power_off_min: Some(minutes),
+                ..Default::default()
+            });
+            let bytes = postcard::to_allocvec(&f).unwrap();
+            assert_eq!(crate::decode_payload(&bytes).unwrap(), f);
+        }
+        let s: Settings = serde_json::from_str(
+            r#"{"brightness":null,"head_wake":null,"head_wake_angle_deg":null,
+                "on_head_detection":null,"audio_volume":null,"time_24h":null,"timezone_id":null,
+                "power_saver":null,"deep_sleep":null,"deep_sleep_idle_s":null,"wink":null,
+                "screen_timeout_s":null,"nudge":null,"locale":null,"radios":null}"#,
+        )
+        .unwrap();
+        assert_eq!(s.off_head_power_off_min, None);
     }
 
     #[test]

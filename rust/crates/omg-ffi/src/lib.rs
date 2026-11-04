@@ -223,6 +223,9 @@ pub struct GlassSettings {
     /// Idle before suspending, seconds.
     #[uniffi(default)]
     pub deep_sleep_idle_s: Option<u32>,
+    /// Minutes off the head before powering off: 0 = never, at most 720.
+    #[uniffi(default)]
+    pub off_head_power_off_min: Option<u32>,
     /// Wink to capture.
     #[uniffi(default)]
     pub wink: Option<bool>,
@@ -250,6 +253,7 @@ impl From<&Settings> for GlassSettings {
             power_saver: s.power_saver,
             deep_sleep: s.deep_sleep,
             deep_sleep_idle_s: s.deep_sleep_idle_s,
+            off_head_power_off_min: s.off_head_power_off_min,
             wink: s.wink,
             screen_timeout_s: s.screen_timeout_s,
             nudge: s.nudge,
@@ -275,6 +279,7 @@ impl From<&GlassSettings> for Settings {
             power_saver: s.power_saver,
             deep_sleep: s.deep_sleep,
             deep_sleep_idle_s: s.deep_sleep_idle_s,
+            off_head_power_off_min: s.off_head_power_off_min,
             wink: s.wink,
             screen_timeout_s: s.screen_timeout_s,
             nudge: s.nudge,

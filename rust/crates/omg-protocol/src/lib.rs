@@ -30,6 +30,9 @@
 //! Today's decoders do not do that yet: an unknown discriminant surfaces as a postcard
 //! error and closes the link (on glassd too). So a feature group that adds variants has
 //! to be gated by a [`capability`], as [`notes`] is.
+//!
+//! A struct cannot gain fields in general, since postcard is positional. [`Settings`] is the
+//! exception: it ends its frame, so new optional fields can go at its end (see its last field).
 
 pub mod bootstrap;
 pub mod error;
