@@ -194,32 +194,46 @@ impl From<NoteLocale> for omg_protocol::Locale {
 #[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
 pub struct GlassSettings {
     /// Prism brightness, 0-100.
+    #[uniffi(default)]
     pub brightness: Option<u32>,
     /// Wake on looking up.
+    #[uniffi(default)]
     pub head_wake: Option<bool>,
     /// The look-up angle, degrees.
+    #[uniffi(default)]
     pub head_wake_angle_deg: Option<u32>,
     /// On-head detection.
+    #[uniffi(default)]
     pub on_head_detection: Option<bool>,
     /// Earpiece volume, 0-100.
+    #[uniffi(default)]
     pub audio_volume: Option<u32>,
     /// 24-hour clock.
+    #[uniffi(default)]
     pub time_24h: Option<bool>,
     /// Index into [`time_zone_names`].
+    #[uniffi(default)]
     pub timezone_id: Option<u32>,
     /// Energy policy.
+    #[uniffi(default)]
     pub power_saver: Option<bool>,
     /// Suspend to RAM when idle.
+    #[uniffi(default)]
     pub deep_sleep: Option<bool>,
     /// Idle before suspending, seconds.
+    #[uniffi(default)]
     pub deep_sleep_idle_s: Option<u32>,
     /// Wink to capture.
+    #[uniffi(default)]
     pub wink: Option<bool>,
     /// Screen timeout, seconds.
+    #[uniffi(default)]
     pub screen_timeout_s: Option<u32>,
     /// Head nudge to wake.
+    #[uniffi(default)]
     pub nudge: Option<bool>,
     /// UI language.
+    #[uniffi(default)]
     pub locale: Option<NoteLocale>,
 }
 

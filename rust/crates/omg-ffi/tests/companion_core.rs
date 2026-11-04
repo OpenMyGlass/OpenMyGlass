@@ -216,6 +216,16 @@ fn settings_can_be_read_and_changed_and_the_bond_survives_a_restart() {
     assert_eq!(changed.deep_sleep, Some(true));
     assert_eq!(changed.locale, Some(NoteLocale::It));
     assert_eq!(changed.screen_timeout_s, Some(15), "untouched fields stay");
+    // Radios have their own frames, and are reported apart from the settings.
+    app.wait_for("the radios", |_| {
+        phone.snapshot().glass.bluetooth_on.is_some()
+    });
+    phone.set_radio(GlassRadio::Wifi, true);
+    let start = Instant::now();
+    while phone.snapshot().glass.wifi_on != Some(true) {
+        assert!(start.elapsed() < Duration::from_secs(10), "no radio state");
+        thread::sleep(Duration::from_millis(5));
+    }
     app.close();
     assert_eq!(phone.snapshot().phase, LinkPhase::Down);
 

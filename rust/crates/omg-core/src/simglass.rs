@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use omg_protocol::{
     capability, BatteryStatus, Frame, GlassStatus, Locale, LocaleChanged, NotificationAction,
-    NotificationChoice, RadioState, Settings,
+    NotificationChoice, Radio, RadioState, Settings,
 };
 use omg_transport::{Link, Stream};
 use tokio::sync::mpsc;
@@ -294,16 +294,22 @@ impl SimHandler {
             Frame::NotificationRemoved(r) => {
                 debug!(key = %r.key, "sim-glass: notification removed");
             }
-            Frame::SetRadio(_) | Frame::SetAirplaneMode(_) => {
-                // SCAFFOLD: a real glassd drives rfkill/wpa_supplicant/bluez here.
-                out.push(Frame::RadioState(RadioState {
-                    wifi_on: false,
-                    bt_on: true,
-                    airplane_mode: false,
-                    wifi_ssid: None,
-                    wifi_ip: None,
-                }));
-            }
+            // A real glassd drives rfkill/wpa_supplicant/bluez here. The sim only echoes the
+            // request over its canned state: Wi-Fi off, Bluetooth on.
+            Frame::SetRadio(r) => out.push(Frame::RadioState(RadioState {
+                wifi_on: r.radio == Radio::Wifi && r.on,
+                bt_on: r.radio != Radio::Bt || r.on,
+                airplane_mode: false,
+                wifi_ssid: None,
+                wifi_ip: None,
+            })),
+            Frame::SetAirplaneMode(a) => out.push(Frame::RadioState(RadioState {
+                wifi_on: false,
+                bt_on: !a.on,
+                airplane_mode: a.on,
+                wifi_ssid: None,
+                wifi_ip: None,
+            })),
             other => {
                 debug!(frame = other.wire_name(), "sim-glass: unhandled (scaffold)");
             }
