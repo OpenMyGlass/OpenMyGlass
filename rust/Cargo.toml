@@ -33,6 +33,7 @@ bytes = "1"
 async-trait = "0.1"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 getrandom = "0.2"
+sha2 = "0.10"
 base64 = "0.22"
 qrcode = "0.14"
 clap = { version = "4", features = ["derive"] }

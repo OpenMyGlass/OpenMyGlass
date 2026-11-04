@@ -1,0 +1,121 @@
+# Notes with attachments and deferred sync
+
+A note is taken on the Glass: text, a voice recording, and one or more photos or a video. It stays on the Glass until the companion holds a verified copy. If the companion is away, the note waits and syncs by itself on the next link. Speech-to-text and TTS always run on the companion.
+
+Status: protocol and core logic are done and tested against the simulated Glass over TCP. **glassd does not speak this yet**, and no phone UI exists. Nothing here has run on hardware.
+
+Code: `rust/crates/omg-protocol/src/notes.rs` (frames), `rust/crates/omg-core/src/notes/` (logic).
+
+## Flow
+
+The Glass offers one note at a time, oldest first. The companion pulls.
+
+```text
+Glass                                    Companion
+NoteOffer{manifest}            ->
+                               <-        NoteOfferReply{Accepted{offsets}}
+                               <-        NoteChunkRequest{offset, max_len}   (a small window)
+NoteChunk{offset, data, sha256} ->       check, write
+                               ...
+                                         whole-file SHA-256, sync, rename, persist
+                               <-        NoteAttachmentAck{sha256, verified}
+NoteTranscriptRequest          ->        (after the recording's ack) run STT
+                               <-        NoteTranscript{text}
+NoteTranscriptAck              ->
+                               ...       next attachment
+                               <-        NoteAck{manifest_sha256}
+NoteSyncStatus{pending...}     ->        (when the link comes up and on any change)
+```
+
+TTS is pulled the same way: `NoteTtsRequest` → `NoteTtsReady` → `NoteTtsChunkRequest` / `NoteTtsChunk` → `NoteTtsRelease`. It is not queued: without a link there is no speech, and the Glass has no engine to fall back on.
+
+The live `Dictation*` frames are untouched. They remain a scaffold for reply dictation, a separate flow.
+
+## Guarantees
+
+| Situation | What happens |
+|---|---|
+| Link drops, cleanly or mid-frame | The companion syncs what it has. The next offer resumes at that byte. |
+| Companion crashes | The record never claims more than was synced. The file is cut back to the last checkpoint (every 1 MiB), so at most that much is fetched again. |
+| Glass crashes | The queue is on disk. Sealing is one atomic rename, so a note is there whole or not at all. |
+| Corrupted chunk | Its SHA-256 fails, it is not written, the companion sends `NoteChunkReject` and fetches it again. After 8 in a row the transfer pauses. |
+| Whole file does not match | Starts over, up to 3 times. The Glass re-hashes its copy. If that copy is bad, the note is `Blocked`, kept, and the owner must be told. |
+| Duplicate offer | Changes nothing. A completed note gets its acknowledgements again and no bytes move. |
+| Same id, different manifest | `Rejected{ManifestConflict}`. Nothing is overwritten. |
+| Lost acknowledgement | The Glass repeats its offer on a timer and on the next link. |
+
+**Nothing on the Glass is deleted until verified.** The one path to a delete requires a verified ack for every attachment whose digest matches the Glass's own manifest, plus a `NoteAck` matching the manifest digest. The companion sends those only after the file is synced, renamed and recorded. Anything else is ignored. Even then, the default is to keep the files, as for media sync (`DeletePolicy`).
+
+Both state machines are pure: no I/O, no clock, no randomness. They take events and `now_ms` and return ordered effects, so all of the above is unit-tested with invented time. Timers are not persisted, so a wrong Glass clock cannot park a note for good, and the queue orders by a local counter rather than by time.
+
+## Limits
+
+Constants in `omg_protocol::notes`, checked by both sides.
+
+| What | Limit |
+|---|---|
+| Attachments | At most 1 recording, plus up to 32 photos or 1 video (not both) |
+| Recording / photo / video | 128 MiB / 32 MiB / 2 GiB |
+| One note, in total | 3 GiB |
+| Note text / transcript in a frame | 32 KiB / 48 KiB (cut on a character boundary; the companion keeps it all) |
+| Chunk | 48 KiB, so frames stay under the 64 KiB the Bluetooth path is designed around |
+
+## Chunk size and links
+
+The side that pulls chooses the chunk size per request, from a `LinkProfile` given by whoever owns the link. The protocol and the state machines never name a radio.
+
+| Profile | Chunk × window | Attachments that sync on their own | Meant for |
+|---|---|---|---|
+| `constrained` | 4 KiB × 2 | up to 16 MiB | Bluetooth LE |
+| `moderate` | 16 KiB × 2 | up to 64 MiB | Bluetooth Classic |
+| `fast` | 48 KiB × 8 | any | Wi-Fi |
+
+A small window keeps navigation and notification frames from waiting behind a long queue of chunks. **These numbers are starting values, not measurements**: RFCOMM throughput on the Glass is still unmeasured (see `media-sync.md`).
+
+Within a note the recording goes first, then smaller files before bigger ones, so a transcript does not wait for a video. An attachment over the profile's limit is left for a faster link (`Deferred{NeedsFasterLink}`) without holding up the next note. `media-sync.md` keeps Bluetooth pulls manual for battery reasons; this limit is how notes respect that while still syncing "on their own". Asking the Glass to bring Wi-Fi up (`WifiBringUpRequest`) is not wired yet.
+
+## Compatibility
+
+- New frames are appended to `Frame`; a test pins the old discriminants. `PROTOCOL_VERSION` stays 1, because `exchange_hello` rejects any mismatch and a bump would cut off every existing glassd.
+- **A peer that does not know a frame closes the link**: postcard returns a decode error, and both `FrameCodec` and glassd's decoder treat that as fatal, whatever the general rule in `lib.rs` asks for. So note frames go only to a peer that advertised `capability::NOTES_SYNC`. It is deliberately outside `BACKBONE`, and a test checks that a companion without it sees none.
+
+## On-disk layout
+
+One directory per note under a root the platform provides: `<id>/record.json`, `att-<n>.bin`, and `att-<n>.part` while receiving. Paths are built only from the hex id and a number, so a peer cannot name a path. Durable writes are temp file, fsync, rename, fsync directory. An unreadable record is moved aside to `.corrupt-<id>` with its files, never deleted, and the rest of the queue loads.
+
+## Speech engines
+
+`SpeechToText` and `TextToSpeech` are the only platform traits here, implemented by the phone apps. No engine ships in the core; `NoEngine` reports `EngineUnavailable`, which reaches the Glass as the reason there is no text. Calls are blocking and always run away from the link (`SpeechJob`), since transcribing takes far longer than a heartbeat. An interrupted transcription runs again on the next link.
+
+## Try it
+
+```sh
+cd rust
+cargo run -p omg-cli -- --store /tmp/g.json note-add --notes-dir /tmp/g --voice a.wav --photo b.jpg
+cargo run -p omg-cli -- --store /tmp/g.json sim-glass --notes-dir /tmp/g \
+    --read-back --corrupt-chunk 2 --drop-after-chunks 5 &
+cargo run -p omg-cli -- --store /tmp/c.json notes-sync --connect 127.0.0.1:7700 \
+    --notes-dir /tmp/c --fake-speech --reconnect 3
+```
+
+`--fake-speech` uses placeholder engines. `--link` picks a profile; it is still TCP underneath.
+
+## Known limits
+
+- SHA-256 of a finished file runs on the link's thread. On a 2 GiB video that stalls the link for some seconds.
+- The Glass queues chunks for reading as fast as they are requested. A bonded peer ignoring the window could grow that queue; glassd should cap it.
+- Reconnecting after a dropped link is up to the frontend (the CLI's `--reconnect`). The core has no general auto-reconnect yet, as `companion-rust-core.md` says.
+- glassd pins `omg-protocol` by commit and depends on it only, not on `omg-core`, which pulls in tokio. It needs either its own driver over `NoteSender`, or these modules split out into a crate without tokio.
+
+## Exposing the core to Kotlin and Swift
+
+**Recommendation: UniFFI, in a new thin crate `omg-ffi`.** Nothing is added yet. No reason against it turned up for this API.
+
+- One Rust definition gives both Kotlin and Swift bindings, and it supports foreign implementations of Rust traits, which is what the speech engines need. Its licence (MPL-2.0) is compatible with GPL-3.0; confirm this and the current version when adding it.
+- The surface is small because the driver is already synchronous and transport-free: objects with `on_frame`, `tick`, `link_up`, `link_down`, `take_events`.
+- **The app owns the socket.** This is the point for iOS: `BluetoothSocket` on Android, Core Bluetooth or `Network.framework` on iOS, and bytes in and out through the core. iOS has no Bluetooth Classic for this use, so the iOS path is BLE or Wi-Fi.
+- Cross the boundary with encoded frames as bytes, not the 94-variant `Frame` enum: the apps never need to look inside a frame, and the schema stays out of the bindings. Hand-written records cover what the UI shows (`NoteSyncStatus`, events, note lists).
+- File contents do not cross: engines get a path, and chunks stay on the Rust side.
+- `SpeechJob` runs on a thread the app controls, so a blocking engine call is fine. Keep `uniffi` out of `omg-core` so glassd and the CLI never build it.
+
+Build: `cargo-ndk` for Android (`cdylib` + AAR), an XCFramework from a `staticlib` for iOS. iOS suspends apps in the background, so "sync on its own" there depends on Core Bluetooth background modes and needs testing on a device. A Glass-side BLE peripheral does not exist yet either.

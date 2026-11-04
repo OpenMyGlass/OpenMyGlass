@@ -7,14 +7,17 @@
 //! * [`store`] — persistent state: our identity + the single bonded peer.
 //! * [`session`] — the link state machine: Hello, one-time pairing, mutual auth, then
 //!   heartbeat / locale / status / notifications.
+//! * [`notes`] — notes with attachments and deferred sync: pure state machines for both
+//!   sides, a crash-safe queue, and the speech engine traits the phone apps implement.
 //! * [`simglass`] — a reusable simulated-Glass peer for tests and the CLI, so the whole
 //!   link runs end-to-end without hardware. It mirrors what glassd must do.
 //!
-//! The backbone (pairing, heartbeat, locale, battery/status, notification forwarding) is
-//! implemented and tested end-to-end. Everything else in [`omg_protocol`] is typed and
-//! scaffolded.
+//! The backbone (pairing, heartbeat, locale, battery/status, notification forwarding) and
+//! note sync are implemented and tested end-to-end. Everything else in [`omg_protocol`] is
+//! typed and scaffolded.
 
 pub mod identity;
+pub mod notes;
 pub mod session;
 pub mod simglass;
 pub mod store;
@@ -83,6 +86,10 @@ pub enum CoreError {
     /// The peer sent an [`ErrorMsg`].
     #[error("peer error: {0:?}")]
     PeerError(ErrorMsg),
+
+    /// A note breaks a protocol limit, or could not be sealed.
+    #[error("invalid note: {0}")]
+    InvalidNote(String),
 
     /// The link closed unexpectedly mid-handshake.
     #[error("unexpected end of stream")]

@@ -213,6 +213,46 @@ pub enum Frame {
     TetherRequest(TetherRequest),
     /// Companion -> Glass: tethering state.
     TetherState(TetherState),
+
+    // ===================== Notes with attachments (IMPLEMENTED in omg-core) ====
+    // Send only to a peer that advertised `capability::NOTES_SYNC`: an older peer treats
+    // an unknown variant as a fatal decode error. See `crate::notes`.
+    /// Glass -> Companion: a note is waiting.
+    NoteOffer(crate::notes::NoteOffer),
+    /// Companion -> Glass: accepted with resume offsets, already held, deferred or refused.
+    NoteOfferReply(crate::notes::NoteOfferReply),
+    /// Companion -> Glass: send these bytes of an attachment.
+    NoteChunkRequest(crate::notes::NoteChunkRequest),
+    /// Glass -> Companion: bytes of an attachment, with their SHA-256.
+    NoteChunk(crate::notes::NoteChunk),
+    /// Companion -> Glass: a chunk was discarded and will be requested again.
+    NoteChunkReject(crate::notes::NoteChunkReject),
+    /// Glass -> Companion: a chunk request cannot be served.
+    NoteChunkUnavailable(crate::notes::NoteChunkUnavailable),
+    /// Companion -> Glass: verdict on a whole attachment.
+    NoteAttachmentAck(crate::notes::NoteAttachmentAck),
+    /// Companion -> Glass: the whole note is durable and verified.
+    NoteAck(crate::notes::NoteAck),
+    /// Glass -> Companion: what is still waiting.
+    NoteSyncStatus(crate::notes::NoteSyncStatus),
+    /// Glass -> Companion: transcribe this note's voice recording.
+    NoteTranscriptRequest(crate::notes::NoteTranscriptRequest),
+    /// Companion -> Glass: the transcript, or why there is none.
+    NoteTranscript(crate::notes::NoteTranscript),
+    /// Glass -> Companion: transcript received.
+    NoteTranscriptAck(crate::notes::NoteTranscriptAck),
+    /// Glass -> Companion: speak this, for this note.
+    NoteTtsRequest(crate::notes::NoteTtsRequest),
+    /// Companion -> Glass: synthesized audio is ready to pull.
+    NoteTtsReady(crate::notes::NoteTtsReady),
+    /// Companion -> Glass: no audio for this request.
+    NoteTtsFailed(crate::notes::NoteTtsFailed),
+    /// Glass -> Companion: send these audio bytes.
+    NoteTtsChunkRequest(crate::notes::NoteTtsChunkRequest),
+    /// Companion -> Glass: audio bytes, with their SHA-256.
+    NoteTtsChunk(crate::notes::NoteTtsChunk),
+    /// Glass -> Companion: finished with this audio.
+    NoteTtsRelease(crate::notes::NoteTtsRelease),
 }
 
 impl Frame {
@@ -295,6 +335,24 @@ impl Frame {
             Frame::OtaDone(_) => "OtaDone",
             Frame::TetherRequest(_) => "TetherRequest",
             Frame::TetherState(_) => "TetherState",
+            Frame::NoteOffer(_) => "NoteOffer",
+            Frame::NoteOfferReply(_) => "NoteOfferReply",
+            Frame::NoteChunkRequest(_) => "NoteChunkRequest",
+            Frame::NoteChunk(_) => "NoteChunk",
+            Frame::NoteChunkReject(_) => "NoteChunkReject",
+            Frame::NoteChunkUnavailable(_) => "NoteChunkUnavailable",
+            Frame::NoteAttachmentAck(_) => "NoteAttachmentAck",
+            Frame::NoteAck(_) => "NoteAck",
+            Frame::NoteSyncStatus(_) => "NoteSyncStatus",
+            Frame::NoteTranscriptRequest(_) => "NoteTranscriptRequest",
+            Frame::NoteTranscript(_) => "NoteTranscript",
+            Frame::NoteTranscriptAck(_) => "NoteTranscriptAck",
+            Frame::NoteTtsRequest(_) => "NoteTtsRequest",
+            Frame::NoteTtsReady(_) => "NoteTtsReady",
+            Frame::NoteTtsFailed(_) => "NoteTtsFailed",
+            Frame::NoteTtsChunkRequest(_) => "NoteTtsChunkRequest",
+            Frame::NoteTtsChunk(_) => "NoteTtsChunk",
+            Frame::NoteTtsRelease(_) => "NoteTtsRelease",
         }
     }
 }

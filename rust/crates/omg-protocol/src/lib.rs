@@ -26,16 +26,22 @@
 //! the two. Because postcard enums are encoded by discriminant, **new variants must be
 //! appended at the end of [`Frame`]** and a peer must tolerate (log + skip) a
 //! [`WireError::UnknownVariant`] from a newer peer for anything beyond its known set.
+//!
+//! Today's decoders do not do that yet: an unknown discriminant surfaces as a postcard
+//! error and closes the link (on glassd too). So a feature group that adds variants has
+//! to be gated by a [`capability`], as [`notes`] is.
 
 pub mod bootstrap;
 pub mod error;
 pub mod locale;
 pub mod messages;
+pub mod notes;
 pub mod wire;
 
 pub use error::WireError;
 pub use locale::Locale;
 pub use messages::*;
+pub use notes::*;
 pub use wire::{decode_payload, encode_payload, MAX_FRAME_LEN};
 
 /// Protocol version advertised in [`messages::Hello`]. Bump on any breaking schema change.
@@ -60,6 +66,10 @@ pub mod capability {
     pub const RADIO_CONTROL: &str = "radio-control";
     pub const AIRPLANE: &str = "airplane";
     pub const LOCALE: &str = "locale";
+    /// Notes with attachments and deferred sync ([`crate::notes`]). Deliberately not in
+    /// [`BACKBONE`]: a peer advertises it only once it implements those frames, and no
+    /// note frame may be sent to a peer that did not advertise it.
+    pub const NOTES_SYNC: &str = "notes-sync";
 
     /// Everything the current companion core knows how to speak at the backbone level.
     pub const BACKBONE: &[&str] = &[NOTIFICATIONS, LOCALE, RADIO_CONTROL, AIRPLANE];
