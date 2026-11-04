@@ -131,9 +131,23 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --all-features --workspace
-      - name: omg-core stays free of tokio
+      - name: omg-core and omg-ffi stay free of tokio
         run: |
-          if cargo tree -p omg-core -e normal | grep -E ' (tokio|futures|omg-transport) '; then
-            echo "omg-core must build without an async runtime: see docs/companion-rust-core.md" >&2
-            exit 1
-          fi
+          for crate in omg-core omg-ffi; do
+            if cargo tree -p "$crate" -e normal | grep -E ' (tokio|futures|omg-transport) '; then
+              echo "$crate must build without an async runtime: see docs/companion-rust-core.md" >&2
+              exit 1
+            fi
+          done
+      - name: Kotlin and Swift bindings generate
+        run: |
+          cargo build -p omg-ffi
+          cargo run -p omg-ffi --features cli --bin uniffi-bindgen -- generate \
+            --library target/debug/libomg_ffi.so --language kotlin --language swift \
+            --no-format --out-dir "$RUNNER_TEMP/bindings"
+          test -s "$RUNNER_TEMP/bindings/OmgCore.swift"
+          test -s "$RUNNER_TEMP/bindings/org/openmyglass/corebindings/omg_ffi.kt"
+      - name: The core compiles for iOS
+        run: |
+          rustup target add aarch64-apple-ios
+          cargo check -p omg-ffi --target aarch64-apple-ios

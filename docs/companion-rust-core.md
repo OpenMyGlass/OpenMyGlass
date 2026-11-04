@@ -72,6 +72,7 @@ behind a trait and is stubbed for now (see §4).
 | `omg-transport` | Frame codec + `Transport` trait; `TcpTransport` (works), `BtRfcommTransport` (stub); power-aware `TransportManager`. |
 | `omg-core` | ed25519 identity, persistent one-time pairing, mutual auth, notes, and the handshake as a pure state machine. Free of tokio; see below. The async session and the simulated Glass are behind the `async-link` feature. |
 | `omg-qr` | Renders a `WifiBootstrap` as a scannable QR (terminal + SVG), offline. |
+| `omg-ffi` | The core for Kotlin and Swift, through UniFFI: see [`companion-mobile.md`](companion-mobile.md). |
 | `omg-cli` | The `omg` binary: `identity`, `qr`, `sim-glass`, `link`, `daemon`, `note-add`, `notes-sync`. |
 
 Build/test: `cd rust && cargo test --all-features --workspace && cargo clippy --all-targets --all-features && cargo fmt --check`.
@@ -191,7 +192,7 @@ tables live in glass-apps (shared by Model A and B); the companion is just the p
 - TCP transport (dial + listen); QR bootstrap generation + payload round-trip.
 - `omg` CLI driving all of the above against `omg sim-glass`.
 - Notes with attachments and deferred sync, including the speech engine traits: see
-  [`companion-notes-sync.md`](companion-notes-sync.md). glassd does not speak it yet.
+  [`companion-notes-sync.md`](companion-notes-sync.md).
 
 **Scaffolded** — typed in `omg-protocol`, handlers stubbed (`// SCAFFOLD`): radio control
 + airplane, on-demand Wi-Fi coordination, time sync, location + turn-by-turn nav,

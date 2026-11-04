@@ -1,0 +1,7 @@
+[bindings.kotlin]
+package_name = "org.openmyglass.corebindings"
+
+[bindings.swift]
+module_name = "OmgCore"
+ffi_module_name = "OmgCoreFFI"
+ffi_module_filename = "OmgCoreFFI"

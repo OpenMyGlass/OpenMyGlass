@@ -1,0 +1,33 @@
+[package]
+name = "omg-ffi"
+description = "OpenMyGlass companion core for Kotlin and Swift: the UniFFI layer the phone apps build on. The app owns the socket; nothing here names a radio."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+# Only for generating the Kotlin and Swift sources. Never part of an app.
+cli = ["uniffi/cli"]
+
+[dependencies]
+omg-core = { path = "../omg-core" }
+omg-protocol = { path = "../omg-protocol" }
+thiserror.workspace = true
+uniffi = "=0.32.2"
+
+[dev-dependencies]
+omg-core = { path = "../omg-core", features = ["async-link"] }
+omg-transport = { path = "../omg-transport" }
+tokio = { workspace = true }
+tempfile = "3"
