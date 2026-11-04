@@ -2,7 +2,7 @@
 
 A shared Rust core with thin native frontends, on Android and iOS from the start. This page covers how a phone app uses the core. The core itself is in [`companion-rust-core.md`](companion-rust-core.md), and notes in [`companion-notes-sync.md`](companion-notes-sync.md).
 
-Status: `omg-ffi` is tested on the host, against the simulated Glass over TCP. It has run on no iOS device, and Swift has only had its bindings generated and the Rust side compile-checked for `aarch64-apple-ios`.
+Status: `omg-ffi` is tested on the host against the simulated Glass over TCP, and the Android app has run on a phone against a glassd on a PC. Nothing has reached a real Glass. It has run on no iOS device, and Swift has only had its bindings generated and the Rust side compile-checked for `aarch64-apple-ios`.
 
 ## The binding layer: UniFFI in `omg-ffi`
 
@@ -47,6 +47,19 @@ For a UI: `snapshot()` is the link and what the Glass last reported, `notes()` i
 - **Pairing:** `link_up(profile, allow_pairing)`. Set `allow_pairing` only when the owner asked to pair.
 - **Notes from the Glass** arrive by themselves. Attachment paths are set once a file is verified.
 - **Notes on the phone** (`add_phone_note`) are stored on the phone only. The protocol syncs in one direction, from Glass to phone.
+
+## The Android app (`android/companion`)
+
+A first app, with no design work yet: every screen is built in code, the text is English only, and all logic is in the core. `./gradlew :android:companion:assembleDebug` builds the core for `arm64-v8a` and generates the bindings, so it needs `cargo` and `rustup target add aarch64-linux-android`. Other ABIs are one line in `RustAbi`.
+
+To try it without a Glass, run a host glassd with its hardware back ends off (`--display log --glasshub none --radio off --power off` and so on), then `adb reverse tcp:7700 tcp:<port>`, and Connect to the default `127.0.0.1:7700`. `crates/glass-api/examples/note-add.rs` in glass-services adds notes to it.
+
+Known limits:
+
+- The link is TCP only. RFCOMM is one more `ByteLink`, on Android only.
+- The link lives as long as the app's process: there is no foreground service, so nothing syncs while Android has stopped the app.
+- Speech uses the platform's engines, and a phone may have none. On the test phone (crDroid, no Google apps) neither exists, so notes say there is no transcript, and `AndroidTts` and `AndroidStt` have never produced anything. The fix is to bundle engines. Vosk is already used in `android/app`.
+- Notes cannot be deleted from the app, and a note cannot be sent to the Glass.
 
 ## Speech
 

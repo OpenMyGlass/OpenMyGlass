@@ -14,6 +14,14 @@ OpenMyGlass is licensed under GPL-3.0 (see [`LICENSE`](LICENSE)). The phone app 
 | [Kotlin standard library](https://github.com/JetBrains/kotlin) | 2.4.21 | Apache-2.0 | |
 | [AndroidX Annotation](https://developer.android.com/jetpack/androidx/releases/annotation) | 1.11.0 | Apache-2.0 | |
 
+## Bundled in the new companion app (`android/companion`)
+
+| Component | Version | License | Notes |
+|---|---|---|---|
+| [JNA](https://github.com/java-native-access/jna) (`net.java.dev.jna:jna`, aar) | 5.18.1 | Apache-2.0 (chosen from Apache-2.0 / LGPL-2.1) | Loads the Rust core |
+| [UniFFI](https://github.com/mozilla/uniffi-rs) (Rust crate and generated bindings) | 0.32.2 | MPL-2.0 | Binding layer of `rust/crates/omg-ffi` |
+| Kotlin standard library | 2.4.21 | Apache-2.0 | |
+
 ## Downloaded at runtime (only when the owner asks, in settings)
 
 | Model | License | Source |

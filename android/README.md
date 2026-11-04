@@ -3,6 +3,7 @@
 | Module | Content |
 |---|---|
 | `app/` (`:android:app`) | Phone app (Kotlin, minSdk 29, targetSdk 36). Debug screen, navigation sources, connection settings (paired Glass, Bluetooth or TCP debug bridge) and `OpenMyGlassService`: a `connectedDevice` foreground service that keeps the bridge and companion links alive, with automatic reconnection. Needs the Bluetooth (`BLUETOOTH_CONNECT`) and notification permissions. |
+| `companion/` (`:android:companion`) | The new companion: a thin shell over the shared Rust core. The link, every Glass setting, and notes. See [`docs/companion-mobile.md`](../docs/companion-mobile.md). |
 | `osmand-api/` (`:android:osmand-api`) | OsmAnd's AIDL client API, vendored unchanged under GPLv3 — see [`osmand-api/NOTICE.md`](osmand-api/NOTICE.md). |
 
 Build: `./gradlew :android:app:assembleDebug` (needs `local.properties` with `sdk.dir=…`, not committed).

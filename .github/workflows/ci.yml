@@ -91,6 +91,9 @@ jobs:
             tasks: ":tools:sim-glass:check"
           - part: android
             tasks: ":android:app:testDebugUnitTest :android:app:assembleDebug :android:osmand-api:assembleDebug"
+          - part: companion-android
+            tasks: ":android:companion:testDebugUnitTest :android:companion:assembleDebug"
+            rust: true
           - part: glass-xe
             # Google's GDK jar is never downloaded in CI: the glass flavor builds against OpenMyGlass's own stubs
             tasks: "-PgdkStubs=true :glass-xe:app:testGlassDebugUnitTest :glass-xe:app:testEmulatorDebugUnitTest :glass-xe:app:assembleGlassDebug :glass-xe:app:assembleEmulatorDebug"
@@ -108,6 +111,12 @@ jobs:
       - name: Install extra Android SDK packages
         if: matrix.sdk
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "${{ matrix.sdk }}" > /dev/null
+      - name: Rust target for the companion core
+        if: matrix.rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add aarch64-linux-android
       - name: Gradle ${{ matrix.tasks }}
         run: ./gradlew --stacktrace ${{ matrix.tasks }}
 
