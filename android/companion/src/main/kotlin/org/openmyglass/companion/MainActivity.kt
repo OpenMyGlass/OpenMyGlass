@@ -261,6 +261,21 @@ class MainActivity : Activity() {
         number("deep_sleep_idle", "Idle before deep sleep (s)", 5, 1800, { it.deepSleepIdleS }) {
             GlassSettings(deepSleepIdleS = it)
         }
+        // The launcher's choices. A value set elsewhere (glassd allows up to 720) shows as "Other",
+        // and picking "Other" leaves it unchanged.
+        val powerOffMinutes = listOf(10u, 30u, 60u, 120u, 0u)
+        choice(
+            "off_head_power_off",
+            "Power off when removed",
+            listOf("10 min", "30 min", "60 min", "120 min", "Never", "Other"),
+            { s ->
+                s.offHeadPowerOffMin?.let { m ->
+                    powerOffMinutes.indexOf(m).takeIf { it >= 0 } ?: powerOffMinutes.size
+                }
+            },
+        ) { position ->
+            powerOffMinutes.getOrNull(position)?.let { GlassSettings(offHeadPowerOffMin = it) }
+        }
 
         heading("Time and language")
         toggle("time_24h", "24-hour clock", { it.time24h }) { GlassSettings(time24h = it) }
@@ -275,7 +290,7 @@ class MainActivity : Activity() {
                 it.screenTimeoutS == null -> null
                 else -> it.locale?.let { l -> locales.indexOf(l) + 1 } ?: 0
             }
-        }) { position -> locales.getOrNull(position - 1)?.let { GlassSettings(locale = it) } ?: GlassSettings() }
+        }) { position -> locales.getOrNull(position - 1)?.let { GlassSettings(locale = it) } }
         return settingsBox
     }
 
@@ -373,7 +388,7 @@ class MainActivity : Activity() {
         label: String,
         options: List<String>,
         read: (GlassSettings) -> Int?,
-        change: (Int) -> GlassSettings,
+        change: (Int) -> GlassSettings?,
     ) {
         val title = TextView(this).apply { text = label; visibility = View.GONE }
         val spinner = Spinner(this).apply {
@@ -383,7 +398,10 @@ class MainActivity : Activity() {
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(p: AdapterView<*>?, v: View?, position: Int, id: Long) {
                     val known = core.snapshot().glass.settings ?: return
-                    if (read(known) != position) send(change(position))
+                    val current = read(known)
+                    if (current == position) return
+                    // An entry that only describes a state ("Other") goes back to the real value.
+                    change(position)?.let { send(it) } ?: current?.let { p?.setSelection(it) }
                 }
 
                 override fun onNothingSelected(p: AdapterView<*>?) = Unit
