@@ -34,6 +34,9 @@ pub const MAX_PHOTO_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_VIDEO_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Most photos on one note.
 pub const MAX_PHOTOS_PER_NOTE: usize = 32;
+/// Whether one note may carry photos and a video together. Owner default, still open:
+/// see `docs/companion-notes-sync.md`. Set to `false` to allow one or the other only.
+pub const ALLOW_PHOTOS_WITH_VIDEO: bool = true;
 /// Largest sum of attachment sizes on one note.
 pub const MAX_NOTE_TOTAL_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 /// Longest attachment MIME type, bytes.
@@ -153,7 +156,7 @@ pub enum ManifestError {
     TooManyPhotos,
     /// More than one video.
     TooManyVideos,
-    /// Photos and a video on one note: a note carries one or more photos, or a video.
+    /// Photos and a video on one note, while [`ALLOW_PHOTOS_WITH_VIDEO`] is off.
     PhotosAndVideo,
     /// An attachment is empty or over its kind's limit.
     BadAttachmentSize(AttachmentId),
@@ -205,7 +208,7 @@ impl NoteManifest {
         if videos > 1 {
             return Err(ManifestError::TooManyVideos);
         }
-        if photos > 0 && videos > 0 {
+        if !ALLOW_PHOTOS_WITH_VIDEO && photos > 0 && videos > 0 {
             return Err(ManifestError::PhotosAndVideo);
         }
         if total > MAX_NOTE_TOTAL_BYTES {
@@ -585,7 +588,7 @@ mod tests {
         with_text.text = Some("x".repeat(MAX_NOTE_TEXT_BYTES + 1));
         assert_eq!(with_text.validate(), Err(ManifestError::TextTooLong));
 
-        // Voice + photos and voice + video are the two legal full shapes.
+        // Voice with photos, a video, or (see ALLOW_PHOTOS_WITH_VIDEO) both.
         let voice = || meta(0, VoiceRecording, 10);
         assert_eq!(
             manifest(vec![voice(), meta(1, Photo, 1), meta(2, Photo, 1)]).validate(),
@@ -596,10 +599,12 @@ mod tests {
             Ok(())
         );
 
-        assert_eq!(
-            manifest(vec![meta(1, Photo, 1), meta(2, Video, 1)]).validate(),
-            Err(ManifestError::PhotosAndVideo)
-        );
+        let mixed = manifest(vec![meta(1, Photo, 1), meta(2, Video, 1)]).validate();
+        if ALLOW_PHOTOS_WITH_VIDEO {
+            assert_eq!(mixed, Ok(()));
+        } else {
+            assert_eq!(mixed, Err(ManifestError::PhotosAndVideo));
+        }
         assert_eq!(
             manifest(vec![meta(1, Video, 1), meta(2, Video, 1)]).validate(),
             Err(ManifestError::TooManyVideos)

@@ -77,8 +77,8 @@ fn deferred_note_survives_faults_and_arrives_byte_identical() {
         .unwrap()
         .to_string();
 
-    // A photo plus a video breaks the note rules, and leaves nothing behind.
-    std::fs::write(path("v.mp4"), b"video").unwrap();
+    // An empty attachment breaks the note rules, and leaves nothing behind.
+    std::fs::write(path("v.mp4"), b"").unwrap();
     let refused = omg(
         &glass_store,
         &[

@@ -107,7 +107,7 @@ async fn start_proxy(glass_addr: String, proxy: Proxy) -> (String, Arc<Seen>) {
             tokio::select! {
                 frame = companion.recv() => {
                     let Ok(Some(frame)) = frame else { return };
-                    if omg_core::notes::link::is_note_frame(&frame) {
+                    if omg_core::notes::is_note_frame(&frame) {
                         seen2.note_frames.fetch_add(1, Ordering::SeqCst);
                     }
                     if let Frame::NoteChunkRequest(r) = &frame {
@@ -124,7 +124,7 @@ async fn start_proxy(glass_addr: String, proxy: Proxy) -> (String, Arc<Seen>) {
                 }
                 frame = glass.recv() => {
                     let Ok(Some(mut frame)) = frame else { return };
-                    if omg_core::notes::link::is_note_frame(&frame) {
+                    if omg_core::notes::is_note_frame(&frame) {
                         seen2.note_frames.fetch_add(1, Ordering::SeqCst);
                     }
                     if let Frame::NoteChunk(chunk) = &mut frame {

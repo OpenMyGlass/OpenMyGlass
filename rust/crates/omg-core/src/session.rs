@@ -9,21 +9,13 @@ use omg_protocol::{
 use omg_transport::{Link, Stream};
 use tracing::{debug, info, warn};
 
+pub use crate::companion_link::PairingMode;
 use crate::{
     identity::{decode_nonce, random_nonce_b64, verify_challenge, Identity},
     now_ms,
     store::PairingRecord,
     CoreError,
 };
-
-/// How a session should treat an unbonded peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PairingMode {
-    /// Only talk to the already-bonded peer; refuse to bond a new one.
-    ReuseOnly,
-    /// Permit a one-time first-pairing with a new peer (user initiated "pair" action).
-    AllowNew,
-}
 
 /// Static per-session configuration.
 #[derive(Debug, Clone)]

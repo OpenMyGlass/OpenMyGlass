@@ -15,7 +15,7 @@ path = "src/main.rs"
 [dependencies]
 omg-protocol = { path = "../omg-protocol" }
 omg-transport = { path = "../omg-transport" }
-omg-core = { path = "../omg-core" }
+omg-core = { path = "../omg-core", features = ["async-link"] }
 omg-qr = { path = "../omg-qr" }
 tokio = { workspace = true, features = ["signal"] }
 clap.workspace = true

@@ -138,7 +138,7 @@ struct NoteAddArgs {
     /// A photo. Repeat for more.
     #[arg(long)]
     photo: Vec<PathBuf>,
-    /// A video. A note holds photos or a video, not both.
+    /// A video.
     #[arg(long)]
     video: Option<PathBuf>,
     /// Language of the note.

@@ -44,7 +44,7 @@ The live `Dictation*` frames are untouched. They remain a scaffold for reply dic
 | Same id, different manifest | `Rejected{ManifestConflict}`. Nothing is overwritten. |
 | Lost acknowledgement | The Glass repeats its offer on a timer and on the next link. |
 
-**Nothing on the Glass is deleted until verified.** The one path to a delete requires a verified ack for every attachment whose digest matches the Glass's own manifest, plus a `NoteAck` matching the manifest digest. The companion sends those only after the file is synced, renamed and recorded. Anything else is ignored. Even then, the default is to keep the files, as for media sync (`DeletePolicy`).
+**Nothing on the Glass is deleted until verified.** The one path to a delete requires a verified ack for every attachment whose digest matches the Glass's own manifest, plus a `NoteAck` matching the manifest digest. The companion sends those only after the file is synced, renamed and recorded. Anything else is ignored. Once that holds, the default is to delete the Glass's copy (`DeletePolicy`).
 
 Both state machines are pure: no I/O, no clock, no randomness. They take events and `now_ms` and return ordered effects, so all of the above is unit-tested with invented time. Timers are not persisted, so a wrong Glass clock cannot park a note for good, and the queue orders by a local counter rather than by time.
 
@@ -54,11 +54,23 @@ Constants in `omg_protocol::notes`, checked by both sides.
 
 | What | Limit |
 |---|---|
-| Attachments | At most 1 recording, plus up to 32 photos or 1 video (not both) |
+| Attachments | At most 1 recording, up to 32 photos and 1 video |
 | Recording / photo / video | 128 MiB / 32 MiB / 2 GiB |
 | One note, in total | 3 GiB |
 | Note text / transcript in a frame | 32 KiB / 48 KiB (cut on a character boundary; the companion keeps it all) |
 | Chunk | 48 KiB, so frames stay under the 64 KiB the Bluetooth path is designed around |
+
+## Open owner decisions
+
+The owner has not answered these yet. Each is one constant, so the answer is a one-line change.
+
+| Question | Default in the code | Where |
+|---|---|---|
+| Delete a note from the Glass after sync? | Yes, only after the phone's verified acknowledgements | `DeletePolicy::default()` in `omg-core` |
+| Automatic sync limit per attachment on a slow link | 64 MiB on Bluetooth Classic, 16 MiB on BLE | `AUTO_SYNC_LIMIT_MODERATE`, `AUTO_SYNC_LIMIT_CONSTRAINED` in `omg-core` |
+| May one note mix photos and video? | Yes | `ALLOW_PHOTOS_WITH_VIDEO` in `omg-protocol` |
+
+glassd pins `omg-core` by commit, so a change here reaches it when the pin moves.
 
 ## Chunk size and links
 
@@ -105,7 +117,6 @@ cargo run -p omg-cli -- --store /tmp/c.json notes-sync --connect 127.0.0.1:7700 
 - SHA-256 of a finished file runs on the link's thread. On a 2 GiB video that stalls the link for some seconds.
 - The Glass queues chunks for reading as fast as they are requested. A bonded peer ignoring the window could grow that queue; glassd should cap it.
 - Reconnecting after a dropped link is up to the frontend (the CLI's `--reconnect`). The core has no general auto-reconnect yet, as `companion-rust-core.md` says.
-- glassd pins `omg-protocol` by commit and depends on it only, not on `omg-core`, which pulls in tokio. It needs either its own driver over `NoteSender`, or these modules split out into a crate without tokio.
 
 ## Exposing the core to Kotlin and Swift
 

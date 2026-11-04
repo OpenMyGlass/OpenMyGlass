@@ -20,13 +20,15 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
+    companion_link::PairingMode,
     identity::Identity,
     notes::{
-        link::{is_note_frame, run_link, Flow, LinkHandler},
+        is_note_frame,
+        link::{run_link, Flow, LinkHandler},
         sender::{DeletePolicy, SenderConfig, SenderEvent},
         GlassNotes, LinkProfile,
     },
-    session::{PairingMode, Session, SessionConfig},
+    session::{Session, SessionConfig},
     store::PairingRecord,
     CoreError,
 };

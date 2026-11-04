@@ -57,11 +57,28 @@ pub struct NoteDraft {
     pub attachments: Vec<AttachmentSource>,
 }
 
+/// Seals one note, on any thread. See [`GlassNotes::sealer`].
+pub struct NoteSealer {
+    store: NoteStore,
+    seq: u64,
+}
+
+impl NoteSealer {
+    /// Copy and hash the files and seal the note atomically. Blocking.
+    pub fn seal(self, draft: &NoteDraft) -> Result<OutgoingNote, CoreError> {
+        let mut id = [0u8; 16];
+        getrandom::getrandom(&mut id)
+            .map_err(|e| CoreError::Store(format!("no randomness for a note id: {e}")))?;
+        self.store.seal(NoteId(id), self.seq, draft)
+    }
+}
+
 /// The Glass side.
 pub struct GlassNotes {
     store: NoteStore,
     cfg: SenderConfig,
     machine: NoteSender,
+    next_sealer_seq: u64,
     events: Vec<SenderEvent>,
     set_aside: Vec<String>,
 }
@@ -75,6 +92,7 @@ impl GlassNotes {
             store,
             cfg,
             machine: NoteSender::new(cfg, loaded.records),
+            next_sealer_seq: 0,
             events: Vec::new(),
             set_aside: loaded.set_aside,
         };
@@ -90,13 +108,34 @@ impl GlassNotes {
         draft: &NoteDraft,
         now: u64,
     ) -> Result<(NoteId, Vec<Frame>), CoreError> {
-        let mut id = [0u8; 16];
-        getrandom::getrandom(&mut id)
-            .map_err(|e| CoreError::Store(format!("no randomness for a note id: {e}")))?;
-        let id = NoteId(id);
-        let record = self.store.seal(id, self.machine.next_seq(), draft)?;
+        let record = self.sealer().seal(draft)?;
+        let id = record.manifest.id;
+        let frames = self.enqueue_sealed(record, now)?;
+        Ok((id, frames))
+    }
+
+    /// Start sealing a note on another thread: copying and hashing a video takes far too long
+    /// for a thread that also services input. Run [`NoteSealer::seal`] there, then hand the
+    /// record to [`enqueue_sealed`](GlassNotes::enqueue_sealed). Seal one at a time per
+    /// sealer: the queue position is taken here.
+    pub fn sealer(&mut self) -> NoteSealer {
+        let seq = self.next_sealer_seq.max(self.machine.next_seq());
+        self.next_sealer_seq = seq + 1;
+        NoteSealer {
+            store: self.store.clone(),
+            seq,
+        }
+    }
+
+    /// Queue a note a [`NoteSealer`] finished. Like [`add_note`](GlassNotes::add_note), the
+    /// frames are for a link already up.
+    pub fn enqueue_sealed(
+        &mut self,
+        record: OutgoingNote,
+        now: u64,
+    ) -> Result<Vec<Frame>, CoreError> {
         let effects = self.machine.enqueue(record, now);
-        Ok((id, self.apply(effects, now)?))
+        self.apply(effects, now)
     }
 
     /// See [`NoteSender::link_up`].
@@ -140,6 +179,11 @@ impl GlassNotes {
             Some((request_id, effects)) => Ok(Some((request_id, self.apply(effects, now)?))),
             None => Ok(None),
         }
+    }
+
+    /// Where a sealed attachment is.
+    pub fn attachment_path(&self, id: &NoteId, attachment: AttachmentId) -> PathBuf {
+        self.store.attachment_path(id, attachment)
     }
 
     /// The state machine, to read the queue from.
