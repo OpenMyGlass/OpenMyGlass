@@ -10,6 +10,7 @@ members = [
     "crates/omg-core",
     "crates/omg-qr",
     "crates/omg-cli",
+    "crates/omg-ffi",
 ]
 
 [workspace.package]

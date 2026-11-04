@@ -2,7 +2,7 @@
 
 A note is taken on the Glass: text, a voice recording, and one or more photos or a video. It stays on the Glass until the companion holds a verified copy. If the companion is away, the note waits and syncs by itself on the next link. Speech-to-text and TTS always run on the companion.
 
-Status: protocol and core logic are done and tested against the simulated Glass over TCP. **glassd does not speak this yet**, and no phone UI exists. Nothing here has run on hardware.
+Status: protocol and core logic are done and tested against the simulated Glass and a host glassd over TCP. glassd's side is in glass-services (`docs/api.md`, "Notes"). No Glass app adds notes yet, and nothing here has run on a Glass.
 
 Code: `rust/crates/omg-protocol/src/notes.rs` (frames), `rust/crates/omg-core/src/notes/` (logic).
 
@@ -118,15 +118,6 @@ cargo run -p omg-cli -- --store /tmp/c.json notes-sync --connect 127.0.0.1:7700 
 - The Glass queues chunks for reading as fast as they are requested. A bonded peer ignoring the window could grow that queue; glassd should cap it.
 - Reconnecting after a dropped link is up to the frontend (the CLI's `--reconnect`). The core has no general auto-reconnect yet, as `companion-rust-core.md` says.
 
-## Exposing the core to Kotlin and Swift
+## Phones
 
-**Recommendation: UniFFI, in a new thin crate `omg-ffi`.** Nothing is added yet. No reason against it turned up for this API.
-
-- One Rust definition gives both Kotlin and Swift bindings, and it supports foreign implementations of Rust traits, which is what the speech engines need. Its licence (MPL-2.0) is compatible with GPL-3.0; confirm this and the current version when adding it.
-- The surface is small because the driver is already synchronous and transport-free: objects with `on_frame`, `tick`, `link_up`, `link_down`, `take_events`.
-- **The app owns the socket.** This is the point for iOS: `BluetoothSocket` on Android, Core Bluetooth or `Network.framework` on iOS, and bytes in and out through the core. iOS has no Bluetooth Classic for this use, so the iOS path is BLE or Wi-Fi.
-- Cross the boundary with encoded frames as bytes, not the 94-variant `Frame` enum: the apps never need to look inside a frame, and the schema stays out of the bindings. Hand-written records cover what the UI shows (`NoteSyncStatus`, events, note lists).
-- File contents do not cross: engines get a path, and chunks stay on the Rust side.
-- `SpeechJob` runs on a thread the app controls, so a blocking engine call is fine. Keep `uniffi` out of `omg-core` so glassd and the CLI never build it.
-
-Build: `cargo-ndk` for Android (`cdylib` + AAR), an XCFramework from a `staticlib` for iOS. iOS suspends apps in the background, so "sync on its own" there depends on Core Bluetooth background modes and needs testing on a device. A Glass-side BLE peripheral does not exist yet either.
+The phone apps use all this through `omg-ffi`: see [`companion-mobile.md`](companion-mobile.md).

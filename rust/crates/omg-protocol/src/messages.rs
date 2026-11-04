@@ -1158,6 +1158,26 @@ impl Settings {
     }
 }
 
+/// Names of the time zones [`Settings::timezone_id`] indexes. The same order as the table
+/// glassd reads the rules from, which only ever grows at the end.
+pub const TIME_ZONE_NAMES: &[&str] = &[
+    "UTC",
+    "London",
+    "Roma, Paris, Madrid",
+    "Athina, Helsinki",
+    "Moskva",
+    "Dubai",
+    "Delhi",
+    "Beijing, Singapore",
+    "Tokyo",
+    "Sydney",
+    "New York",
+    "Chicago",
+    "Denver",
+    "Los Angeles",
+    "São Paulo",
+];
+
 // --------------------------- Screencast ---------------------------
 
 /// Glass -> Companion: one JPEG frame of the prism (640x360 on XE24).
