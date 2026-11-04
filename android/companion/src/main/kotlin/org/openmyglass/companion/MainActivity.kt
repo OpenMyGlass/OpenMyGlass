@@ -274,7 +274,7 @@ class MainActivity : Activity() {
                 }
             },
         ) { position ->
-            powerOffMinutes.getOrNull(position)?.let { GlassSettings(offHeadPowerOffMin = it) } ?: GlassSettings()
+            powerOffMinutes.getOrNull(position)?.let { GlassSettings(offHeadPowerOffMin = it) }
         }
 
         heading("Time and language")
@@ -290,7 +290,7 @@ class MainActivity : Activity() {
                 it.screenTimeoutS == null -> null
                 else -> it.locale?.let { l -> locales.indexOf(l) + 1 } ?: 0
             }
-        }) { position -> locales.getOrNull(position - 1)?.let { GlassSettings(locale = it) } ?: GlassSettings() }
+        }) { position -> locales.getOrNull(position - 1)?.let { GlassSettings(locale = it) } }
         return settingsBox
     }
 
@@ -388,7 +388,7 @@ class MainActivity : Activity() {
         label: String,
         options: List<String>,
         read: (GlassSettings) -> Int?,
-        change: (Int) -> GlassSettings,
+        change: (Int) -> GlassSettings?,
     ) {
         val title = TextView(this).apply { text = label; visibility = View.GONE }
         val spinner = Spinner(this).apply {
@@ -398,7 +398,10 @@ class MainActivity : Activity() {
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(p: AdapterView<*>?, v: View?, position: Int, id: Long) {
                     val known = core.snapshot().glass.settings ?: return
-                    if (read(known) != position) send(change(position))
+                    val current = read(known)
+                    if (current == position) return
+                    // An entry that only describes a state ("Other") goes back to the real value.
+                    change(position)?.let { send(it) } ?: current?.let { p?.setSelection(it) }
                 }
 
                 override fun onNothingSelected(p: AdapterView<*>?) = Unit

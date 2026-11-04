@@ -1142,7 +1142,13 @@ pub struct Settings {
 /// extra bytes, and when an older peer's frame ends here the field is `None`. Later fields
 /// must go after this one and decode the same way.
 fn absent_at_the_end<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
-    Ok(Option::<u32>::deserialize(d).unwrap_or(None))
+    // The deserializer is generic, so its error can only be told by its text. The test
+    // `a_bad_last_field_is_an_error` notices if a postcard upgrade changes it.
+    let end = postcard::Error::DeserializeUnexpectedEnd.to_string();
+    match Option::<u32>::deserialize(d) {
+        Err(e) if e.to_string() == end => Ok(None),
+        other => other,
+    }
 }
 
 impl Settings {
@@ -1325,6 +1331,15 @@ mod settings_tests {
             ..Default::default()
         });
         assert_eq!(s.off_head_power_off_min, Some(0));
+    }
+
+    #[test]
+    fn a_bad_last_field_is_an_error() {
+        let mut bytes = postcard::to_allocvec(&Frame::Settings(Settings::default())).unwrap();
+        // The option tag of the last field; only 0 and 1 are valid.
+        *bytes.last_mut().unwrap() = 2;
+        assert!(crate::decode_payload(&bytes).is_err());
+        assert!(serde_json::from_str::<Settings>(r#"{"off_head_power_off_min":"abc"}"#).is_err());
     }
 
     /// The frame an older peer sends: the same bytes without the last field. `None` is one
