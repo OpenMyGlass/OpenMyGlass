@@ -1039,13 +1039,30 @@ pub struct AddonUninstall {
 
 // --------------------------- Settings mirror ---------------------------
 
-/// Glass settings. `Some` fields are read/applied; `None` fields are untouched.
+/// Glass settings: every setting can be read and changed from the companion. `Some` fields are
+/// read/applied; `None` fields are untouched.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// Prism brightness, 0-100.
     pub brightness: Option<u8>,
     /// Wake-on-head-up.
     pub head_wake: Option<bool>,
+    /// Wake-on-head-up angle, degrees.
+    pub head_wake_angle_deg: Option<u8>,
+    /// On-head detection.
+    pub on_head_detection: Option<bool>,
+    /// Earpiece volume, 0-100 percent.
+    pub audio_volume: Option<u8>,
+    /// 24-hour clock, else 12-hour.
+    pub time_24h: Option<bool>,
+    /// Index into the Glass's time zone table.
+    pub timezone_id: Option<u32>,
+    /// Energy policy.
+    pub power_saver: Option<bool>,
+    /// Suspend to RAM when idle.
+    pub deep_sleep: Option<bool>,
+    /// Idle before suspend, seconds.
+    pub deep_sleep_idle_s: Option<u32>,
     /// Wink-to-capture.
     pub wink: Option<bool>,
     /// Screen timeout, seconds.
@@ -1056,6 +1073,31 @@ pub struct Settings {
     pub locale: Option<Locale>,
     /// Radio state (read-only here; use [`SetRadio`]/[`SetAirplaneMode`] to change).
     pub radios: Option<RadioState>,
+}
+
+impl Settings {
+    /// Copies the `Some` fields of `change` over this one. `radios` is read-only here.
+    pub fn merge(&mut self, change: &Settings) {
+        macro_rules! take {
+            ($($f:ident),*) => { $( if change.$f.is_some() { self.$f = change.$f.clone(); } )* };
+        }
+        take!(
+            brightness,
+            head_wake,
+            head_wake_angle_deg,
+            on_head_detection,
+            audio_volume,
+            time_24h,
+            timezone_id,
+            power_saver,
+            deep_sleep,
+            deep_sleep_idle_s,
+            wink,
+            screen_timeout_s,
+            nudge,
+            locale
+        );
+    }
 }
 
 // --------------------------- Screencast ---------------------------
@@ -1149,4 +1191,44 @@ pub struct TetherState {
     pub on: bool,
     /// Transport kind (`bt-pan`, `wifi`).
     pub kind: String,
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    fn merge_copies_only_the_fields_present_and_leaves_radios_alone() {
+        let mut s = Settings {
+            audio_volume: Some(87),
+            time_24h: Some(true),
+            radios: None,
+            ..Default::default()
+        };
+        s.merge(&Settings {
+            audio_volume: Some(40),
+            radios: Some(RadioState {
+                wifi_on: true,
+                bt_on: true,
+                airplane_mode: false,
+                wifi_ssid: None,
+                wifi_ip: None,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(s.audio_volume, Some(40));
+        assert_eq!(s.time_24h, Some(true));
+        assert_eq!(s.radios, None);
+    }
+
+    #[test]
+    fn settings_frames_survive_the_wire() {
+        let f = Frame::SettingsSet(Settings {
+            on_head_detection: Some(true),
+            timezone_id: Some(2),
+            ..Default::default()
+        });
+        let bytes = postcard::to_allocvec(&f).unwrap();
+        assert_eq!(postcard::from_bytes::<Frame>(&bytes).unwrap(), f);
+    }
 }
