@@ -131,3 +131,9 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --all-features --workspace
+      - name: omg-core stays free of tokio
+        run: |
+          if cargo tree -p omg-core -e normal | grep -E ' (tokio|futures|omg-transport) '; then
+            echo "omg-core must build without an async runtime: see docs/companion-rust-core.md" >&2
+            exit 1
+          fi

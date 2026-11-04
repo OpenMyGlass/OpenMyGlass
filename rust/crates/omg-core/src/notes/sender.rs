@@ -31,10 +31,11 @@ const MAX_TTS_RETRIES: u32 = 4;
 /// What to do with a note's files on the Glass once the companion has verified it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DeletePolicy {
-    /// Keep them. The default, as for media sync (`docs/media-sync.md`).
-    #[default]
+    /// Keep them.
     Keep,
     /// Delete them after full verification. Applies to notes verified while it is set.
+    /// Owner default, still open: see `docs/companion-notes-sync.md`.
+    #[default]
     DeleteAfterVerified,
 }
 

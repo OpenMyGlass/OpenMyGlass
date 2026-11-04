@@ -18,6 +18,7 @@ use tracing::{debug, warn};
 
 use super::{
     driver::{CompanionNotes, SpeechJob, SpeechOutcome},
+    is_note_frame,
     receiver::ReceiverEvent,
     speech::{SpeechToText, TextToSpeech},
     LinkProfile,
@@ -290,31 +291,9 @@ impl<F: FnMut(CompanionUpdate<'_>)> LinkHandler for CompanionHandler<'_, F> {
     }
 }
 
-/// Whether a frame belongs to note sync.
-pub fn is_note_frame(frame: &Frame) -> bool {
-    frame.wire_name().starts_with("Note")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omg_protocol::{NoteSyncStatus, Ping};
-
-    #[test]
-    fn note_frames_are_told_apart_from_notification_frames() {
-        assert!(is_note_frame(&Frame::NoteSyncStatus(NoteSyncStatus {
-            pending_notes: 0,
-            pending_bytes: 0,
-            sending: false,
-        })));
-        assert!(!is_note_frame(&Frame::NotificationRemoved(
-            omg_protocol::NotificationRemoved { key: "k".into() }
-        )));
-        assert!(!is_note_frame(&Frame::Ping(Ping {
-            token: 0,
-            unix_ms: 0
-        })));
-    }
 
     #[test]
     fn transports_map_to_a_profile() {

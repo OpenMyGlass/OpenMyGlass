@@ -10,17 +10,36 @@ authors.workspace = true
 
 [dependencies]
 omg-protocol = { path = "../omg-protocol" }
-omg-transport = { path = "../omg-transport" }
+omg-transport = { path = "../omg-transport", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
-futures.workspace = true
+tokio = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 sha2.workspace = true
 base64.workspace = true
 tracing.workspace = true
+
+[features]
+default = []
+# The async session, the simulated Glass and the async note loop, for frontends that let the
+# core own the link (omg-cli). Everything else is synchronous and free of tokio, so glassd and
+# the phone apps stay free of it: see docs/companion-rust-core.md.
+async-link = ["dep:omg-transport", "dep:tokio", "dep:futures"]
+
+[[test]]
+name = "backbone"
+required-features = ["async-link"]
+
+[[test]]
+name = "companion_link"
+required-features = ["async-link"]
+
+[[test]]
+name = "notes_sync"
+required-features = ["async-link"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "io-util", "net", "time", "sync"] }

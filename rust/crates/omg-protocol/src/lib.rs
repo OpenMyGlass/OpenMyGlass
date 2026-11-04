@@ -42,7 +42,7 @@ pub use error::WireError;
 pub use locale::Locale;
 pub use messages::*;
 pub use notes::*;
-pub use wire::{decode_payload, encode_payload, MAX_FRAME_LEN};
+pub use wire::{decode_payload, encode_payload, frame_bytes, FrameDecoder, MAX_FRAME_LEN};
 
 /// Protocol version advertised in [`messages::Hello`]. Bump on any breaking schema change.
 pub const PROTOCOL_VERSION: u16 = 1;

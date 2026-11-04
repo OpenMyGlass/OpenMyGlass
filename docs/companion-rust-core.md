@@ -70,11 +70,26 @@ behind a trait and is stubbed for now (see §4).
 |---|---|
 | `omg-protocol` | Versioned wire message schema (serde). The contract shared with glassd. Also the Wi-Fi QR bootstrap payload type. |
 | `omg-transport` | Frame codec + `Transport` trait; `TcpTransport` (works), `BtRfcommTransport` (stub); power-aware `TransportManager`. |
-| `omg-core` | ed25519 identity, persistent one-time pairing, mutual auth, the session state machine (backbone), and the simulated Glass. |
+| `omg-core` | ed25519 identity, persistent one-time pairing, mutual auth, notes, and the handshake as a pure state machine. Free of tokio; see below. The async session and the simulated Glass are behind the `async-link` feature. |
 | `omg-qr` | Renders a `WifiBootstrap` as a scannable QR (terminal + SVG), offline. |
 | `omg-cli` | The `omg` binary: `identity`, `qr`, `sim-glass`, `link`, `daemon`, `note-add`, `notes-sync`. |
 
-Build/test: `cd rust && cargo test && cargo clippy --all-targets && cargo fmt --check`.
+Build/test: `cd rust && cargo test --all-features --workspace && cargo clippy --all-targets --all-features && cargo fmt --check`.
+
+### Decision: `omg-core` is free of tokio (2026-11-04)
+
+By default `omg-core` builds without tokio, `futures` or `omg-transport`, and CI checks this. Whatever needs them (`session`, `simglass`, `notes::link`) is behind the `async-link` feature, which only `omg-cli` turns on.
+
+Why:
+
+- **Its other two users cannot use a runtime anyway.** glassd is a single-threaded `poll` loop on a 32-bit Glass and needs the Glass side of notes. A phone app owns its socket (`BluetoothSocket`, Core Bluetooth, `Network.framework`) and must feed bytes in from whichever thread the platform gives it.
+- **The logic was already synchronous.** The state machines take events and `now_ms` and return effects. Only the convenience loops around them are async, so the runtime was a dependency of the crate and not of the logic.
+- **iOS.** Nothing in the shared API then assumes a particular socket or radio, and no runtime thread pool has to survive iOS background suspension.
+- **Size.** glassd's release build is `opt-level = "s"` for a device with little room.
+
+What it costs: the handshake exists twice, as `companion_link` (sync, companion role) and `session` (async, both roles). `tests/companion_link.rs` runs one against the other over TCP. If the CLI ever moves to the sync driver, `session` can go.
+
+A feature was chosen over a separate crate because it moves no code, and `cargo tree` in CI is enough to stop tokio creeping back in.
 
 ## 3. Protocol (`omg-protocol`)
 

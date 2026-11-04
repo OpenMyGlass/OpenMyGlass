@@ -407,8 +407,8 @@ mod tests {
         let photo = source(tmp.path(), "p.jpg", b"photo", AttachmentKind::Photo);
         let video = source(tmp.path(), "v.mp4", b"video", AttachmentKind::Video);
 
-        // A photo and a video on one note breaks the limits: nothing appears.
-        let bad = store.seal(ID, 0, &draft(vec![photo.clone(), video]));
+        // Two videos on one note break the limits: nothing appears.
+        let bad = store.seal(ID, 0, &draft(vec![photo.clone(), video.clone(), video]));
         assert!(matches!(bad, Err(CoreError::InvalidNote(_))));
         assert!(store.load::<OutgoingNote>().unwrap().records.is_empty());
         assert_eq!(fs::read_dir(tmp.path().join("q")).unwrap().count(), 0);

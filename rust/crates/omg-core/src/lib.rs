@@ -5,25 +5,35 @@
 //!
 //! * [`identity`] — the long-term ed25519 identity (trust anchor).
 //! * [`store`] — persistent state: our identity + the single bonded peer.
-//! * [`session`] — the link state machine: Hello, one-time pairing, mutual auth, then
-//!   heartbeat / locale / status / notifications.
+//! * [`companion_link`] — the companion's side of the handshake as a pure state machine, for
+//!   a frontend that owns its socket (the phone apps).
 //! * [`notes`] — notes with attachments and deferred sync: pure state machines for both
 //!   sides, a crash-safe queue, and the speech engine traits the phone apps implement.
-//! * [`simglass`] — a reusable simulated-Glass peer for tests and the CLI, so the whole
-//!   link runs end-to-end without hardware. It mirrors what glassd must do.
+//!
+//! With the `async-link` feature, for frontends that let the core own the link:
+//!
+//! * `session` — the same handshake as an async flow over an `omg-transport` link, in both
+//!   roles, then heartbeat / locale / status / notifications.
+//! * `simglass` — a reusable simulated-Glass peer for tests and the CLI, so the whole link
+//!   runs end-to-end without hardware. It mirrors what glassd must do.
 //!
 //! The backbone (pairing, heartbeat, locale, battery/status, notification forwarding) and
 //! note sync are implemented and tested end-to-end. Everything else in [`omg_protocol`] is
 //! typed and scaffolded.
 
+pub mod companion_link;
 pub mod identity;
 pub mod notes;
+#[cfg(feature = "async-link")]
 pub mod session;
+#[cfg(feature = "async-link")]
 pub mod simglass;
 pub mod store;
 
+pub use companion_link::{CompanionLink, LinkEnd, LinkOut, PairingMode};
 pub use identity::Identity;
-pub use session::{PairingMode, Session, SessionConfig};
+#[cfg(feature = "async-link")]
+pub use session::{Session, SessionConfig};
 pub use store::{PairingRecord, Store};
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -43,6 +53,7 @@ pub fn now_ms() -> u64 {
 #[derive(Debug, Error)]
 pub enum CoreError {
     /// Transport/framing error.
+    #[cfg(feature = "async-link")]
     #[error("transport: {0}")]
     Transport(#[from] omg_transport::TransportError),
 
