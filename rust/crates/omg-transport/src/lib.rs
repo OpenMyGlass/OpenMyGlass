@@ -34,7 +34,7 @@ pub mod manager;
 pub mod tcp;
 
 pub use bt::BtRfcommTransport;
-pub use codec::{FrameCodec, Link};
+pub use codec::{FrameCipher, FrameCodec, Link};
 pub use manager::{rank, RadioSnapshot, TransportKind, TransportManager};
 pub use tcp::{TcpListenerTransport, TcpTransport};
 

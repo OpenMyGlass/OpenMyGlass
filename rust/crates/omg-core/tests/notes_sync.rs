@@ -1,5 +1,9 @@
 //! End-to-end note sync: the real handshake, driver, store and simulated Glass, over real
 //! TCP through a proxy in the middle that can damage, repeat, swallow or cut traffic.
+//!
+//! The link is encrypted, so a proxy on the wire can only cut it (`tests/session_crypto.rs` shows
+//! that). To reach the note frames this one is given both identities and ends an encrypted
+//! session on each side, which is how the faults still test the note machines.
 
 use std::{
     path::{Path, PathBuf},
@@ -83,6 +87,17 @@ struct Proxy {
     /// Close both sides right after the companion's `NoteAck`. Used with `swallow_acks`: the
     /// companion has finished, the Glass has heard nothing.
     cut_after_note_ack: bool,
+    /// Do not tell the Glass this companion syncs notes.
+    hide_note_sync_from_glass: bool,
+}
+
+/// The Glass to reach, and what a proxy needs to stand in for both ends.
+struct Upstream {
+    addr: String,
+    glass_id: Identity,
+    companion_id: Identity,
+    glass_bond: Option<PairingRecord>,
+    companion_bond: Option<PairingRecord>,
 }
 
 /// What the proxy saw on one connection.
@@ -94,14 +109,39 @@ struct Seen {
     note_frames: AtomicU32,
 }
 
-async fn start_proxy(glass_addr: String, proxy: Proxy) -> (String, Arc<Seen>) {
+async fn start_proxy(upstream: Upstream, proxy: Proxy) -> (String, Arc<Seen>) {
     let listener = TcpListenerTransport::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let seen = Arc::new(Seen::default());
     let seen2 = seen.clone();
     tokio::spawn(async move {
-        let mut companion = listener.accept().await.unwrap();
-        let mut glass = TcpTransport::new(glass_addr).dial().await.unwrap();
+        let companion = listener.accept().await.unwrap();
+        let glass = TcpTransport::new(upstream.addr).dial().await.unwrap();
+        let mut facing_companion = Session::new(
+            companion,
+            upstream.glass_id,
+            upstream.glass_bond,
+            SessionConfig::glass("proxy"),
+        );
+        facing_companion.advertise(capability::NOTES_SYNC);
+        let mut facing_glass = Session::new(
+            glass,
+            upstream.companion_id,
+            upstream.companion_bond,
+            SessionConfig::companion("proxy"),
+        );
+        if !proxy.hide_note_sync_from_glass {
+            facing_glass.advertise(capability::NOTES_SYNC);
+        }
+        let (a, b) = tokio::join!(
+            facing_companion.handshake(PairingMode::AllowNew),
+            facing_glass.handshake(PairingMode::AllowNew),
+        );
+        if a.is_err() || b.is_err() {
+            return;
+        }
+        let mut companion = facing_companion.into_link();
+        let mut glass = facing_glass.into_link();
         let mut chunks = 0;
         loop {
             tokio::select! {
@@ -257,8 +297,7 @@ impl Bed {
         SimNotes::new(&self.glass_dir)
     }
 
-    /// One connection. `via` puts something between the peers: it gets the Glass's address
-    /// and returns the one the companion should dial.
+    /// One connection. `via` puts something between the peers: it gets the Glass and returns the one the companion should dial.
     async fn connect<F, Fut>(
         &mut self,
         sim: SimNotes,
@@ -267,7 +306,7 @@ impl Bed {
         via: F,
     ) -> RunOutcome
     where
-        F: FnOnce(String) -> Fut,
+        F: FnOnce(Upstream) -> Fut,
         Fut: std::future::Future<Output = String>,
     {
         let listener = TcpListenerTransport::bind("127.0.0.1:0").await.unwrap();
@@ -283,7 +322,14 @@ impl Bed {
             simglass::run(link, id, bond, state).await
         });
 
-        let dial = via(glass_addr).await;
+        let dial = via(Upstream {
+            addr: glass_addr,
+            glass_id: self.glass_id.clone(),
+            companion_id: self.companion_id.clone(),
+            glass_bond: self.glass_bond.clone(),
+            companion_bond: self.companion_bond.clone(),
+        })
+        .await;
         let link = TcpTransport::new(dial).dial().await.unwrap();
         let mut session = Session::new(
             link,
@@ -335,7 +381,7 @@ impl Bed {
     }
 
     async fn direct(&mut self, sim: SimNotes, profile: LinkProfile) -> RunOutcome {
-        self.connect(sim, profile, true, |addr| async move { addr })
+        self.connect(sim, profile, true, |upstream| async move { upstream.addr })
             .await
     }
 
@@ -513,7 +559,7 @@ async fn link_cut_in_the_middle_of_a_frame_is_a_plain_resume() {
             bed.sim_notes(),
             LinkProfile::fast(),
             false,
-            |addr| async move { start_byte_cutter(addr, 200_123).await },
+            |addr| async move { start_byte_cutter(addr.addr, 200_123).await },
         )
         .await;
     assert!(run.result.is_err(), "a torn frame is a link failure");
@@ -793,7 +839,20 @@ async fn no_note_frame_reaches_a_companion_that_did_not_advertise_note_sync() {
         };
         simglass::run(link, glass_id, None, state).await
     });
-    let (dial, seen) = start_proxy(glass_addr, Proxy::default()).await;
+    let (dial, seen) = start_proxy(
+        Upstream {
+            addr: glass_addr,
+            glass_id: bed.glass_id.clone(),
+            companion_id: bed.companion_id.clone(),
+            glass_bond: None,
+            companion_bond: None,
+        },
+        Proxy {
+            hide_note_sync_from_glass: true,
+            ..Default::default()
+        },
+    )
+    .await;
 
     // An older companion: only the backbone capabilities.
     let link = TcpTransport::new(dial).dial().await.unwrap();

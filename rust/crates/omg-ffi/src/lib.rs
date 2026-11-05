@@ -41,9 +41,9 @@ use omg_core::{
     now_ms, CompanionLink, LinkEnd, LinkOut, PairingMode, Store,
 };
 use omg_protocol::{
-    capability, frame_bytes, AttachmentKind, BatteryStatus, Frame, FrameDecoder, GlassStatus,
-    NoteDeferReason, NoteId, NoteRejectReason, NoteSyncStatus, NoteTranscript, NoteTranscriptError,
-    Radio, RadioState, SetAirplaneMode, SetLocale, SetRadio, Settings, StatusRequest,
+    capability, AttachmentKind, BatteryStatus, Frame, FrameDecoder, GlassStatus, NoteDeferReason,
+    NoteId, NoteRejectReason, NoteSyncStatus, NoteTranscript, NoteTranscriptError, Radio,
+    RadioState, SetAirplaneMode, SetLocale, SetRadio, Settings, StatusRequest,
 };
 
 const STATE_FILE: &str = "companion.json";
@@ -609,6 +609,8 @@ fn end_reason(end: &LinkEnd) -> String {
         LinkEnd::UnknownPeer => "bonded to someone else".into(),
         LinkEnd::NotPaired => "not paired, and pairing is not allowed".into(),
         LinkEnd::AuthFailed => "authentication failed".into(),
+        LinkEnd::PeerNotEncrypted => "the Glass does not encrypt the link: update it".into(),
+        LinkEnd::Tampered => "a frame failed authentication: the link was tampered with".into(),
         LinkEnd::VersionMismatch { ours, theirs } => {
             format!("protocol version {theirs}, this app speaks {ours}")
         }
@@ -1033,12 +1035,14 @@ impl Inner {
     }
 
     fn queue(&mut self, frame: &Frame) {
-        match frame_bytes(frame) {
+        let Some(link) = &mut self.link else {
+            return;
+        };
+        // Sealed here, under the lock, so the order on the socket is the order of the counter.
+        match link.machine.encode(frame) {
             Ok(bytes) => self.outgoing.extend_from_slice(&bytes),
             // Only a frame over 16 MiB fails, and nothing here sends one.
-            Err(e) => self.events.push(CoreEvent::LinkClosed {
-                reason: Some(format!("cannot encode {}: {e}", frame.wire_name())),
-            }),
+            Err(e) => self.link_failed(format!("cannot encode {}: {e}", frame.wire_name())),
         }
     }
 

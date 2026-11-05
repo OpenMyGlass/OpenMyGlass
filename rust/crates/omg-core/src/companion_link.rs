@@ -6,7 +6,9 @@
 //! two cannot drift apart unnoticed.
 //!
 //! Nothing here depends on the kind of link. Over Bluetooth or Wi-Fi alike, the peer is proved
-//! by its bonded ed25519 key.
+//! by its bonded ed25519 key, and every frame after the handshake is encrypted
+//! ([`crate::secure`]). So a frontend turns frames into bytes with [`CompanionLink::encode`],
+//! never with `frame_bytes`, and carries out each call's outputs before making the next call.
 
 use omg_protocol::{
     AuthChallenge, AuthResponse, AuthResult, ErrorCode, ErrorMsg, Frame, Hello, PairRequest,
@@ -16,6 +18,10 @@ use omg_protocol::{
 use crate::{
     identity::{decode_nonce, random_nonce_b64, verify_challenge, Identity},
     now_ms,
+    secure::{
+        encode_frame, peer_supports_crypto, refuse_unencrypted_peer, with_crypto_capability,
+        Channel, HandshakeFacts, KeyExchange, SecureError,
+    },
     store::PairingRecord,
 };
 
@@ -35,7 +41,7 @@ pub enum LinkOut {
     Send(Frame),
     /// Store this bond before sending anything that follows.
     Persist(PairingRecord),
-    /// The peer is authenticated.
+    /// The peer is authenticated and the link encrypted.
     Running {
         /// The Glass's name.
         peer_name: String,
@@ -57,6 +63,10 @@ pub enum LinkEnd {
     NotPaired,
     /// A signature did not verify.
     AuthFailed,
+    /// The peer does not encrypt the link. It is refused, and no bond was stored.
+    PeerNotEncrypted,
+    /// A frame failed authentication: someone tampered with the link, or it corrupted a frame.
+    Tampered,
     /// Incompatible protocol versions.
     VersionMismatch {
         /// Ours.
@@ -74,6 +84,8 @@ enum Phase {
     AwaitingHello,
     AwaitingPairAccept { nonce: String, peer: Hello },
     Authenticating(Auth),
+    AwaitingKeyShare { exchange: KeyExchange, peer: Hello },
+    AwaitingKeyProof { exchange: KeyExchange, peer: Hello },
     Running,
     Closed,
 }
@@ -82,7 +94,7 @@ enum Phase {
 struct Auth {
     peer: Hello,
     our_nonce: Vec<u8>,
-    answered_peer: bool,
+    peer_nonce: Option<Vec<u8>>,
     verified: Option<bool>,
 }
 
@@ -94,6 +106,8 @@ pub struct CompanionLink {
     device_name: String,
     app_version: String,
     capabilities: Vec<String>,
+    our_hello: Option<Hello>,
+    channel: Option<Channel>,
     phase: Phase,
 }
 
@@ -113,12 +127,14 @@ impl CompanionLink {
             mode,
             device_name: device_name.into(),
             app_version: app_version.into(),
-            capabilities,
+            capabilities: with_crypto_capability(capabilities),
+            our_hello: None,
+            channel: None,
             phase: Phase::Start,
         }
     }
 
-    /// Whether the peer is authenticated.
+    /// Whether the peer is authenticated and the link encrypted.
     pub fn is_running(&self) -> bool {
         matches!(self.phase, Phase::Running)
     }
@@ -134,14 +150,23 @@ impl CompanionLink {
             return Vec::new();
         }
         self.phase = Phase::AwaitingHello;
-        vec![LinkOut::Send(Frame::Hello(Hello {
+        let hello = Hello {
             protocol_version: PROTOCOL_VERSION,
             role: Role::Companion,
             app_version: self.app_version.clone(),
             device_name: self.device_name.clone(),
             identity_pub: self.identity.public_b64(),
             capabilities: self.capabilities.clone(),
-        }))]
+        };
+        self.our_hello = Some(hello.clone());
+        vec![LinkOut::Send(Frame::Hello(hello))]
+    }
+
+    /// Turns a frame into the bytes to write to the socket: sealed once the link is encrypted.
+    /// Refuses an application frame before that. Frames must reach the socket in the order they
+    /// went through here.
+    pub fn encode(&mut self, frame: &Frame) -> Result<Vec<u8>, SecureError> {
+        encode_frame(self.channel.as_mut(), frame)
     }
 
     /// A frame arrived.
@@ -154,6 +179,12 @@ impl CompanionLink {
                 self.on_pair_accept(frame, nonce, peer, &mut out)
             }
             Phase::Authenticating(auth) => self.on_auth(frame, auth, &mut out),
+            Phase::AwaitingKeyShare { exchange, peer } => {
+                self.on_key_share(frame, exchange, peer, &mut out)
+            }
+            Phase::AwaitingKeyProof { exchange, peer } => {
+                self.on_key_proof(frame, exchange, peer, &mut out)
+            }
             Phase::Running => self.on_running(frame, &mut out),
         }
         out
@@ -196,6 +227,11 @@ impl CompanionLink {
                     theirs: peer.protocol_version,
                 },
             );
+        }
+        // Refused now, before any bond is stored: there is no fallback to downgrade to.
+        if !peer_supports_crypto(&peer) {
+            out.push(LinkOut::Send(refuse_unencrypted_peer()));
+            return self.fail(out, LinkEnd::PeerNotEncrypted);
         }
         match &self.bonded {
             Some(rec) if rec.peer_pub == peer.identity_pub => self.enter_auth(peer, out),
@@ -256,14 +292,14 @@ impl CompanionLink {
     }
 
     fn enter_auth(&mut self, peer: Hello, out: &mut Vec<LinkOut>) {
-        let nonce = random_nonce_b64(32);
+        let nonce = self.identity.hedged_nonce_b64();
         match decode_nonce(&nonce) {
             Ok(our_nonce) => {
                 out.push(LinkOut::Send(Frame::AuthChallenge(AuthChallenge { nonce })));
                 self.phase = Phase::Authenticating(Auth {
                     peer,
                     our_nonce,
-                    answered_peer: false,
+                    peer_nonce: None,
                     verified: None,
                 });
             }
@@ -273,12 +309,15 @@ impl CompanionLink {
 
     fn on_auth(&mut self, frame: Frame, mut auth: Auth, out: &mut Vec<LinkOut>) {
         match frame {
+            Frame::AuthChallenge(_) if auth.peer_nonce.is_some() => {
+                return self.fail(out, LinkEnd::Protocol("a second AuthChallenge".into()));
+            }
             Frame::AuthChallenge(ch) => match decode_nonce(&ch.nonce) {
                 Ok(nonce) => {
                     out.push(LinkOut::Send(Frame::AuthResponse(AuthResponse {
                         signature: self.identity.sign_challenge(&nonce),
                     })));
-                    auth.answered_peer = true;
+                    auth.peer_nonce = Some(nonce);
                 }
                 Err(e) => return self.fail(out, LinkEnd::Protocol(e.to_string())),
             },
@@ -300,18 +339,14 @@ impl CompanionLink {
                 if !r.ok {
                     return self.fail(out, LinkEnd::AuthFailed);
                 }
-                if !(auth.answered_peer && auth.verified == Some(true)) {
+                let Some(peer_nonce) = auth.peer_nonce.filter(|_| auth.verified == Some(true))
+                else {
                     return self.fail(
                         out,
                         LinkEnd::Protocol("AuthResult before both sides answered".into()),
                     );
-                }
-                out.push(LinkOut::Running {
-                    peer_name: auth.peer.device_name,
-                    capabilities: auth.peer.capabilities,
-                });
-                self.phase = Phase::Running;
-                return;
+                };
+                return self.enter_key_exchange(auth.peer, &auth.our_nonce, &peer_nonce, out);
             }
             Frame::Error(e) => return self.peer_error(out, e),
             other => return self.unexpected(out, "an auth frame", &other),
@@ -319,7 +354,98 @@ impl CompanionLink {
         self.phase = Phase::Authenticating(auth);
     }
 
+    fn enter_key_exchange(
+        &mut self,
+        peer: Hello,
+        our_nonce: &[u8],
+        peer_nonce: &[u8],
+        out: &mut Vec<LinkOut>,
+    ) {
+        let (Some(our_hello), Some(bonded)) = (&self.our_hello, &self.bonded) else {
+            return self.fail(out, LinkEnd::Protocol("key exchange before hello".into()));
+        };
+        let started = KeyExchange::start(
+            &self.identity,
+            HandshakeFacts {
+                our_hello,
+                peer_hello: &peer,
+                our_nonce,
+                peer_nonce,
+                bonded_peer_pub: &bonded.peer_pub,
+            },
+        );
+        match started {
+            Ok((exchange, share)) => {
+                out.push(LinkOut::Send(share));
+                self.phase = Phase::AwaitingKeyShare { exchange, peer };
+            }
+            Err(e) => self.fail(out, LinkEnd::Protocol(e.to_string())),
+        }
+    }
+
+    fn on_key_share(
+        &mut self,
+        frame: Frame,
+        mut exchange: KeyExchange,
+        peer: Hello,
+        out: &mut Vec<LinkOut>,
+    ) {
+        let share = match frame {
+            Frame::SessionKeyShare(share) => share,
+            Frame::Error(e) => return self.peer_error(out, e),
+            other => return self.unexpected(out, "SessionKeyShare", &other),
+        };
+        match exchange.on_share(&share) {
+            Ok(proof) => {
+                out.push(LinkOut::Send(proof));
+                self.phase = Phase::AwaitingKeyProof { exchange, peer };
+            }
+            Err(e) => self.fail(out, LinkEnd::Protocol(e.to_string())),
+        }
+    }
+
+    fn on_key_proof(
+        &mut self,
+        frame: Frame,
+        exchange: KeyExchange,
+        peer: Hello,
+        out: &mut Vec<LinkOut>,
+    ) {
+        let proof = match frame {
+            Frame::SessionKeyProof(proof) => proof,
+            Frame::Error(e) => return self.peer_error(out, e),
+            other => return self.unexpected(out, "SessionKeyProof", &other),
+        };
+        match exchange.on_proof(&proof) {
+            Ok(channel) => {
+                self.channel = Some(channel);
+                self.phase = Phase::Running;
+                out.push(LinkOut::Running {
+                    peer_name: peer.device_name,
+                    capabilities: peer.capabilities,
+                });
+            }
+            Err(SecureError::BadProof) => {
+                out.push(LinkOut::Send(Frame::Error(ErrorMsg {
+                    code: ErrorCode::AuthFailed,
+                    message: "the key exchange proof did not verify".into(),
+                })));
+                self.fail(out, LinkEnd::AuthFailed);
+            }
+            Err(e) => self.fail(out, LinkEnd::Protocol(e.to_string())),
+        }
+    }
+
     fn on_running(&mut self, frame: Frame, out: &mut Vec<LinkOut>) {
+        // Nothing but the peer's next sealed frame counts from here on. Nothing is sent back: the
+        // peer gets no help finding out what went wrong.
+        let Some(channel) = &mut self.channel else {
+            return self.fail(out, LinkEnd::Protocol("running without keys".into()));
+        };
+        let frame = match channel.open(frame) {
+            Ok(frame) => frame,
+            Err(_) => return self.fail(out, LinkEnd::Tampered),
+        };
         match frame {
             Frame::Ping(p) => {
                 out.push(LinkOut::Send(Frame::Pong(Pong {
@@ -386,7 +512,10 @@ mod tests {
             app_version: "0".into(),
             device_name: "glass".into(),
             identity_pub: identity.public_b64(),
-            capabilities: vec![capability::NOTES_SYNC.to_string()],
+            capabilities: vec![
+                capability::NOTES_SYNC.to_string(),
+                capability::SESSION_CRYPTO.to_string(),
+            ],
         })
     }
 
@@ -397,6 +526,55 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Plays the Glass through the key exchange, from a link that verified the peer's signature.
+    /// Returns the Glass's end of the encrypted link.
+    fn finish_handshake(l: &mut CompanionLink, g: &Identity, nonce_c: Vec<u8>) -> Channel {
+        let our_hello = l.our_hello.clone().unwrap();
+        let Frame::Hello(g_hello) = hello(g) else {
+            panic!();
+        };
+        let nonce_g = decode_nonce(&random_nonce_b64(32)).unwrap();
+        let out = l.on_frame(Frame::AuthChallenge(AuthChallenge {
+            nonce: omg_base64(&nonce_g),
+        }));
+        assert!(matches!(sent(&out)[0], Frame::AuthResponse(_)));
+        let out = l.on_frame(Frame::AuthResult(AuthResult {
+            ok: true,
+            message: "ok".into(),
+        }));
+        let Frame::SessionKeyShare(c_share) = sent(&out)[0].clone() else {
+            panic!("no share");
+        };
+        assert!(!l.is_running(), "auth alone must not start the link");
+        let (mut exchange, g_share) = KeyExchange::start(
+            g,
+            HandshakeFacts {
+                our_hello: &g_hello,
+                peer_hello: &our_hello,
+                our_nonce: &nonce_g,
+                peer_nonce: &nonce_c,
+                bonded_peer_pub: &l.identity.public_b64(),
+            },
+        )
+        .unwrap();
+        let g_proof = exchange.on_share(&c_share).unwrap();
+        let out = l.on_frame(g_share);
+        let Frame::SessionKeyProof(c_proof) = sent(&out)[0].clone() else {
+            panic!("no proof");
+        };
+        assert!(!l.is_running(), "the share alone must not start the link");
+        let channel = exchange.on_proof(&c_proof).unwrap();
+        let out = l.on_frame(g_proof);
+        assert!(matches!(out[0], LinkOut::Running { .. }));
+        assert!(l.is_running());
+        channel
+    }
+
+    fn omg_base64(bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
     fn pair(glass: &Identity) -> (CompanionLink, Vec<u8>) {
@@ -433,24 +611,74 @@ mod tests {
             sent(&out)[0],
             Frame::AuthResult(AuthResult { ok: true, .. })
         ));
-        l.on_frame(Frame::AuthChallenge(AuthChallenge {
-            nonce: random_nonce_b64(32),
-        }));
-        let out = l.on_frame(Frame::AuthResult(AuthResult {
-            ok: true,
-            message: "ok".into(),
-        }));
-        assert!(matches!(out[0], LinkOut::Running { .. }));
-        assert!(l.is_running());
+        let mut glass_end = finish_handshake(&mut l, &g, nonce);
 
         // Pings are answered here; other frames go up.
+        let ping = glass_end
+            .seal(&Frame::Ping(Ping {
+                token: 9,
+                unix_ms: 0,
+            }))
+            .unwrap();
+        let out = l.on_frame(ping);
+        assert!(matches!(sent(&out)[0], Frame::Pong(Pong { token: 9, .. })));
+        let out = l.on_frame(glass_end.seal(&Frame::SettingsGet).unwrap());
+        assert!(matches!(out[0], LinkOut::App(Frame::SettingsGet)));
+
+        // What goes out is sealed: the Glass's end opens it.
+        let bytes = l.encode(&Frame::SettingsGet).unwrap();
+        let mut decoder = omg_protocol::FrameDecoder::new();
+        decoder.push(&bytes);
+        let outer = decoder.next_frame().unwrap().unwrap();
+        assert!(matches!(outer, Frame::Sealed(_)));
+        assert_eq!(glass_end.open(outer).unwrap(), Frame::SettingsGet);
+    }
+
+    #[test]
+    fn a_frame_in_clear_on_a_running_link_ends_it() {
+        let g = glass();
+        let (mut l, nonce) = pair(&g);
+        l.on_frame(Frame::AuthResponse(AuthResponse {
+            signature: g.sign_challenge(&nonce),
+        }));
+        finish_handshake(&mut l, &g, nonce);
         let out = l.on_frame(Frame::Ping(Ping {
-            token: 9,
+            token: 1,
             unix_ms: 0,
         }));
-        assert!(matches!(sent(&out)[0], Frame::Pong(Pong { token: 9, .. })));
-        let out = l.on_frame(Frame::SettingsGet);
-        assert!(matches!(out[0], LinkOut::App(Frame::SettingsGet)));
+        assert!(out
+            .iter()
+            .any(|o| matches!(o, LinkOut::Closed(Err(LinkEnd::Tampered)))));
+        assert!(!out.iter().any(|o| matches!(o, LinkOut::Send(_))));
+        assert!(l.is_closed());
+    }
+
+    #[test]
+    fn application_frames_cannot_leave_before_the_keys_exist() {
+        let g = glass();
+        let (mut l, _) = pair(&g);
+        assert!(matches!(
+            l.encode(&Frame::SettingsGet),
+            Err(SecureError::NotYet(_))
+        ));
+    }
+
+    #[test]
+    fn a_peer_that_does_not_encrypt_is_refused_before_anything_is_stored() {
+        let mut l = link(None, PairingMode::AllowNew);
+        l.start();
+        let Frame::Hello(mut h) = hello(&glass()) else {
+            panic!();
+        };
+        h.capabilities.retain(|c| c != capability::SESSION_CRYPTO);
+        let out = l.on_frame(Frame::Hello(h));
+        assert!(out
+            .iter()
+            .any(|o| matches!(o, LinkOut::Closed(Err(LinkEnd::PeerNotEncrypted)))));
+        assert!(!out.iter().any(|o| matches!(o, LinkOut::Persist(_))));
+        assert!(!sent(&out)
+            .iter()
+            .any(|f| matches!(f, Frame::PairRequest(_) | Frame::AuthChallenge(_))));
     }
 
     #[test]

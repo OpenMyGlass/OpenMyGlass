@@ -33,6 +33,12 @@
 //!
 //! A struct cannot gain fields in general, since postcard is positional. [`Settings`] is the
 //! exception: it ends its frame, so new optional fields can go at its end (see its last field).
+//!
+//! ## Security
+//!
+//! Only the handshake crosses the link in clear. From then on each frame travels inside
+//! [`SealedFrame`], whatever the transport: Bluetooth encryption is not relied on. See
+//! `omg_core::secure` and docs/protocol/link-encryption.md.
 
 pub mod bootstrap;
 pub mod error;
@@ -73,7 +79,17 @@ pub mod capability {
     /// [`BACKBONE`]: a peer advertises it only once it implements those frames, and no
     /// note frame may be sent to a peer that did not advertise it.
     pub const NOTES_SYNC: &str = "notes-sync";
+    /// Every frame after the handshake is encrypted and authenticated. Not optional: a peer that
+    /// does not advertise it is refused, and `omg-core` advertises it whatever it is given. See
+    /// docs/protocol/link-encryption.md.
+    pub const SESSION_CRYPTO: &str = "session-crypto-v1";
 
     /// Everything the current companion core knows how to speak at the backbone level.
-    pub const BACKBONE: &[&str] = &[NOTIFICATIONS, LOCALE, RADIO_CONTROL, AIRPLANE];
+    pub const BACKBONE: &[&str] = &[
+        NOTIFICATIONS,
+        LOCALE,
+        RADIO_CONTROL,
+        AIRPLANE,
+        SESSION_CRYPTO,
+    ];
 }

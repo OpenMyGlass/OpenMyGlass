@@ -253,6 +253,17 @@ pub enum Frame {
     NoteTtsChunk(crate::notes::NoteTtsChunk),
     /// Glass -> Companion: finished with this audio.
     NoteTtsRelease(crate::notes::NoteTtsRelease),
+
+    // ===================== Session encryption (IMPLEMENTED in omg-core) =======
+    // Every peer must advertise `capability::SESSION_CRYPTO`, and one that does not is refused.
+    // See docs/protocol/link-encryption.md.
+    /// Either side, after `AuthResult`: our X25519 ephemeral public key.
+    SessionKeyShare(SessionKeyShare),
+    /// Either side, after the peer's share: our identity's signature over the whole handshake.
+    SessionKeyProof(SessionKeyProof),
+    /// Either side, once both proofs verified: every later frame, encrypted. Nothing else is
+    /// accepted from then on.
+    Sealed(SealedFrame),
 }
 
 impl Frame {
@@ -353,6 +364,9 @@ impl Frame {
             Frame::NoteTtsChunkRequest(_) => "NoteTtsChunkRequest",
             Frame::NoteTtsChunk(_) => "NoteTtsChunk",
             Frame::NoteTtsRelease(_) => "NoteTtsRelease",
+            Frame::SessionKeyShare(_) => "SessionKeyShare",
+            Frame::SessionKeyProof(_) => "SessionKeyProof",
+            Frame::Sealed(_) => "Sealed",
         }
     }
 }
@@ -465,6 +479,31 @@ pub struct PairResult {
     pub ok: bool,
     /// Human-readable detail.
     pub message: String,
+}
+
+/// An X25519 ephemeral public key, fresh for this session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionKeyShare {
+    /// The 32-byte public key.
+    #[serde(with = "serde_bytes")]
+    pub ephemeral_pub: Vec<u8>,
+}
+
+/// Binds the key shares to the bonded identity and to this session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionKeyProof {
+    /// The 64-byte ed25519 signature over the handshake transcript.
+    #[serde(with = "serde_bytes")]
+    pub signature: Vec<u8>,
+}
+
+/// One encrypted [`Frame`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealedFrame {
+    /// ChaCha20-Poly1305 of `postcard(Frame)`, with its 16-byte tag at the end. The nonce is a
+    /// counter both sides keep, so it is not sent: a lost, repeated or reordered frame fails.
+    #[serde(with = "serde_bytes")]
+    pub ciphertext: Vec<u8>,
 }
 
 /// Challenge the peer to sign a nonce with its bonded identity key.

@@ -680,7 +680,8 @@ mod tests {
         });
         for f in [offer, chunk, tts, transcript] {
             let n = wire::encode_payload(&f).unwrap().len();
-            assert!(n < CAP, "{} is {n} bytes", f.wire_name());
+            // With what sealing adds: omg_core::secure::SEAL_OVERHEAD.
+            assert!(n + 32 < CAP, "{} is {n} bytes", f.wire_name());
         }
     }
 
