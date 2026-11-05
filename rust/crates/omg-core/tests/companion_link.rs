@@ -13,7 +13,7 @@ use omg_core::{
     simglass::{self, SimGlassState},
     CompanionLink, LinkOut, PairingMode, PairingRecord,
 };
-use omg_protocol::{capability, frame_bytes, Frame, FrameDecoder, Settings};
+use omg_protocol::{capability, Frame, FrameDecoder, Settings};
 use omg_transport::TcpListenerTransport;
 
 /// Drives the link until `until` says stop. Returns the last output batch's frames for the app.
@@ -29,7 +29,7 @@ fn pump(
     loop {
         for out in pending.drain(..) {
             if let LinkOut::Send(frame) = &out {
-                socket.write_all(&frame_bytes(frame).unwrap()).unwrap();
+                socket.write_all(&link.encode(frame).unwrap()).unwrap();
             }
             if until(&out) {
                 return;
@@ -113,7 +113,7 @@ async fn pairs_reconnects_and_reads_settings_against_the_simulated_glass() {
             assert!(running);
             // The settings mirror works over this link.
             socket
-                .write_all(&frame_bytes(&Frame::SettingsGet).unwrap())
+                .write_all(&link.encode(&Frame::SettingsGet).unwrap())
                 .unwrap();
             let mut volume = None;
             pump(
@@ -132,7 +132,7 @@ async fn pairs_reconnects_and_reads_settings_against_the_simulated_glass() {
             assert_eq!(volume, Some(40));
             for out in link.close("done") {
                 if let LinkOut::Send(frame) = out {
-                    socket.write_all(&frame_bytes(&frame).unwrap()).unwrap();
+                    socket.write_all(&link.encode(&frame).unwrap()).unwrap();
                 }
             }
             persisted

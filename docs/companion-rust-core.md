@@ -156,6 +156,8 @@ Auto-reconnect over the cheapest transport, and mDNS discovery of the companion 
 changes), are the next steps; the frames and the bootstrap address hint are already in
 place.
 
+After mutual auth the link is encrypted: an X25519 exchange signed over the whole handshake gives one key per direction, and every later frame travels in `Frame::Sealed`. A peer that does not support it is refused. See [`protocol/link-encryption.md`](protocol/link-encryption.md).
+
 ## 6. Wi-Fi QR bootstrap (`omg-qr` + `omg-protocol::bootstrap`)
 
 Breaks the chicken-and-egg (the link needs connectivity; configuring Wi-Fi needs the
@@ -211,7 +213,8 @@ glassd (Glass side) depends on the **`omg-protocol` crate** and must:
 3. **Handshake as the Glass role:** send/receive `Hello`; run `authorize` (accept a
    one-time pairing when unbonded; **reject** any peer that is not the bonded one with
    `Error{UnknownPeer}`); run the mutual `AuthChallenge`/`AuthResponse`/`AuthResult`
-   signing over `"openmyglass-companion-auth-v1" || nonce`.
+   signing over `"openmyglass-companion-auth-v1" || nonce`, then the key exchange in
+   `omg_core::secure`; see [`protocol/link-encryption.md`](protocol/link-encryption.md).
 4. **Persist** its ed25519 identity and the bonded companion across reboots
    (`/var/lib/glassd`).
 5. **Backbone handlers:** answer `Ping` with `Pong`; answer `StatusRequest` with

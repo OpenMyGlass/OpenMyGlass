@@ -7,6 +7,7 @@
 //! * [`store`] — persistent state: our identity + the single bonded peer.
 //! * [`companion_link`] — the companion's side of the handshake as a pure state machine, for
 //!   a frontend that owns its socket (the phone apps).
+//! * [`secure`] — encrypts the link after the handshake, whichever frontend drives it.
 //! * [`notes`] — notes with attachments and deferred sync: pure state machines for both
 //!   sides, a crash-safe queue, and the speech engine traits the phone apps implement.
 //!
@@ -24,6 +25,7 @@
 pub mod companion_link;
 pub mod identity;
 pub mod notes;
+pub mod secure;
 #[cfg(feature = "async-link")]
 pub mod session;
 #[cfg(feature = "async-link")]
@@ -97,6 +99,14 @@ pub enum CoreError {
     /// The peer sent an [`ErrorMsg`].
     #[error("peer error: {0:?}")]
     PeerError(ErrorMsg),
+
+    /// The peer does not encrypt the link, and an unencrypted link is never used.
+    #[error("the peer does not support an encrypted link")]
+    PeerNotEncrypted,
+
+    /// The key exchange failed.
+    #[error("key exchange: {0}")]
+    KeyExchange(#[from] secure::SecureError),
 
     /// A note breaks a protocol limit, or could not be sealed.
     #[error("invalid note: {0}")]

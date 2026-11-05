@@ -47,6 +47,22 @@ impl Identity {
         B64.encode(self.signing.verifying_key().to_bytes())
     }
 
+    /// A challenge nonce that is fresh even if the OS random source is thin. See
+    /// [`crate::secure`].
+    pub fn hedged_nonce_b64(&self) -> String {
+        B64.encode(crate::secure::hedged_random(self, b"auth-nonce", b""))
+    }
+
+    /// The secret seed, for [`crate::secure`] only. Wiped when dropped.
+    pub(crate) fn secret_seed(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        zeroize::Zeroizing::new(self.signing.to_bytes())
+    }
+
+    /// Signs a message the caller has already given its own domain separation.
+    pub(crate) fn sign_raw(&self, message: &[u8]) -> [u8; 64] {
+        self.signing.sign(message).to_bytes()
+    }
+
     /// Sign `AUTH_CONTEXT || nonce` and return the base64 signature.
     pub fn sign_challenge(&self, nonce: &[u8]) -> String {
         let mut msg = Vec::with_capacity(AUTH_CONTEXT.len() + nonce.len());

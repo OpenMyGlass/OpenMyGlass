@@ -35,7 +35,13 @@ pub fn decode_payload(bytes: &[u8]) -> Result<Frame, WireError> {
     if bytes.len() > MAX_FRAME_LEN {
         return Err(WireError::FrameTooLarge(bytes.len()));
     }
-    Ok(postcard::from_bytes(bytes)?)
+    let (frame, rest) = postcard::take_from_bytes(bytes)?;
+    // Postcard ignores what follows a value. Bytes that nothing authenticates have no place around
+    // an authenticated frame; other frames may be followed by fields of a newer peer's.
+    if matches!(frame, Frame::Sealed(_)) && !rest.is_empty() {
+        return Err(WireError::TrailingBytes);
+    }
+    Ok(frame)
 }
 
 /// Encodes one frame with its length prefix.
@@ -94,6 +100,7 @@ impl FrameDecoder {
 mod tests {
     use super::*;
     use crate::messages::*;
+    use crate::notes::MAX_NOTE_CHUNK_LEN;
 
     #[test]
     fn decoder_reassembles_frames_split_across_reads() {
@@ -126,6 +133,42 @@ mod tests {
         let mut decoder = FrameDecoder::new();
         decoder.push(&[0, 0, 0, 1, 0xff]);
         assert!(decoder.next_frame().is_err());
+    }
+
+    #[test]
+    fn a_sealed_frame_is_exact_and_costs_a_few_bytes() {
+        let ciphertext = vec![7u8; MAX_NOTE_CHUNK_LEN as usize];
+        let frame = Frame::Sealed(SealedFrame {
+            ciphertext: ciphertext.clone(),
+        });
+        let mut bytes = encode_payload(&frame).unwrap();
+        // One or two bytes of variant, and the length of the ciphertext as a varint.
+        assert!(bytes.len() <= ciphertext.len() + 2 + 4);
+        assert_eq!(decode_payload(&bytes).unwrap(), frame);
+        bytes.push(0);
+        assert!(matches!(
+            decode_payload(&bytes),
+            Err(WireError::TrailingBytes)
+        ));
+    }
+
+    #[test]
+    fn the_session_variants_are_the_last_ones() {
+        // Positional on the wire: anything added before them breaks every peer.
+        let sealed = encode_payload(&Frame::Sealed(SealedFrame {
+            ciphertext: Vec::new(),
+        }))
+        .unwrap();
+        let share = encode_payload(&Frame::SessionKeyShare(SessionKeyShare {
+            ephemeral_pub: Vec::new(),
+        }))
+        .unwrap();
+        let release = encode_payload(&Frame::NoteTtsRelease(crate::notes::NoteTtsRelease {
+            request_id: 0,
+        }))
+        .unwrap();
+        assert_eq!(share[0], release[0] + 1);
+        assert_eq!(sealed[0], share[0] + 2);
     }
 
     #[test]

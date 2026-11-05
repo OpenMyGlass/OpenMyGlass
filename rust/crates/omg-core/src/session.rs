@@ -1,6 +1,9 @@
 //! The link session state machine: Hello exchange, authorize/pair, mutual auth, then
 //! the running message loop. This is fully implemented and exercised end-to-end by the
 //! integration tests over both an in-memory pipe and a real TCP socket.
+//!
+//! Every frame after the handshake is encrypted ([`crate::secure`]): the link's codec does it, so
+//! the session and whoever takes the link from it have nothing to remember.
 
 use omg_protocol::{
     capability, AuthChallenge, AuthResponse, AuthResult, Bye, ErrorCode, ErrorMsg, Frame, Hello,
@@ -13,6 +16,10 @@ pub use crate::companion_link::PairingMode;
 use crate::{
     identity::{decode_nonce, random_nonce_b64, verify_challenge, Identity},
     now_ms,
+    secure::{
+        allowed_in_clear, peer_supports_crypto, refuse_unencrypted_peer, with_crypto_capability,
+        HandshakeFacts, KeyExchange, SecureError,
+    },
     store::PairingRecord,
     CoreError,
 };
@@ -58,6 +65,7 @@ pub struct Session<S> {
     identity: Identity,
     bonded: Option<PairingRecord>,
     cfg: SessionConfig,
+    our_hello: Option<Hello>,
     peer_hello: Option<Hello>,
 }
 
@@ -67,13 +75,15 @@ impl<S: Stream> Session<S> {
         link: Link<S>,
         identity: Identity,
         bonded: Option<PairingRecord>,
-        cfg: SessionConfig,
+        mut cfg: SessionConfig,
     ) -> Self {
+        cfg.capabilities = with_crypto_capability(cfg.capabilities);
         Session {
             link,
             identity,
             bonded,
             cfg,
+            our_hello: None,
             peer_hello: None,
         }
     }
@@ -118,7 +128,8 @@ impl<S: Stream> Session<S> {
             identity_pub: self.identity.public_b64(),
             capabilities: self.cfg.capabilities.clone(),
         };
-        self.link.send(Frame::Hello(hello)).await?;
+        self.our_hello = Some(hello.clone());
+        self.link.send_reading(Frame::Hello(hello)).await?;
 
         let frame = self.recv_required().await?;
         let peer = match frame {
@@ -133,7 +144,7 @@ impl<S: Stream> Session<S> {
         if peer.protocol_version != PROTOCOL_VERSION {
             let _ = self
                 .link
-                .send(Frame::Error(ErrorMsg {
+                .send_reading(Frame::Error(ErrorMsg {
                     code: ErrorCode::VersionMismatch,
                     message: format!("peer v{} != v{}", peer.protocol_version, PROTOCOL_VERSION),
                 }))
@@ -142,6 +153,11 @@ impl<S: Stream> Session<S> {
                 ours: PROTOCOL_VERSION,
                 theirs: peer.protocol_version,
             });
+        }
+        // Refused now, before any bond is stored: there is no fallback to downgrade to.
+        if !peer_supports_crypto(&peer) {
+            let _ = self.link.send_reading(refuse_unencrypted_peer()).await;
+            return Err(CoreError::PeerNotEncrypted);
         }
         debug!(role = ?peer.role, name = %peer.device_name, "peer hello");
         self.peer_hello = Some(peer.clone());
@@ -171,7 +187,7 @@ impl<S: Stream> Session<S> {
             // A different device is trying to use an already-bonded side.
             let _ = self
                 .link
-                .send(Frame::Error(ErrorMsg {
+                .send_reading(Frame::Error(ErrorMsg {
                     code: ErrorCode::UnknownPeer,
                     message: "already bonded to another companion".into(),
                 }))
@@ -182,7 +198,7 @@ impl<S: Stream> Session<S> {
         if mode == PairingMode::ReuseOnly {
             let _ = self
                 .link
-                .send(Frame::Error(ErrorMsg {
+                .send_reading(Frame::Error(ErrorMsg {
                     code: ErrorCode::NotPaired,
                     message: "no pairing and new pairing not permitted".into(),
                 }))
@@ -202,7 +218,7 @@ impl<S: Stream> Session<S> {
     async fn pair_as_companion(&mut self, peer: &Hello) -> Result<PairingRecord, CoreError> {
         let nonce = random_nonce_b64(16);
         self.link
-            .send(Frame::PairRequest(PairRequest {
+            .send_reading(Frame::PairRequest(PairRequest {
                 companion_name: self.cfg.device_name.clone(),
                 companion_pub: self.identity.public_b64(),
                 nonce: nonce.clone(),
@@ -229,7 +245,7 @@ impl<S: Stream> Session<S> {
             return Err(CoreError::Protocol("PairAccept nonce mismatch".into()));
         }
         self.link
-            .send(Frame::PairResult(PairResult {
+            .send_reading(Frame::PairResult(PairResult {
                 ok: true,
                 message: "companion bonded".into(),
             }))
@@ -241,7 +257,7 @@ impl<S: Stream> Session<S> {
         })
     }
 
-    async fn pair_as_glass(&mut self, _peer: &Hello) -> Result<PairingRecord, CoreError> {
+    async fn pair_as_glass(&mut self, peer: &Hello) -> Result<PairingRecord, CoreError> {
         let req = match self.recv_required().await? {
             Frame::PairRequest(r) => r,
             Frame::Error(e) => return Err(CoreError::PeerError(e)),
@@ -252,8 +268,13 @@ impl<S: Stream> Session<S> {
                 )))
             }
         };
+        if req.companion_pub != peer.identity_pub {
+            return Err(CoreError::Protocol(
+                "PairRequest key does not match Hello".into(),
+            ));
+        }
         self.link
-            .send(Frame::PairAccept(PairAccept {
+            .send_reading(Frame::PairAccept(PairAccept {
                 glass_name: self.cfg.device_name.clone(),
                 glass_pub: self.identity.public_b64(),
                 nonce: req.nonce.clone(),
@@ -283,7 +304,8 @@ impl<S: Stream> Session<S> {
     }
 
     /// Mutual challenge/response: each side proves it holds the private key behind the
-    /// bonded public key. Must be called after [`authorize`](Session::authorize).
+    /// bonded public key, then the link is encrypted. Must be called after
+    /// [`authorize`](Session::authorize).
     pub async fn authenticate(&mut self) -> Result<(), CoreError> {
         let bonded = self
             .bonded
@@ -291,10 +313,10 @@ impl<S: Stream> Session<S> {
             .ok_or_else(|| CoreError::Protocol("authenticate before authorize".into()))?;
 
         // Send our challenge first; both sides' challenges are then in flight.
-        let our_nonce_b64 = random_nonce_b64(32);
+        let our_nonce_b64 = self.identity.hedged_nonce_b64();
         let our_nonce = decode_nonce(&our_nonce_b64)?;
         self.link
-            .send(Frame::AuthChallenge(AuthChallenge {
+            .send_reading(Frame::AuthChallenge(AuthChallenge {
                 nonce: our_nonce_b64,
             }))
             .await?;
@@ -302,14 +324,19 @@ impl<S: Stream> Session<S> {
         let mut answered_peer = false; // we signed their challenge
         let mut got_their_response = false; // we verified their signature
         let mut verify_ok = false;
+        let mut peer_nonce = Vec::new();
 
         while !(answered_peer && got_their_response) {
             match self.recv_required().await? {
+                Frame::AuthChallenge(_) if answered_peer => {
+                    return Err(CoreError::Protocol("a second AuthChallenge".into()));
+                }
                 Frame::AuthChallenge(ch) => {
                     let nonce = decode_nonce(&ch.nonce)?;
                     let sig = self.identity.sign_challenge(&nonce);
+                    peer_nonce = nonce;
                     self.link
-                        .send(Frame::AuthResponse(AuthResponse { signature: sig }))
+                        .send_reading(Frame::AuthResponse(AuthResponse { signature: sig }))
                         .await?;
                     answered_peer = true;
                 }
@@ -328,7 +355,7 @@ impl<S: Stream> Session<S> {
         }
 
         self.link
-            .send(Frame::AuthResult(AuthResult {
+            .send_reading(Frame::AuthResult(AuthResult {
                 ok: verify_ok,
                 message: if verify_ok {
                     "ok".into()
@@ -342,16 +369,79 @@ impl<S: Stream> Session<S> {
         }
 
         match self.recv_required().await? {
-            Frame::AuthResult(r) if r.ok => {
-                info!("mutual auth ok");
-                Ok(())
+            Frame::AuthResult(r) if r.ok => {}
+            Frame::AuthResult(_) => return Err(CoreError::AuthFailed),
+            other => {
+                return Err(CoreError::Protocol(format!(
+                    "expected AuthResult, got {}",
+                    other.wire_name()
+                )))
             }
-            Frame::AuthResult(_) => Err(CoreError::AuthFailed),
-            other => Err(CoreError::Protocol(format!(
-                "expected AuthResult, got {}",
-                other.wire_name()
-            ))),
         }
+        self.encrypt_link(&bonded.peer_pub, &our_nonce, &peer_nonce)
+            .await?;
+        info!("mutual auth ok, link encrypted");
+        Ok(())
+    }
+
+    /// Runs the key exchange and installs the keys.
+    async fn encrypt_link(
+        &mut self,
+        bonded_peer_pub: &str,
+        our_nonce: &[u8],
+        peer_nonce: &[u8],
+    ) -> Result<(), CoreError> {
+        let (our_hello, peer_hello) = match (&self.our_hello, &self.peer_hello) {
+            (Some(ours), Some(theirs)) => (ours, theirs),
+            _ => return Err(CoreError::Protocol("key exchange before hello".into())),
+        };
+        let (mut exchange, share) = KeyExchange::start(
+            &self.identity,
+            HandshakeFacts {
+                our_hello,
+                peer_hello,
+                our_nonce,
+                peer_nonce,
+                bonded_peer_pub,
+            },
+        )?;
+        self.link.send_reading(share).await?;
+        let proof = match self.recv_required().await? {
+            Frame::SessionKeyShare(share) => exchange.on_share(&share)?,
+            Frame::Error(e) => return Err(CoreError::PeerError(e)),
+            other => {
+                return Err(CoreError::Protocol(format!(
+                    "expected SessionKeyShare, got {}",
+                    other.wire_name()
+                )))
+            }
+        };
+        self.link.send_reading(proof).await?;
+        let channel = match self.recv_required().await? {
+            Frame::SessionKeyProof(proof) => match exchange.on_proof(&proof) {
+                Ok(channel) => channel,
+                Err(SecureError::BadProof) => {
+                    let _ = self
+                        .link
+                        .send_reading(Frame::Error(ErrorMsg {
+                            code: ErrorCode::AuthFailed,
+                            message: "the key exchange proof did not verify".into(),
+                        }))
+                        .await;
+                    return Err(SecureError::BadProof.into());
+                }
+                Err(e) => return Err(e.into()),
+            },
+            Frame::Error(e) => return Err(CoreError::PeerError(e)),
+            other => {
+                return Err(CoreError::Protocol(format!(
+                    "expected SessionKeyProof, got {}",
+                    other.wire_name()
+                )))
+            }
+        };
+        self.link.set_cipher(Box::new(channel));
+        Ok(())
     }
 
     /// Run the full companion-side handshake: hello, authorize/pair, auth.
@@ -363,8 +453,12 @@ impl<S: Stream> Session<S> {
         Ok(rec)
     }
 
-    /// Send any frame.
+    /// Send any frame, encrypted. Refused before the handshake is over, so nothing but the
+    /// handshake ever leaves in clear.
     pub async fn send(&mut self, frame: Frame) -> Result<(), CoreError> {
+        if !self.link.is_encrypted() && !allowed_in_clear(&frame) {
+            return Err(SecureError::NotYet(frame.wire_name()).into());
+        }
         Ok(self.link.send(frame).await?)
     }
 
