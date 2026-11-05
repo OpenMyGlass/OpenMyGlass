@@ -26,10 +26,7 @@ interface ByteLink {
     fun close()
 }
 
-/**
- * Wi-Fi, or USB through `adb reverse`. Bluetooth Classic would be one more [ByteLink], on Android
- * only: nothing shared may assume it, because iOS does not have it.
- */
+/** Wi-Fi, or USB through `adb reverse`. [BleLink] is the everyday one. */
 class TcpLink(host: String, port: Int) : ByteLink {
     private val socket = Socket().apply {
         tcpNoDelay = true
@@ -71,13 +68,16 @@ class LinkController(
     @Volatile private var current: ByteLink? = null
     private var supervisor: Thread? = null
 
-    /** Keep a link open with what [opener] returns. */
+    /** Keep a link open with what [opener] returns, instead of any link there is now. */
     @Synchronized
     fun connect(opener: () -> ByteLink) {
         open = opener
+        current?.close()
         if (supervisor?.isAlive != true) {
             supervisor = Thread({ supervise() }, "omg-link").apply { start() }
         }
+        // It may be waiting out a backoff from another link.
+        wake.release()
     }
 
     /** Close the link and stay down. */
@@ -100,6 +100,8 @@ class LinkController(
                 if (open != null) {
                     runLink(link)
                     backoffMs = MIN_BACKOFF_MS
+                } else {
+                    link.close()
                 }
             } catch (_: IOException) {
                 // The next attempt is below.

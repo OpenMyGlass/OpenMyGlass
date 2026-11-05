@@ -22,6 +22,7 @@
 //! note sync are implemented and tested end-to-end. Everything else in [`omg_protocol`] is
 //! typed and scaffolded.
 
+pub mod ble;
 pub mod companion_link;
 pub mod identity;
 pub mod notes;

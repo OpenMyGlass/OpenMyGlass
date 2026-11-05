@@ -98,11 +98,19 @@ class MainActivity : Activity() {
                 WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
         )
         refreshAll()
-        // A bonded phone goes back to its Glass by itself, so waiting notes sync.
-        if (core.snapshot().bondedTo != null) connect()
+        // A bonded phone goes back to its Glass by itself, over the link it last used, so waiting
+        // notes sync. It does not ask for permissions unasked.
+        if (core.snapshot().bondedTo != null) {
+            if (prefs.getString(KEY_LINK, LINK_TCP) == LINK_BLE) {
+                if (BleLink.missingPermissions(this).isEmpty()) connectBle()
+            } else {
+                connect()
+            }
+        }
     }
 
     override fun onDestroy() {
+        bleAttempt = null
         link.disconnect()
         player?.release()
         super.onDestroy()
@@ -118,9 +126,48 @@ class MainActivity : Activity() {
             status.text = "Address must be host:port"
             return
         }
-        prefs.edit().putString(KEY_ADDRESS, text).apply()
+        prefs.edit().putString(KEY_ADDRESS, text).putString(KEY_LINK, LINK_TCP).apply()
+        bleAttempt = null
+        linkNote = null
         link.connect { TcpLink(host, port) }
         refreshStatus()
+    }
+
+    /** Set while a BLE link is wanted. A scan in progress stops when this is no longer its own. */
+    @Volatile private var bleAttempt: Any? = null
+
+    /** The address of the BLE link in use, saved once the Glass has proved itself. */
+    @Volatile private var bleAddress: String? = null
+    private var linkNote: String? = null
+
+    /** Finds the Glass by its service: no address to type. Asks for the permissions first. */
+    private fun connectBle() {
+        val missing = BleLink.missingPermissions(this)
+        if (missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), REQUEST_BLUETOOTH)
+            return
+        }
+        prefs.edit().putString(KEY_LINK, LINK_BLE).apply()
+        val attempt = Any()
+        bleAttempt = attempt
+        linkNote = "Looking for the Glass over Bluetooth"
+        val known = prefs.getString(KEY_BLE_ADDRESS, null)
+            .takeIf { core.snapshot().bondedTo != null }
+        link.connect {
+            BleLink.open(applicationContext, known) { bleAttempt !== attempt }.also {
+                bleAddress = it.address
+            }
+        }
+        refreshStatus()
+    }
+
+    private fun bluetoothAnswered() {
+        if (BleLink.missingPermissions(this).isEmpty()) {
+            connectBle()
+        } else {
+            lastProblem = "Bluetooth needs these permissions to find the Glass"
+            refreshStatus()
+        }
     }
 
     private fun onEvents(events: List<CoreEvent>) {
@@ -130,7 +177,13 @@ class MainActivity : Activity() {
                 is CoreEvent.SettingsChanged -> showSettings(e.settings)
                 is CoreEvent.NotesChanged, is CoreEvent.NoteSynced -> notes = true
                 is CoreEvent.LinkClosed -> e.reason?.let { lastProblem = it }
-                is CoreEvent.LinkRunning -> lastProblem = null
+                is CoreEvent.LinkRunning -> {
+                    lastProblem = null
+                    // This Glass passed the handshake: the next scan looks for it alone.
+                    if (bleAttempt != null) {
+                        bleAddress?.let { prefs.edit().putString(KEY_BLE_ADDRESS, it).apply() }
+                    }
+                }
                 is CoreEvent.NoteDeferred -> lastProblem = "Note waiting: ${e.reason}"
                 is CoreEvent.NoteRefused -> lastProblem = "Note refused: ${e.reason}"
                 else -> Unit
@@ -155,9 +208,11 @@ class MainActivity : Activity() {
         status.text = buildString {
             append(
                 when (s.phase) {
-                    LinkPhase.DOWN -> "Not connected"
+                    LinkPhase.DOWN -> linkNote?.takeIf { bleAttempt != null } ?: "Not connected"
                     LinkPhase.HANDSHAKE -> "Connecting"
-                    LinkPhase.RUNNING -> "Connected to ${g.name ?: "Glass"}"
+                    LinkPhase.RUNNING ->
+                        "Connected to ${g.name ?: "Glass"}" +
+                            if (bleAttempt != null) " over Bluetooth" else ""
                 },
             )
             s.bondedTo?.let { append("\nPaired with $it") }
@@ -190,12 +245,16 @@ class MainActivity : Activity() {
         root.addView(
             row(
                 button("Connect") { connect() },
+                button("Bluetooth") { connectBle() },
                 button("Disconnect") {
+                    bleAttempt = null
                     link.disconnect()
                     refreshStatus()
                 },
                 button("Unpair") {
                     core.unpair()
+                    prefs.edit().remove(KEY_BLE_ADDRESS).apply()
+                    bleAttempt = null
                     link.poke()
                     main.postDelayed({ link.disconnect(); refreshStatus() }, 300)
                 },
@@ -527,6 +586,7 @@ class MainActivity : Activity() {
         if (requestCode == REQUEST_MIC && results.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             toggleRecording()
         }
+        if (requestCode == REQUEST_BLUETOOTH) bluetoothAnswered()
     }
 
     private fun showDraftFiles() {
@@ -634,12 +694,17 @@ class MainActivity : Activity() {
 
     private companion object {
         const val KEY_ADDRESS = "address"
+        const val KEY_LINK = "link"
+        const val KEY_BLE_ADDRESS = "ble_address"
+        const val LINK_TCP = "tcp"
+        const val LINK_BLE = "ble"
 
         /** The other end of `adb reverse tcp:7700 tcp:7700`, until the Glass is reachable. */
         const val DEFAULT_ADDRESS = "127.0.0.1:7700"
         const val REQUEST_PHOTOS = 1
         const val REQUEST_VIDEO = 2
         const val REQUEST_MIC = 3
+        const val REQUEST_BLUETOOTH = 4
         val LOCALE_NAMES = mapOf(
             NoteLocale.IT to "Italiano",
             NoteLocale.EN to "English",
