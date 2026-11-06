@@ -67,7 +67,7 @@ The owner has not answered these yet. Each is one constant, so the answer is a o
 | Question | Default in the code | Where |
 |---|---|---|
 | Delete a note from the Glass after sync? | Yes, only after the phone's verified acknowledgements | `DeletePolicy::default()` in `omg-core` |
-| Automatic sync limit per attachment on a slow link | 64 MiB on Bluetooth Classic, 256 KiB on BLE | `AUTO_SYNC_LIMIT_MODERATE`, `AUTO_SYNC_LIMIT_CONSTRAINED` in `omg-core` |
+| Automatic sync limit per attachment on a slow link | Decided for BLE: 256 KiB. Still a default: 64 MiB on Bluetooth Classic | `AUTO_SYNC_LIMIT_MODERATE`, `AUTO_SYNC_LIMIT_CONSTRAINED` in `omg-core` |
 | May one note mix photos and video? | Yes | `ALLOW_PHOTOS_WITH_VIDEO` in `omg-protocol` |
 
 glassd pins `omg-core` by commit, so a change here reaches it when the pin moves.

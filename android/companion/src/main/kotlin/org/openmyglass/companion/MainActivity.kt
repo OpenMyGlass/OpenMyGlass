@@ -2,6 +2,7 @@ package org.openmyglass.companion
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
@@ -293,8 +294,18 @@ class MainActivity : Activity() {
         settingsBox = column()
         heading("Radios")
         wifi = plainSwitch("Wi-Fi") { core.setRadio(GlassRadio.WIFI, it); link.poke() }
-        bluetooth = plainSwitch("Bluetooth") { core.setRadio(GlassRadio.BLUETOOTH, it); link.poke() }
-        airplane = plainSwitch("Airplane mode") { core.setAirplaneMode(it); link.poke() }
+        bluetooth = plainSwitch("Bluetooth") { on ->
+            confirmIfItDropsTheLink(bluetooth, !on, "Bluetooth") {
+                core.setRadio(GlassRadio.BLUETOOTH, on)
+                link.poke()
+            }
+        }
+        airplane = plainSwitch("Airplane mode") { on ->
+            confirmIfItDropsTheLink(airplane, on, "Airplane mode") {
+                core.setAirplaneMode(on)
+                link.poke()
+            }
+        }
 
         heading("Screen and waking")
         number("brightness", "Brightness", 0, 100, { it.brightness }) { GlassSettings(brightness = it) }
@@ -373,6 +384,27 @@ class MainActivity : Activity() {
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
             },
         )
+    }
+
+    /**
+     * This phone reaches the Glass over the radio the owner is about to turn off, and only the
+     * Glass itself can then turn it back on: ask first, and put the switch back on "no".
+     */
+    private fun confirmIfItDropsTheLink(view: Switch, dropsRadio: Boolean, what: String, apply: () -> Unit) {
+        if (!dropsRadio || bleAttempt == null) {
+            apply()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Disconnect from the Glass?")
+            .setMessage(
+                "This phone is connected over Bluetooth, so changing $what will end the connection. " +
+                    "To connect again, turn Bluetooth back on from the settings on the Glass.",
+            )
+            .setPositiveButton("Continue") { _, _ -> apply() }
+            .setNegativeButton("Cancel") { _, _ -> view.setShown(!view.isChecked) }
+            .setOnCancelListener { view.setShown(!view.isChecked) }
+            .show()
     }
 
     private fun plainSwitch(label: String, onChange: (Boolean) -> Unit): Switch {

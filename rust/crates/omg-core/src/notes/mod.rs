@@ -42,7 +42,7 @@ use omg_protocol::{Frame, NoteManifest, Sha256Digest, MAX_NOTE_CHUNK_LEN};
 use sha2::{Digest, Sha256};
 
 /// Attachments over this size wait for a faster link on a `constrained` link: about 90 s at the
-/// 3 kB/s BLE measured. Owner default, still open: see `docs/companion-notes-sync.md`.
+/// 3 kB/s BLE measured. The owner's decision: see `docs/companion-notes-sync.md`.
 pub const AUTO_SYNC_LIMIT_CONSTRAINED: u64 = 256 * 1024;
 /// The same on a `moderate` link.
 pub const AUTO_SYNC_LIMIT_MODERATE: u64 = 64 * 1024 * 1024;
