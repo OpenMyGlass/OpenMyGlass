@@ -160,9 +160,21 @@ class MainActivity : Activity(), CompanionScreen {
     // ------------------------------ the core, away from the main thread ------------------------------
 
     /** Runs [call] on the core's thread, then [then] here, if this screen is still up. */
-    private fun <T> onCore(call: () -> T, then: (T) -> Unit = {}) {
+    private fun <T> onCore(call: () -> T, failed: () -> Unit = {}, then: (T) -> Unit = {}) {
         process.coreCalls.execute {
-            val result = call()
+            val result = try {
+                call()
+            } catch (e: Exception) {
+                // A panic in the core arrives as uniffi's InternalException. It is not worth the
+                // process: say so, and leave the thread to the next call.
+                main.post {
+                    if (!isDestroyed) {
+                        failed()
+                        onLinkFailed("The core failed: ${e.message ?: e}")
+                    }
+                }
+                return@execute
+            }
             main.post { if (!isDestroyed) then(result) }
         }
     }
@@ -190,7 +202,7 @@ class MainActivity : Activity(), CompanionScreen {
                 return
             }
             loading = true
-            onCore(load) {
+            onCore(load, failed = { loading = false }) {
                 loading = false
                 draw(it)
                 if (again) {
@@ -221,6 +233,7 @@ class MainActivity : Activity(), CompanionScreen {
         prefs.edit().putString(KEY_ADDRESS, text).putString(KEY_LINK, LINK_TCP).apply()
         linkNote = null
         lastProblem = null
+        process.linkRequests++
         link.connect { TcpLink(host, port) }
         refreshStatus()
     }
@@ -244,6 +257,7 @@ class MainActivity : Activity(), CompanionScreen {
         prefs.edit().putString(KEY_LINK, LINK_BLE).apply()
         linkNote = "Looking for the Glass over Bluetooth"
         lastProblem = null
+        process.linkRequests++
         link.connect { cancelled ->
             val address = prefs.getString(KEY_BLE_ADDRESS, null)
                 .takeIf { core.snapshot().bondedTo != null }
@@ -378,10 +392,14 @@ class MainActivity : Activity(), CompanionScreen {
                 button("Disconnect") {
                     linkNote = null
                     lastProblem = null
+                    process.linkRequests++
                     link.disconnect()
                     refreshStatus()
                 },
                 button("Unpair") {
+                    // Waits behind other calls. A link the owner asks for meanwhile is newer than
+                    // this, and must not be ended by it.
+                    val asked = process.linkRequests
                     onCore({
                         // If this phone cannot forget the bond, the core tells the Glass nothing
                         // and the link stays, so both ends still agree.
@@ -389,7 +407,10 @@ class MainActivity : Activity(), CompanionScreen {
                             core.unpair()
                             prefs.edit().remove(KEY_BLE_ADDRESS).apply()
                             // The Glass forgets this phone only if the core's last frame reaches it.
-                            link.disconnectAfterFlush()
+                            // On the main thread, where requests are made, so none slips in between.
+                            main.post {
+                                if (process.linkRequests == asked) link.disconnectAfterFlush()
+                            }
                             null
                         } catch (e: org.openmyglass.corebindings.CoreFailure) {
                             "Could not forget the Glass on this phone: ${e.message}"

@@ -572,14 +572,58 @@ fn polling_leaves_what_the_pump_must_write_alone() {
     assert!(!phone.pump().outgoing.is_empty(), "the handshake went out");
     phone.link_down();
 
-    // Polling all through a real handshake loses no byte of it.
+    // Polling all through a real link loses no byte of it and takes no event from the pump:
+    // those carry which link they came from, and must stay in order.
     let app = App::connect(phone.clone(), &addr, true);
     let start = Instant::now();
-    while phone.snapshot().phase != LinkPhase::Running {
-        phone.poll();
-        assert!(start.elapsed() < Duration::from_secs(10), "no handshake");
+    let mut polled = Vec::new();
+    while !app
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| matches!(e, CoreEvent::SettingsChanged { .. }))
+    {
+        polled.extend(phone.poll());
+        assert!(start.elapsed() < Duration::from_secs(10), "no settings");
     }
+    for _ in 0..100 {
+        polled.extend(phone.poll());
+    }
+    assert!(polled.is_empty(), "the poll took {polled:?}");
+    let pumped = app.events.lock().unwrap().clone();
+    let running = pumped
+        .iter()
+        .position(|e| matches!(e, CoreEvent::LinkRunning { .. }));
+    let settings = pumped
+        .iter()
+        .position(|e| matches!(e, CoreEvent::SettingsChanged { .. }));
+    assert!(running.unwrap() < settings.unwrap());
     app.close();
+}
+
+#[test]
+fn speech_finished_during_a_link_reaches_the_pump_and_with_no_link_the_poll() {
+    let (addr, _rt) = sim_glass(None, false);
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("parole");
+    let phone = test_core(tmp.path(), &engines);
+    let app = App::connect(phone.clone(), &addr, true);
+    app.wait_for("the link", |e| {
+        e.iter().any(|e| matches!(e, CoreEvent::LinkRunning { .. }))
+    });
+    add_voice_note(&phone, tmp.path(), None);
+    app.wait_for("the transcript", |_| phone.notes()[0].transcript.is_some());
+    app.close();
+
+    // With no link, the poll is all there is.
+    let id = add_voice_note(&phone, tmp.path(), None);
+    poll_until(&phone, |_| {
+        phone
+            .notes()
+            .iter()
+            .any(|n| n.id == id && n.transcript.is_some())
+    });
 }
 
 #[test]

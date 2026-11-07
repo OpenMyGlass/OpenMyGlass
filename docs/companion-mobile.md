@@ -40,7 +40,7 @@ then:    socket.close(); core.link_down()
 poller:  loop { sleep(500 ms); show(core.poll()) }
 ```
 
-A blocked write never stops reading, which matters on small Bluetooth buffers, where two peers could otherwise each wait for the other to read. Bytes leave in the order the core produced them, whichever thread called it. `poll()` exists because nothing pumps with no link, yet a transcript or a note read aloud can finish then. It leaves what `pump()` must write alone, so it needs no coordination with the link's threads.
+A blocked write never stops reading, which matters on small Bluetooth buffers, where two peers could otherwise each wait for the other to read. Bytes leave in the order the core produced them, whichever thread called it. `poll()` exists because nothing pumps with no link, yet a transcript or a note read aloud can finish then. While a link is up it returns nothing, so every event of a link reaches the pump, in order and with the link it came from. It leaves what `pump()` must write alone, so it needs no coordination with the link's threads.
 
 **No call belongs on a UI thread.** A call waits for the core's lock, which the reader holds while it syncs a file or hashes a whole attachment, for seconds on a big video. The Android screen makes all its calls on one background thread of its own and draws what comes back. That thread is for the screen only: the link and the poller call the core from their own.
 

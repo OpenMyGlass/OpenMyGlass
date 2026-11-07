@@ -1167,12 +1167,18 @@ impl CompanionCore {
         }
     }
 
-    /// What happened, with or without a link. Results of finished speech work are stored here,
-    /// so a transcript taken with no link still shows up. Call now and then from any thread
-    /// while the app is open. It leaves what [`pump`](CompanionCore::pump) must write alone.
+    /// What happened while no link is up. Results of finished speech work are stored here, so a
+    /// transcript taken with no link still shows up. Call now and then from any thread while the
+    /// app is open. **While a link is up it returns nothing:** everything then goes to
+    /// [`pump`](CompanionCore::pump), so link events keep their order and reach the caller that
+    /// knows which link they came from. It never touches what `pump` must write.
     pub fn poll(&self) -> Vec<CoreEvent> {
         let mut inner = self.finish_speech();
         self.start_speech(&mut inner);
+        // Under the same lock as the check, so no link event can slip in between.
+        if inner.link.is_some() {
+            return Vec::new();
+        }
         std::mem::take(&mut inner.events)
     }
 

@@ -94,6 +94,9 @@ class CompanionProcess private constructor(context: Context) {
     /** Main thread only. The last thing that went wrong with the link. */
     var lastProblem: String? = null
 
+    /** Main thread only. Counts what the owner asked of the link: connect or disconnect. */
+    var linkRequests = 0L
+
     /** Main thread only. Numbers requests to read a note aloud, across screens. */
     var lastSpeechRequest = 0uL
 
@@ -148,6 +151,9 @@ class CompanionProcess private constructor(context: Context) {
                 null
             } catch (e: org.openmyglass.corebindings.CoreFailure) {
                 e.message ?: "the note could not be saved"
+            } catch (e: Exception) {
+                // A panic in the core, as uniffi's InternalException: the draft stays.
+                "The core failed: ${e.message ?: e}"
             }
             main.post {
                 draft.saving = false
