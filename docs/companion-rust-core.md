@@ -70,7 +70,7 @@ behind a trait and is stubbed for now (see §4).
 |---|---|
 | `omg-protocol` | Versioned wire message schema (serde). The contract shared with glassd. Also the Wi-Fi QR bootstrap payload type. |
 | `omg-transport` | Frame codec + `Transport` trait; `TcpTransport` (works), `BtRfcommTransport` (stub); power-aware `TransportManager`. |
-| `omg-core` | ed25519 identity, persistent one-time pairing, mutual auth, notes, and the handshake as a pure state machine. Free of tokio; see below. The async session and the simulated Glass are behind the `async-link` feature. |
+| `omg-core` | ed25519 identity, persistent one-time pairing, mutual auth, notes, the Applications section's repository logic ([design](plans/2026-11-07-companion-applications.md)), and the handshake as a pure state machine. Free of tokio; see below. The async session and the simulated Glass are behind the `async-link` feature. |
 | `omg-qr` | Renders a `WifiBootstrap` as a scannable QR (terminal + SVG), offline. |
 | `omg-ffi` | The core for Kotlin and Swift, through UniFFI: see [`companion-mobile.md`](companion-mobile.md). |
 | `omg-cli` | The `omg` binary: `identity`, `qr`, `sim-glass`, `link`, `daemon`, `note-add`, `notes-sync`. |
