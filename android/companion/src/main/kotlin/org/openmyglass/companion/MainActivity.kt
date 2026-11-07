@@ -723,6 +723,8 @@ class MainActivity : Activity(), CompanionScreen {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
+        // The core did not start, and this screen only says so.
+        if (!::process.isInitialized) return
         if (resultCode != RESULT_OK || data == null) return
         val uris = data.clipData?.let { clip -> (0 until clip.itemCount).map { clip.getItemAt(it).uri } }
             ?: listOfNotNull(data.data)
@@ -809,6 +811,7 @@ class MainActivity : Activity(), CompanionScreen {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, results: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, results)
+        if (!::process.isInitialized) return
         if (requestCode == REQUEST_MIC) {
             if (results.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
                 toggleRecording()

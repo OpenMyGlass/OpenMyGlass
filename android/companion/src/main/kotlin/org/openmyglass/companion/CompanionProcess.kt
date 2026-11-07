@@ -19,6 +19,44 @@ interface CompanionScreen {
     fun onDraftChanged(problem: String?)
 }
 
+/**
+ * Polls the core until the process ends. A panic in the core reaches Kotlin as an exception, as
+ * uniffi's `InternalException`, which is not a `RuntimeException`. It is reported once, and polling
+ * slows down until a poll works again, rather than the process going with it.
+ */
+internal class Poller(
+    private val poll: () -> List<CoreEvent>,
+    private val deliver: (List<CoreEvent>) -> Unit,
+    private val report: (String) -> Unit,
+    private val sleep: (Long) -> Unit = { Thread.sleep(it) },
+) {
+    /** How long the next round waits first. */
+    var waitMs = POLL_INTERVAL_MS
+        private set
+
+    fun run() {
+        while (true) step()
+    }
+
+    /** One round: wait, then poll. */
+    fun step() {
+        sleep(waitMs)
+        try {
+            val events = poll()
+            if (events.isNotEmpty()) deliver(events)
+            waitMs = POLL_INTERVAL_MS
+        } catch (e: Exception) {
+            if (waitMs == POLL_INTERVAL_MS) report("The core failed, and keeps trying: ${e.message ?: e}")
+            waitMs = (waitMs * 2).coerceAtMost(MAX_POLL_WAIT_MS)
+        }
+    }
+
+    companion object {
+        const val POLL_INTERVAL_MS = 500L
+        const val MAX_POLL_WAIT_MS = 60_000L
+    }
+}
+
 /** A note being written. It lives as long as the process, whichever screen shows it. */
 class NoteDraft {
     var text = ""
@@ -86,26 +124,11 @@ class CompanionProcess private constructor(context: Context) {
         thread(isDaemon = true, name = "omg-poll") { poll() }
     }
 
-    /**
-     * Never ends. A panic in the core comes out as an exception: it is reported once, and polling
-     * slows down until a poll works again, rather than the process going with it.
-     */
-    private fun poll() {
-        var waitMs = POLL_INTERVAL_MS
-        while (true) {
-            Thread.sleep(waitMs)
-            try {
-                val events = core.poll()
-                if (events.isNotEmpty()) deliver(events, null)
-                waitMs = POLL_INTERVAL_MS
-            } catch (e: RuntimeException) {
-                if (waitMs == POLL_INTERVAL_MS) {
-                    toScreen { it.onLinkFailed("The core failed, and keeps trying: ${e.message ?: e}") }
-                }
-                waitMs = (waitMs * 2).coerceAtMost(MAX_POLL_WAIT_MS)
-            }
-        }
-    }
+    private fun poll() = Poller(
+        poll = { core.poll() },
+        deliver = { deliver(it, null) },
+        report = { why -> toScreen { it.onLinkFailed(why) } },
+    ).run()
 
     private fun deliver(events: List<CoreEvent>, bleAddress: String?) =
         toScreen { it.onCoreEvents(events, bleAddress) }
@@ -139,8 +162,6 @@ class CompanionProcess private constructor(context: Context) {
     }
 
     companion object {
-        private const val POLL_INTERVAL_MS = 500L
-        private const val MAX_POLL_WAIT_MS = 60_000L
         private val CACHE_PREFIXES = listOf("pick", "voice", "tts")
 
         private var instance: CompanionProcess? = null
