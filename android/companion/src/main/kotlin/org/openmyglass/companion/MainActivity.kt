@@ -415,16 +415,18 @@ class MainActivity : Activity(), CompanionScreen {
                         return@button
                     }
                     onCore({
-                        // The core does nothing unless that same link is up and running, so the
-                        // Glass is always told, and it never ends a newer link. If this phone
-                        // cannot forget the bond, the core tells the Glass nothing and the link
-                        // stays, so both ends still agree.
+                        // The core does nothing unless that same link is up and running, so it never
+                        // ends a newer link. It only queues the Unpair: if the link dies before the
+                        // frame is written, this phone forgets and the Glass keeps its bond. If this
+                        // phone cannot forget the bond, nothing is queued and the link stays.
                         try {
                             core.unpair(target)
                             prefs.edit().remove(KEY_BLE_ADDRESS).apply()
                             // The Glass forgets this phone only if the core's last frame reaches
                             // it. Staying down is what keeps the link from pairing again by itself,
-                            // unless the owner has asked for another link since.
+                            // unless the owner has asked for another link since. This lands before
+                            // the supervisor can reconnect because its shortest wait is a second
+                            // (MIN_WAIT_MS in omg-core's reconnect.rs, which asserts it).
                             link.disconnectAfterFlush(asked)
                             null
                         } catch (e: org.openmyglass.corebindings.CoreFailure) {

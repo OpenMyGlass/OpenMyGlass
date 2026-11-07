@@ -673,7 +673,11 @@ fn speech_finished_during_a_link_reaches_the_pump_and_with_no_link_the_poll() {
     let start = Instant::now();
     while changes(&app.events.lock().unwrap()) < before + 2 {
         polled.extend(phone.poll());
-        assert!(start.elapsed() < Duration::from_secs(10), "no transcript");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the transcript's change never reached the pump; the poll took {polled:?}"
+        );
+        thread::sleep(Duration::from_millis(1));
     }
     assert!(polled.is_empty(), "the poll took {polled:?}");
     assert!(phone

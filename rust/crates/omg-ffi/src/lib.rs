@@ -1246,14 +1246,21 @@ impl CompanionCore {
         }));
     }
 
-    /// Forgets the bonded Glass and tells it to forget this phone, over the link `link_id` names,
-    /// as [`CoreSnapshot::link_id`] gave it. That link must be up and past its handshake: the phone
-    /// never forgets while the Glass is not told, and an Unpair asked for one link never ends a
-    /// newer one. Anything else is [`CoreFailure::NotConnected`], and nothing changes. If this
-    /// phone cannot forget, nothing is sent and the link stays: the two ends keep agreeing.
+    /// Forgets the bonded Glass and queues an Unpair for it, over the link `link_id` names, as
+    /// [`CoreSnapshot::link_id`] gave it. That link must be up and past its handshake, so an Unpair
+    /// asked for one link never ends a newer one. Anything else is [`CoreFailure::NotConnected`],
+    /// and nothing changes. If this phone cannot forget, nothing is queued and the link stays.
+    ///
+    /// **Telling the Glass is best effort.** The frame is only queued. If the link dies before the
+    /// app's pump writes it, or the write or the flush fails, this phone has forgotten and the
+    /// Glass keeps its bond. One way that happens: the owner taps Unpair and then Connect, and
+    /// the app closes the old socket for the new link while this core still holds the old link,
+    /// so the Unpair goes to a socket that is already closed. The Glass sends no acknowledgement
+    /// to tell these apart; see `docs/companion-mobile.md`.
     ///
     /// The link then closes. The app must not open another by itself, or it would pair again: a
-    /// new bond needs the owner to ask.
+    /// new bond needs the owner to ask. The Android app stops its supervisor right after this
+    /// call, inside the shortest wait before a reconnect (`omg_core::reconnect::MIN_WAIT_MS`).
     pub fn unpair(&self, link_id: u64) -> Result<(), CoreFailure> {
         let mut inner = self.lock();
         match &inner.link {
