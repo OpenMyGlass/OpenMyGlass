@@ -932,12 +932,14 @@ impl CompanionCore {
         }));
     }
 
-    /// Forgets the bonded Glass, and tells it to forget this phone if a link is up.
+    /// Forgets the bonded Glass, and tells it to forget this phone if a link is up. If this
+    /// phone cannot forget, nothing is sent and the link stays: the two ends keep agreeing.
     pub fn unpair(&self) -> Result<(), CoreFailure> {
         let mut inner = self.lock();
+        inner.store.clear_paired().map_err(storage)?;
         inner.send(&Frame::Unpair);
         inner.close_link = inner.link.is_some();
-        inner.store.clear_paired().map_err(storage)
+        Ok(())
     }
 
     /// Free space where notes are stored, so a note that cannot fit is deferred up front.

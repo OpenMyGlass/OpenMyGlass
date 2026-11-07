@@ -36,8 +36,12 @@ class LinkControllerTest {
         /** What the next pumps return, each whole, so a pump never sees half of a step. */
         val outputs = LinkedBlockingQueue<CoreOutput>()
 
-        fun queue(bytes: ByteArray = ByteArray(0), closeLink: Boolean = false) {
-            outputs.add(CoreOutput(bytes, emptyList(), closeLink))
+        fun queue(
+            bytes: ByteArray = ByteArray(0),
+            closeLink: Boolean = false,
+            events: List<CoreEvent> = emptyList(),
+        ) {
+            outputs.add(CoreOutput(bytes, events, closeLink))
         }
 
         override fun setFreeBytes(freeBytes: ULong?) = Unit
@@ -71,7 +75,10 @@ class LinkControllerTest {
         }
     }
 
-    private class FakeLink : ByteLink {
+    /** With [flushHolds], a flush waits for [letFlushEnd], or for the link to close. */
+    private class FakeLink(val flushHolds: Boolean = false) : ByteLink {
+        val flushing = CountDownLatch(1)
+        val letFlushEnd = CountDownLatch(1)
         val calls = ConcurrentLinkedQueue<String>()
         val written = ConcurrentLinkedQueue<ByteArray>()
         val closed = CountDownLatch(1)
@@ -91,6 +98,10 @@ class LinkControllerTest {
 
         override fun flush() {
             calls.add("flush")
+            flushing.countDown()
+            if (flushHolds) {
+                while (letFlushEnd.count > 0 && closed.count > 0) Thread.sleep(1)
+            }
         }
 
         override fun close() {
@@ -106,14 +117,19 @@ class LinkControllerTest {
     private val core = FakeCore()
     private val failures = LinkedBlockingQueue<String>()
     private val deliveries = AtomicInteger()
+    private val delivered = LinkedBlockingQueue<Pair<List<CoreEvent>, ByteLink?>>()
     private var controller: LinkController? = null
 
-    private fun controller(backoff: FakeBackoff) = LinkController(
+    private fun controller(backoff: FakeBackoff, flushLimitMs: Long = 5_000) = LinkController(
         core,
         { 0L },
         backoff,
         { _, why -> failures.add(why) },
-    ) { deliveries.incrementAndGet() }.also { controller = it }
+        flushLimitMs,
+    ) { events, from ->
+        delivered.add(events to from)
+        deliveries.incrementAndGet()
+    }.also { controller = it }
 
     @After
     fun stop() {
@@ -278,6 +294,55 @@ class LinkControllerTest {
         eventually("the link is down") { core.linksDown.get() == 1 }
         assertEquals(listOf("write", "flush", "close"), link.calls.toList())
         assertStays("it does not come back") { opens.get() == 1 }
+    }
+
+    @Test
+    fun aConnectRightAfterUnpairWaitsForTheFlush() {
+        val c = controller(FakeBackoff(60_000u))
+        val old = FakeLink(flushHolds = true)
+        c.connect { old }
+        eventually("the link is up") { core.linksUp.get() == 1 }
+        core.queue(byteArrayOf(5), closeLink = true)
+        c.disconnectAfterFlush()
+        assertTrue(old.flushing.await(5, TimeUnit.SECONDS))
+        // The owner taps Connect while the Unpair is on its way.
+        val new = FakeLink()
+        c.connect { new }
+        assertStays("the flush is not cut short") { old.closed.count == 1L }
+        assertEquals(1, core.linksUp.get())
+        old.letFlushEnd.countDown()
+        eventually("then the new link runs") { core.linksUp.get() == 2 && c.running === new }
+        assertEquals(listOf("write", "flush", "close"), old.calls.toList())
+    }
+
+    @Test
+    fun aFlushThatHangsIsCutAtTheLimit() {
+        val c = controller(FakeBackoff(60_000u), flushLimitMs = 600)
+        val old = FakeLink(flushHolds = true)
+        c.connect { old }
+        eventually("the link is up") { core.linksUp.get() == 1 }
+        c.disconnectAfterFlush()
+        assertTrue(old.flushing.await(5, TimeUnit.SECONDS))
+        val new = FakeLink()
+        c.connect { new }
+        assertTrue("closed at the limit", old.closed.await(5, TimeUnit.SECONDS))
+        eventually("then the new link runs") { core.linksUp.get() == 2 }
+    }
+
+    @Test
+    fun eventsComeWithTheLinkTheyCameFrom() {
+        val c = controller(FakeBackoff(60_000u))
+        val link = FakeLink()
+        c.connect { link }
+        eventually("the link is up") { core.linksUp.get() == 1 }
+        val running = CoreEvent.LinkRunning("Glass", true)
+        core.queue(events = listOf(running))
+        c.poke()
+        val (events, from) = delivered.poll(5, TimeUnit.SECONDS)!!
+        assertEquals(listOf(running), events)
+        assertTrue(from === link)
+        link.drop()
+        eventually("the end is delivered with no link") { delivered.any { it.second == null } }
     }
 
     @Test

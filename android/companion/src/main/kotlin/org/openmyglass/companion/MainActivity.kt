@@ -100,8 +100,10 @@ class MainActivity : Activity() {
                     }
                 }
             },
-        ) { events ->
-            main.post { onEvents(events) }
+        ) { events, from ->
+            // Read now: by the time the post runs, another link may be the current one.
+            val bleAddress = (from as? BleLink)?.address
+            main.post { onEvents(events, bleAddress) }
         }
         setContentView(buildUi())
         // Needs the window's decor, which setContentView creates. Android 10 keeps its default bars.
@@ -180,7 +182,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun onEvents(events: List<CoreEvent>) {
+    private fun onEvents(events: List<CoreEvent>, bleAddress: String?) {
         var notes = false
         for (e in events) {
             when (e) {
@@ -190,7 +192,7 @@ class MainActivity : Activity() {
                 is CoreEvent.LinkRunning -> {
                     lastProblem = null
                     // This Glass passed the handshake: the next scan looks for it alone.
-                    (link.running as? BleLink)?.address?.let {
+                    bleAddress?.let {
                         prefs.edit().putString(KEY_BLE_ADDRESS, it).apply()
                     }
                 }
@@ -265,18 +267,18 @@ class MainActivity : Activity() {
                     refreshStatus()
                 },
                 button("Unpair") {
-                    // The Unpair frame is queued before the bond is cleared, so the link closes
-                    // either way. Only the stored address follows what the core managed.
-                    lastProblem = try {
+                    // If this phone cannot forget the bond, the core tells the Glass nothing and
+                    // the link stays, so both ends still agree.
+                    try {
                         core.unpair()
                         prefs.edit().remove(KEY_BLE_ADDRESS).apply()
-                        null
+                        lastProblem = null
+                        linkNote = null
+                        // The Glass forgets this phone only if the core's last frame reaches it.
+                        link.disconnectAfterFlush()
                     } catch (e: org.openmyglass.corebindings.CoreFailure) {
-                        "Could not forget the Glass on this phone: ${e.message}"
+                        lastProblem = "Could not forget the Glass on this phone: ${e.message}"
                     }
-                    linkNote = null
-                    // The Glass forgets this phone only if the core's last frame reaches it.
-                    link.disconnectAfterFlush()
                     refreshStatus()
                 },
             ),

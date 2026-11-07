@@ -241,6 +241,36 @@ fn settings_can_be_read_and_changed_and_the_bond_survives_a_restart() {
 }
 
 #[test]
+fn an_unpair_this_phone_cannot_store_tells_the_glass_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = Arc::new(FakeEngines::default());
+    let (addr, _rt) = sim_glass(None, false);
+    let phone = core(tmp.path(), &engines);
+    let app = App::connect(phone.clone(), &addr, true);
+    app.wait_for("the settings", |e| settings_of(e).is_some());
+
+    // Where the store writes before its rename.
+    let blocker = tmp.path().join("companion.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    assert!(phone.unpair().is_err());
+    assert!(phone.snapshot().bonded_to.is_some());
+    // The Glass would end the link on an Unpair.
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(phone.snapshot().phase, LinkPhase::Running);
+
+    std::fs::remove_dir(&blocker).unwrap();
+    phone.unpair().unwrap();
+    assert!(phone.snapshot().bonded_to.is_none());
+    // The core asks for the close itself, with no event, and the app's pump stops on it.
+    let start = Instant::now();
+    while !app.pump.as_ref().unwrap().is_finished() {
+        assert!(start.elapsed() < Duration::from_secs(10), "the link stayed");
+        thread::sleep(Duration::from_millis(5));
+    }
+    app.close();
+}
+
+#[test]
 fn without_a_bond_or_permission_the_link_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let engines = Arc::new(FakeEngines::default());

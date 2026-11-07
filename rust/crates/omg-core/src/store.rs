@@ -79,20 +79,28 @@ impl Store {
         self.paired.as_ref()
     }
 
-    /// Record a newly bonded peer and persist.
+    /// Record a newly bonded peer and persist. On failure nothing changes, here or on disk.
     pub fn set_paired(&mut self, peer_pub: String, peer_name: String) -> Result<(), CoreError> {
-        self.paired = Some(PairingRecord {
+        self.replace_paired(Some(PairingRecord {
             peer_pub,
             peer_name,
             bonded_at_ms: now_ms(),
-        });
-        self.save()
+        }))
     }
 
-    /// Forget the bonded peer (unpair) and persist.
+    /// Forget the bonded peer (unpair) and persist. On failure the bond stays, here as on disk,
+    /// so this session does not pair anew with a bond the next one still has.
     pub fn clear_paired(&mut self) -> Result<(), CoreError> {
-        self.paired = None;
-        self.save()
+        self.replace_paired(None)
+    }
+
+    fn replace_paired(&mut self, paired: Option<PairingRecord>) -> Result<(), CoreError> {
+        let before = std::mem::replace(&mut self.paired, paired);
+        let saved = self.save();
+        if saved.is_err() {
+            self.paired = before;
+        }
+        saved
     }
 
     fn save(&self) -> Result<(), CoreError> {
@@ -144,5 +152,40 @@ mod tests {
         s.clear_paired().unwrap();
         let s2 = Store::load_or_create(&path).unwrap();
         assert!(s2.paired().is_none());
+    }
+
+    /// The temporary file `save` writes first, made impossible to write.
+    fn break_saving(path: &Path) {
+        std::fs::create_dir(path.with_extension("tmp")).unwrap();
+    }
+
+    #[test]
+    fn a_failed_unpair_keeps_the_bond_here_and_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut s = Store::load_or_create(&path).unwrap();
+        s.set_paired("p".into(), "n".into()).unwrap();
+        break_saving(&path);
+        assert!(s.clear_paired().is_err());
+        assert_eq!(s.paired().unwrap().peer_pub, "p");
+        assert_eq!(
+            Store::load_or_create(&path)
+                .unwrap()
+                .paired()
+                .unwrap()
+                .peer_pub,
+            "p"
+        );
+    }
+
+    #[test]
+    fn a_failed_pairing_leaves_the_old_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut s = Store::load_or_create(&path).unwrap();
+        s.set_paired("old".into(), "n".into()).unwrap();
+        break_saving(&path);
+        assert!(s.set_paired("new".into(), "n".into()).is_err());
+        assert_eq!(s.paired().unwrap().peer_pub, "old");
     }
 }
