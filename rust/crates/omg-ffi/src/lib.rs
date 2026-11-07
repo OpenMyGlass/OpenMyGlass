@@ -26,7 +26,8 @@
 //! for seconds on a big video. [`CompanionCore::add_phone_note`] also copies and hashes its files.
 //!
 //! One core per directory. A second one on the same directory is refused while the first is alive,
-//! so an app keeps a single core for the life of its process.
+//! so an app keeps a single core for the life of its process. The guard only sees this process: an
+//! iOS app extension sharing the directory through an App Group would not be stopped by it.
 
 uniffi::setup_scaffolding!();
 
@@ -754,6 +755,10 @@ pub trait TextToSpeechEngine: Send + Sync {
 
     /// Called from another thread: make a `synthesize` in progress return now, with any error.
     /// Doing nothing is allowed, and only costs the wait for that piece.
+    ///
+    /// In a narrow race, when the owner stops just as reading a note ends, this can land on the
+    /// next job instead, which may be one the Glass asked for: that one then fails, and the Glass
+    /// may ask again. Speech-to-text has no cancel and always runs to its end.
     fn cancel(&self);
 }
 
@@ -825,7 +830,7 @@ enum Finished {
 
 /// Work for the one thread that runs speech-to-text: a phone's recognizer does one at a time.
 enum SttJob {
-    Glass(SpeechJob),
+    Glass(TranscribeRequest),
     Phone(TranscribeRequest),
 }
 
@@ -843,11 +848,49 @@ enum TtsJob {
     Phone(PhoneSpeech),
 }
 
-/// Whether a transcription should start.
-enum SttStart {
-    Run,
-    AlreadyRunning,
-    GaveUp,
+/// Starts of each transcription, counted on disk, so one that takes the app down cannot do so on
+/// every launch. Counted by the worker just before the engine, so waiting in the queue is free.
+#[derive(Clone)]
+struct SttAttempts {
+    dir: PathBuf,
+}
+
+impl SttAttempts {
+    fn marker(&self, id: NoteId, attachment: u16) -> PathBuf {
+        self.dir.join(format!("{}-{attachment}", id.to_hex()))
+    }
+
+    /// Counts one more start. False once there have been too many without a result.
+    fn begin(&self, id: NoteId, attachment: u16) -> bool {
+        let marker = self.marker(id, attachment);
+        let attempts: u32 = std::fs::read_to_string(&marker)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if attempts >= MAX_STT_ATTEMPTS {
+            return false;
+        }
+        // If this fails the disk is full, and the count is the least of the problems.
+        let _ = std::fs::write(&marker, (attempts + 1).to_string());
+        true
+    }
+
+    /// A result came back: the count starts over.
+    fn finished(&self, id: NoteId, attachment: u16) {
+        remove_file(&self.marker(id, attachment));
+    }
+
+    fn forget(&self, id: NoteId) {
+        let prefix = format!("{}-", id.to_hex());
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                remove_file(&entry.path());
+            }
+        }
+    }
 }
 
 /// Directories with a live core.
@@ -899,7 +942,7 @@ struct Inner {
     deferred: BTreeMap<NoteId, String>,
     /// Recordings queued for speech-to-text or in it, on either side.
     stt_running: BTreeSet<(NoteId, u16)>,
-    stt_attempts_dir: PathBuf,
+    stt_attempts: SttAttempts,
     speech_dir: PathBuf,
     /// Only the latest `speak_note` counts. Shared with the thread that runs it.
     speech_generation: Arc<AtomicU64>,
@@ -912,7 +955,6 @@ struct Inner {
 pub struct CompanionCore {
     inner: Mutex<Inner>,
     engines: Arc<Engines>,
-    done_tx: Sender<Finished>,
     stt_tx: Sender<SttJob>,
     tts_tx: Sender<TtsJob>,
     /// The generation being read aloud right now, or 0.
@@ -1001,13 +1043,15 @@ impl CompanionCore {
             _ => {}
         }
         std::fs::create_dir_all(&speech_dir).map_err(storage)?;
-        let stt_attempts_dir = root.join(STT_ATTEMPTS_DIR);
-        std::fs::create_dir_all(&stt_attempts_dir).map_err(storage)?;
+        let stt_attempts = SttAttempts {
+            dir: root.join(STT_ATTEMPTS_DIR),
+        };
+        std::fs::create_dir_all(&stt_attempts.dir).map_err(storage)?;
         let (done_tx, done_rx) = channel();
         let engines = Arc::new(Engines { stt, tts });
         let speech_generation = Arc::new(AtomicU64::new(0));
         let speaking_now = Arc::new(AtomicU64::new(0));
-        let stt_tx = spawn_stt_worker(engines.clone(), done_tx.clone());
+        let stt_tx = spawn_stt_worker(engines.clone(), done_tx.clone(), stt_attempts.clone());
         let tts_tx = spawn_tts_worker(
             engines.clone(),
             done_tx.clone(),
@@ -1028,14 +1072,13 @@ impl CompanionCore {
                 close_link: false,
                 deferred: BTreeMap::new(),
                 stt_running: BTreeSet::new(),
-                stt_attempts_dir,
+                stt_attempts,
                 speech_dir,
                 speech_generation,
                 speech_file: None,
                 last_progress: None,
             }),
             engines,
-            done_tx,
             stt_tx,
             tts_tx,
             speaking_now,
@@ -1272,8 +1315,11 @@ impl CompanionCore {
         } else if inner.from_glass.machine().note(&id).is_some() {
             inner.from_glass.forget(&id, now_ms()).map_err(|e| {
                 // The driver has reloaded itself and no longer knows this link: as it asks, this
-                // counts as losing the link, and the next one starts clean.
-                inner.link_failed(format!("note storage: {e}"));
+                // counts as losing the link, and the next one starts clean. With no link there is
+                // nothing to end.
+                if inner.link.is_some() {
+                    inner.link_failed(format!("note storage: {e}"));
+                }
                 storage(e)
             })?
         } else {
@@ -1394,18 +1440,8 @@ impl CompanionCore {
             mime: voice.mime.clone(),
             locale: note.manifest.locale,
         };
-        match inner.stt_start(id, attachment_id) {
-            SttStart::Run => {
-                let _ = self.stt_tx.send(SttJob::Phone(request));
-            }
-            SttStart::AlreadyRunning => {}
-            SttStart::GaveUp => {
-                let _ = self.done_tx.send(Finished::PhoneTranscript(
-                    id,
-                    attachment_id,
-                    Err(SpeechError::Failed(STT_GAVE_UP.into())),
-                ));
-            }
+        if inner.stt_running.insert((id, attachment_id)) {
+            let _ = self.stt_tx.send(SttJob::Phone(request));
         }
     }
 
@@ -1429,18 +1465,15 @@ impl CompanionCore {
     /// Hands speech jobs to their threads: they take far longer than a heartbeat.
     fn start_speech(&self, inner: &mut Inner) {
         for job in inner.from_glass.take_speech_jobs() {
-            let SpeechJob::Transcribe(request) = &job else {
+            let SpeechJob::Transcribe(request) = job else {
                 let _ = self.tts_tx.send(TtsJob::Glass(job));
                 continue;
             };
-            match inner.stt_start(request.note_id, request.attachment_id) {
-                SttStart::Run => {
-                    let _ = self.stt_tx.send(SttJob::Glass(job));
-                }
-                SttStart::AlreadyRunning => {}
-                SttStart::GaveUp => {
-                    let _ = self.done_tx.send(Finished::Speech(job.failed(STT_GAVE_UP)));
-                }
+            if inner
+                .stt_running
+                .insert((request.note_id, request.attachment_id))
+            {
+                let _ = self.stt_tx.send(SttJob::Glass(request));
             }
         }
     }
@@ -1460,13 +1493,29 @@ fn run_job(job: &SpeechJob, engines: &Arc<Engines>) -> SpeechOutcome {
 }
 
 /// The thread for speech-to-text. It ends when the core is gone.
-fn spawn_stt_worker(engines: Arc<Engines>, done: Sender<Finished>) -> Sender<SttJob> {
+fn spawn_stt_worker(
+    engines: Arc<Engines>,
+    done: Sender<Finished>,
+    attempts: SttAttempts,
+) -> Sender<SttJob> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         for job in rx {
+            let (note_id, attachment_id) = match &job {
+                SttJob::Glass(r) | SttJob::Phone(r) => (r.note_id, r.attachment_id),
+            };
+            let run = attempts.begin(note_id, attachment_id);
             let finished = match job {
+                SttJob::Glass(r) if !run => {
+                    Finished::Speech(SpeechJob::Transcribe(r).failed(STT_GAVE_UP))
+                }
+                SttJob::Phone(_) if !run => Finished::PhoneTranscript(
+                    note_id,
+                    attachment_id,
+                    Err(SpeechError::Failed(STT_GAVE_UP.into())),
+                ),
                 // The link may be gone: the result is stored all the same.
-                SttJob::Glass(job) => Finished::Speech(run_job(&job, &engines)),
+                SttJob::Glass(r) => Finished::Speech(run_job(&SpeechJob::Transcribe(r), &engines)),
                 SttJob::Phone(request) => {
                     let e = engines.as_ref();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1745,45 +1794,13 @@ impl Inner {
         self.stt_running.iter().any(|(note, _)| *note == id)
     }
 
-    fn stt_marker(&self, id: NoteId, attachment: u16) -> PathBuf {
-        self.stt_attempts_dir
-            .join(format!("{}-{attachment}", id.to_hex()))
-    }
-
-    /// Counts a start on disk first, so a transcription that takes the whole app down cannot do
-    /// so on every launch. A result removes the count.
-    fn stt_start(&mut self, id: NoteId, attachment: u16) -> SttStart {
-        if !self.stt_running.insert((id, attachment)) {
-            return SttStart::AlreadyRunning;
-        }
-        let marker = self.stt_marker(id, attachment);
-        let attempts: u32 = std::fs::read_to_string(&marker)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        if attempts >= MAX_STT_ATTEMPTS {
-            return SttStart::GaveUp;
-        }
-        // If this fails the disk is full, and the count is the least of the problems.
-        let _ = std::fs::write(&marker, (attempts + 1).to_string());
-        SttStart::Run
-    }
-
     fn stt_finished(&mut self, id: NoteId, attachment: u16) {
         self.stt_running.remove(&(id, attachment));
-        remove_file(&self.stt_marker(id, attachment));
+        self.stt_attempts.finished(id, attachment);
     }
 
     fn forget_stt_attempts(&self, id: NoteId) {
-        let prefix = format!("{}-", id.to_hex());
-        let Ok(entries) = std::fs::read_dir(&self.stt_attempts_dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                remove_file(&entry.path());
-            }
-        }
+        self.stt_attempts.forget(id);
     }
 
     fn send(&mut self, frame: &Frame) {

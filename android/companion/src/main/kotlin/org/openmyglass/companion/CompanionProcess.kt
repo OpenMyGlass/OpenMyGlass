@@ -83,11 +83,26 @@ class CompanionProcess private constructor(context: Context) {
             deliver(events, (from as? BleLink)?.address)
         }
         // A note can change with no link, when speech finishes, and nothing pumps then.
-        thread(isDaemon = true, name = "omg-poll") {
-            while (true) {
-                Thread.sleep(POLL_INTERVAL_MS)
+        thread(isDaemon = true, name = "omg-poll") { poll() }
+    }
+
+    /**
+     * Never ends. A panic in the core comes out as an exception: it is reported once, and polling
+     * slows down until a poll works again, rather than the process going with it.
+     */
+    private fun poll() {
+        var waitMs = POLL_INTERVAL_MS
+        while (true) {
+            Thread.sleep(waitMs)
+            try {
                 val events = core.poll()
                 if (events.isNotEmpty()) deliver(events, null)
+                waitMs = POLL_INTERVAL_MS
+            } catch (e: RuntimeException) {
+                if (waitMs == POLL_INTERVAL_MS) {
+                    toScreen { it.onLinkFailed("The core failed, and keeps trying: ${e.message ?: e}") }
+                }
+                waitMs = (waitMs * 2).coerceAtMost(MAX_POLL_WAIT_MS)
             }
         }
     }
@@ -125,11 +140,15 @@ class CompanionProcess private constructor(context: Context) {
 
     companion object {
         private const val POLL_INTERVAL_MS = 500L
+        private const val MAX_POLL_WAIT_MS = 60_000L
         private val CACHE_PREFIXES = listOf("pick", "voice", "tts")
 
         private var instance: CompanionProcess? = null
 
-        /** The one for this process, made on the first call. */
+        /**
+         * The one for this process, made on the first call. Throws `CoreFailure` if the core
+         * cannot open its state, a full disk for instance, and the next call tries again.
+         */
         @Synchronized
         fun of(context: Context): CompanionProcess =
             instance ?: CompanionProcess(context.applicationContext).also { instance = it }

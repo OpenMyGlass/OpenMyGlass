@@ -100,7 +100,19 @@ class MainActivity : Activity(), CompanionScreen {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        process = CompanionProcess.of(this)
+        process = try {
+            CompanionProcess.of(this)
+        } catch (e: org.openmyglass.corebindings.CoreFailure) {
+            // Every launch would crash the same way. Say why, and try again on the next one.
+            setContentView(
+                TextView(this).apply {
+                    text = "The companion cannot start: ${e.message}\n\nFree some space on this phone, then open it again."
+                    setPadding(dp(16), dp(32), dp(16), dp(16))
+                    contentDescription = "startup problem"
+                },
+            )
+            return
+        }
         setContentView(buildUi())
         // Needs the window's decor, which setContentView creates. Android 10 keeps its default bars.
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
@@ -131,6 +143,10 @@ class MainActivity : Activity(), CompanionScreen {
     }
 
     override fun onDestroy() {
+        if (!::process.isInitialized) {
+            super.onDestroy()
+            return
+        }
         // The link and the draft stay with the process, for the next screen.
         if (process.screen === this) process.screen = null
         finishRecording()

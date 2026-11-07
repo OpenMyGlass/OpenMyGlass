@@ -683,6 +683,33 @@ fn a_transcription_that_keeps_stopping_the_app_is_given_up_until_the_owner_asks(
 }
 
 #[test]
+fn only_the_transcription_in_the_engine_is_charged_a_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("parole");
+    let held = engines.hold.lock().unwrap();
+    let phone = test_core(tmp.path(), &engines);
+    add_voice_note(&phone, tmp.path(), None);
+    add_voice_note(&phone, tmp.path(), None);
+    let markers = || {
+        std::fs::read_dir(tmp.path().join("stt-attempts"))
+            .unwrap()
+            .count()
+    };
+    let start = Instant::now();
+    while markers() == 0 {
+        assert!(start.elapsed() < Duration::from_secs(10), "never started");
+        thread::sleep(Duration::from_millis(1));
+    }
+    // One worker, held in the engine: the second note cannot have been started.
+    assert_eq!(markers(), 1);
+    drop(held);
+    poll_until(&phone, |_| {
+        phone.notes().iter().all(|n| n.transcript.is_some())
+    });
+    assert_eq!(markers(), 0, "a result clears its count");
+}
+
+#[test]
 fn no_engine_is_reported_and_asking_again_works_once_there_is_one() {
     let tmp = tempfile::tempdir().unwrap();
     let engines = Arc::new(TestEngines::default());
@@ -1035,6 +1062,24 @@ fn a_failed_delete_ends_the_link_and_the_note_is_still_there_on_the_next() {
 
     let notes_dir = dir.join("notes-from-glass");
     let mode = |m| std::fs::Permissions::from_mode(m);
+
+    // With no link, a failed delete has no link to end.
+    app.close();
+    phone.poll();
+    std::fs::set_permissions(&notes_dir, mode(0o555)).unwrap();
+    let failed = phone.delete_note(id.clone());
+    std::fs::set_permissions(&notes_dir, mode(0o755)).unwrap();
+    assert!(matches!(failed, Err(CoreFailure::Storage(_))));
+    assert!(!phone
+        .poll()
+        .iter()
+        .any(|e| matches!(e, CoreEvent::LinkClosed { .. })));
+    assert!(!phone.pump().close_link);
+
+    let app = App::connect(phone.clone(), &addr, false);
+    app.wait_for("the link", |e| {
+        e.iter().any(|e| matches!(e, CoreEvent::LinkRunning { .. }))
+    });
     std::fs::set_permissions(&notes_dir, mode(0o555)).unwrap();
     let failed = phone.delete_note(id.clone());
     std::fs::set_permissions(&notes_dir, mode(0o755)).unwrap();
@@ -1047,7 +1092,7 @@ fn a_failed_delete_ends_the_link_and_the_note_is_still_there_on_the_next() {
     assert_eq!(phone.notes()[0].id, id);
 
     let app = App::connect(phone.clone(), &addr, false);
-    app.wait_for("the link", |e| {
+    app.wait_for("the link again", |e| {
         e.iter().any(|e| matches!(e, CoreEvent::LinkRunning { .. }))
     });
     phone.delete_note(id).unwrap();

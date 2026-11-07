@@ -32,20 +32,55 @@ private fun NoteLocale.toJava(): Locale = when (this) {
     NoteLocale.ES -> Locale("es")
 }
 
+/** Where one piece of speech stands. */
+internal class TtsPiece {
+    val done = CountDownLatch(1)
+    val error = AtomicReference<String?>(null)
+
+    fun fail(why: String) {
+        error.compareAndSet(null, why)
+        done.countDown()
+    }
+}
+
+/**
+ * Hears about one utterance only. The engine reports a stopped utterance late, after the next has
+ * started, and that must not end the next one.
+ */
+internal class PieceListener(private val utterance: String, private val piece: TtsPiece) :
+    UtteranceProgressListener() {
+    private fun mine(id: String?) = id == utterance
+
+    override fun onStart(id: String?) = Unit
+
+    override fun onDone(id: String?) {
+        if (mine(id)) piece.done.countDown()
+    }
+
+    @Deprecated("Deprecated in Android")
+    override fun onError(id: String?) {
+        if (mine(id)) piece.fail("the engine reported an error")
+    }
+
+    override fun onError(id: String?, code: Int) {
+        if (mine(id)) piece.fail("the engine reported error $code")
+    }
+
+    override fun onStop(id: String?, interrupted: Boolean) {
+        if (mine(id)) piece.fail("stopped")
+    }
+}
+
 /**
  * The platform's text-to-speech. Speech always runs here on the companion, never on the Glass.
  * The core calls [synthesize] on its one speech thread, so waiting is fine, and one engine serves
  * every piece.
  */
 class AndroidTts(private val context: Context) : TextToSpeechEngine {
-    private class Piece {
-        val done = CountDownLatch(1)
-        val error = AtomicReference<String?>(null)
-    }
-
     @Volatile private var engine: TextToSpeech? = null
 
-    @Volatile private var piece: Piece? = null
+    @Volatile private var piece: TtsPiece? = null
+    private var pieces = 0L
 
     override fun synthesize(text: String, locale: NoteLocale): SpeechAudio {
         val tts = engine ?: start()
@@ -58,10 +93,7 @@ class AndroidTts(private val context: Context) : TextToSpeechEngine {
 
     override fun cancel() {
         engine?.stop()
-        piece?.let {
-            it.error.set("stopped")
-            it.done.countDown()
-        }
+        piece?.fail("stopped")
     }
 
     private fun start(): TextToSpeech {
@@ -87,30 +119,13 @@ class AndroidTts(private val context: Context) : TextToSpeechEngine {
 
     private fun synthesizeToPcm(tts: TextToSpeech, text: String): SpeechAudio {
         val file = File.createTempFile("tts", ".wav", context.cacheDir)
-        val current = Piece()
+        val current = TtsPiece()
         piece = current
+        // Unique, so callbacks about an earlier piece can be told apart.
+        val utterance = "piece-${++pieces}"
         try {
-            tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(id: String?) = Unit
-                override fun onDone(id: String?) = current.done.countDown()
-
-                @Deprecated("Deprecated in Android")
-                override fun onError(id: String?) {
-                    current.error.compareAndSet(null, "the engine reported an error")
-                    current.done.countDown()
-                }
-
-                override fun onError(id: String?, code: Int) {
-                    current.error.compareAndSet(null, "the engine reported error $code")
-                    current.done.countDown()
-                }
-
-                override fun onStop(id: String?, interrupted: Boolean) {
-                    current.error.compareAndSet(null, "stopped")
-                    current.done.countDown()
-                }
-            })
-            if (tts.synthesizeToFile(text, Bundle(), file, "note") != TextToSpeech.SUCCESS) {
+            tts.setOnUtteranceProgressListener(PieceListener(utterance, current))
+            if (tts.synthesizeToFile(text, Bundle(), file, utterance) != TextToSpeech.SUCCESS) {
                 forget(tts)
                 throw SpeechFailure.Failed("the engine refused the text")
             }
