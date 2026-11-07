@@ -631,7 +631,6 @@ fn signed_view(manifest: &Manifest) -> String {
                             r.size(),
                             r.sha256(),
                             r.permissions(),
-                            r.signature()
                         )
                     )
                 })
@@ -1175,7 +1174,9 @@ fn two_states_with_one_number_are_refused() {
     let (_other, elsewhere) = empty_store();
     let ticket = plan_install(&fork, &elsewhere, None, &profile(), STABLE).unwrap();
     assert!(matches!(
-        store.record_install(&ticket, verified(&ticket)),
+        store
+            .record_install(&ticket, verified(&ticket))
+            .map_err(|f| f.error),
         Err(TrustError::Problem(TrustProblem::StateForked))
     ));
 }
@@ -1205,21 +1206,27 @@ fn a_ticket_planned_without_the_memory_cannot_be_recorded_against_it() {
     let ticket = plan_install(&withdrawn, &empty, None, &profile(), STABLE).unwrap();
     assert!(ticket.first_use());
     assert!(matches!(
-        store.record_install(&ticket, verified(&ticket)),
+        store
+            .record_install(&ticket, verified(&ticket))
+            .map_err(|f| f.error),
         Err(TrustError::Withdrawn)
     ));
 
     let older = app_state(&key(), 3, &[], vec![release_json("1.0.0", b"old")]);
     let ticket = plan_install(&older, &empty, None, &profile(), STABLE).unwrap();
     assert!(matches!(
-        store.record_install(&ticket, verified(&ticket)),
+        store
+            .record_install(&ticket, verified(&ticket))
+            .map_err(|f| f.error),
         Err(TrustError::BelowFloor)
     ));
 
     let thief = app_state(&other_key(), 9, &[], vec![release_json("9.0.0", b"evil")]);
     let ticket = plan_install(&thief, &empty, None, &profile(), STABLE).unwrap();
     assert!(matches!(
-        store.record_install(&ticket, verified(&ticket)),
+        store
+            .record_install(&ticket, verified(&ticket))
+            .map_err(|f| f.error),
         Err(TrustError::Problem(TrustProblem::PublisherChanged))
     ));
     // None of that changed the record.
@@ -1275,7 +1282,9 @@ fn a_newer_state_seen_during_a_download_does_not_void_it_but_a_withdrawal_does()
     );
     assert_eq!(store.observe(&six).unwrap(), Observed::Updated);
     assert!(matches!(
-        store.record_install(&ticket, verified(&ticket)),
+        store
+            .record_install(&ticket, verified(&ticket))
+            .map_err(|f| f.error),
         Err(TrustError::Withdrawn)
     ));
 }
@@ -1296,12 +1305,17 @@ fn a_forget_during_an_install_is_not_turned_into_a_first_use() {
     let mut other = TrustStore::open(dir.path().join("trust.json")).unwrap();
     other.forget(APP).unwrap();
     assert!(matches!(
-        store.record_install(&ticket, verified(&ticket)),
+        store
+            .record_install(&ticket, verified(&ticket))
+            .map_err(|f| f.error),
         Err(TrustError::RecordMissing)
     ));
-    // A refused change leaves this instance's view as it was; the file has no record.
-    store.reload().unwrap();
+    // The refusal refreshed this instance's view, so planning again gives the current answer:
+    // a first use, with the owner's consent, not the same refused download in a loop.
     assert!(store.get(APP).is_none());
+    assert!(plan_install(&two, &store, None, &profile(), STABLE)
+        .unwrap()
+        .first_use());
 }
 
 #[test]
@@ -1359,7 +1373,8 @@ fn two_store_instances_on_one_file_keep_each_others_changes() {
     let ticket = plan_install(&thief, &c, None, &profile(), STABLE).unwrap();
     assert!(ticket.first_use());
     assert!(matches!(
-        c.record_install(&ticket, verified(&ticket)),
+        c.record_install(&ticket, verified(&ticket))
+            .map_err(|f| f.error),
         Err(TrustError::Problem(TrustProblem::PublisherChanged))
     ));
 
@@ -1399,6 +1414,41 @@ fn a_failed_write_changes_nothing() {
         "memory is unchanged after a failed write"
     );
     assert!(TrustStore::open(&path).unwrap().get(APP).is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_write_hands_the_package_back_for_a_retry() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = TrustStore::open(dir.path().join("trust.json")).unwrap();
+    let tally = app_of(vec![release_json("1.0.0", b"old")]);
+    let ticket = plan_install(&tally, &store, None, &profile(), STABLE).unwrap();
+    // The lock file exists first, so only the write of the new file fails.
+    store.forget("com.example.nothing").unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let failed = store.record_install(&ticket, verified(&ticket));
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let Err(failure) = failed else {
+        // Running as root: permissions do not stop it, so there is nothing to check here.
+        return;
+    };
+    assert!(matches!(failure.error, TrustError::Io(_)));
+    let recorded = store
+        .record_install(&ticket, failure.into_package())
+        .unwrap();
+    assert_eq!(recorded.app_id(), APP);
+    assert!(store.get(APP).is_some());
+}
+
+#[test]
+fn a_verified_package_does_not_print_its_signature() {
+    let app = app_of(vec![release_json("1.0.0", b"old")]);
+    let ticket = plan_install(&app, &empty_store().1, None, &profile(), STABLE).unwrap();
+    let shown = format!("{:?}", verified(&ticket));
+    assert!(shown.contains("VerifiedPackage"), "{shown}");
+    assert!(!shown.contains("signature"), "{shown}");
+    assert!(!shown.contains("statement"), "{shown}");
 }
 
 #[cfg(unix)]

@@ -328,11 +328,6 @@ impl Release {
     pub fn permissions(&self) -> &[String] {
         &self.permissions
     }
-
-    /// The publisher's signature over [`release_statement`].
-    pub fn signature(&self) -> &[u8; 64] {
-        &self.signature
-    }
 }
 
 #[derive(Deserialize)]
@@ -625,7 +620,7 @@ fn field(out: &mut Vec<u8>, bytes: &[u8]) {
 /// The exact bytes a publisher signs for a release, and that the Glass can verify again without
 /// the manifest. Length-prefixed, so no two different releases give the same bytes. Covers what
 /// the package is and what it may do; the URL is left out on purpose.
-pub fn release_statement(app_id: &str, release: &Release) -> Vec<u8> {
+pub(crate) fn release_statement(app_id: &str, release: &Release) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
     out.extend_from_slice(STATEMENT_DOMAIN);
     field(&mut out, app_id.as_bytes());

@@ -27,13 +27,13 @@ pub use download::{
     fetch_manifest, fetch_package, DownloadError, DownloadVerifier, FetchControl, FetchResponse,
     Fetcher, FileSink, PackageSink, PackageStore, VerifiedPackage,
 };
-pub use manifest::{
-    app_state_statement, release_statement, AppEntry, AppToSign, Manifest, ManifestError, Release,
-};
+pub use manifest::{app_state_statement, AppEntry, AppToSign, Manifest, ManifestError, Release};
 pub use select::{
     check_update, plan_install, select_release, GlassProfile, InstallRefusal, InstallTicket,
     InstalledApp, SelectOptions, Selection, SkipReason, UpdateStatus, KNOWN_PERMISSIONS,
 };
 pub use source::{RepositorySource, SourceError};
-pub use trust::{Observed, RecordedPackage, TrustError, TrustProblem, TrustRecord, TrustStore};
+pub use trust::{
+    Observed, RecordFailure, RecordedPackage, TrustError, TrustProblem, TrustRecord, TrustStore,
+};
 pub use url::{HttpsUrl, UrlError};

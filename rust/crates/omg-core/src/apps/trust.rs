@@ -176,8 +176,38 @@ pub enum TrustError {
     RecordMissing,
 }
 
+/// Why [`TrustStore::record_install`] failed, with the package handed back.
+#[derive(Debug, Error)]
+#[error("{error}")]
+pub struct RecordFailure {
+    /// What went wrong. [`TrustError::Io`] is worth a retry with [`Self::into_package`].
+    pub error: TrustError,
+    package: Box<VerifiedPackage>,
+}
+
+impl RecordFailure {
+    /// The package, for another [`TrustStore::record_install`] after an I/O error.
+    pub fn into_package(self) -> VerifiedPackage {
+        *self.package
+    }
+}
+
 /// A package that passed its checks and is recorded in the [`TrustStore`]: what a transfer to the
-/// Glass needs, for `AppOffer`. Only [`TrustStore::record_install`] makes one.
+/// Glass needs, for `AppOffer`. Only [`TrustStore::record_install`] makes one, and inside the
+/// core's API it is the only way to a release's signature and signed statement:
+///
+/// ```compile_fail
+/// fn signature(release: &omg_core::apps::Release) -> [u8; 64] {
+///     *release.signature()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use omg_core::apps::manifest::release_statement;
+/// ```
+///
+/// This orders code that uses the API; it is not a boundary against a hostile frontend, which can
+/// read the signature from the public manifest. The Glass's own checks are that boundary.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RecordedPackage {
     package: VerifiedPackage,
@@ -278,11 +308,29 @@ impl TrustStore {
     /// statement the Glass needs. Checks the release again against the file as it is now: the
     /// key, the repository, the hash, the withdrawals and the floor. It does not need the ticket's
     /// state to be the newest one.
+    ///
+    /// On failure the package comes back in the [`RecordFailure`]: after an I/O error a retry
+    /// needs no new download. After a refusal the memory has been refreshed, so planning again
+    /// gives the current answer instead of the same download.
     pub fn record_install(
         &mut self,
         ticket: &InstallTicket<'_>,
         package: VerifiedPackage,
-    ) -> Result<RecordedPackage, TrustError> {
+    ) -> Result<RecordedPackage, RecordFailure> {
+        match self.try_record(ticket, &package) {
+            Ok(()) => Ok(RecordedPackage { package }),
+            Err(error) => Err(RecordFailure {
+                error,
+                package: Box::new(package),
+            }),
+        }
+    }
+
+    fn try_record(
+        &mut self,
+        ticket: &InstallTicket<'_>,
+        package: &VerifiedPackage,
+    ) -> Result<(), TrustError> {
         let (app, release) = (ticket.app(), ticket.release());
         if package.app_id() != app.id
             || *package.version() != release.version
@@ -323,8 +371,7 @@ impl TrustStore {
                 record.highest = Some((release.version.clone(), release.sha256));
             }
             Ok(true)
-        })?;
-        Ok(RecordedPackage { package })
+        })
     }
 
     /// Drops everything about this id. The next install of it is a first use, under any key, from
@@ -342,9 +389,16 @@ impl TrustStore {
         edit: impl FnOnce(&mut BTreeMap<String, TrustRecord>) -> Result<bool, TrustError>,
     ) -> Result<(), TrustError> {
         let _lock = FileLock::acquire(&sibling(&self.path, ".lock"), true)?;
-        let mut records = read_records(&self.path)?;
-        if edit(&mut records)? {
-            write_records(&self.path, &records)?;
+        let current = read_records(&self.path)?;
+        let mut records = current.clone();
+        match edit(&mut records) {
+            Ok(true) => write_records(&self.path, &records)?,
+            Ok(false) => {}
+            Err(refused) => {
+                // Nothing was written, but what was read is newer than this instance's view.
+                self.records = current;
+                return Err(refused);
+            }
         }
         self.records = records;
         Ok(())

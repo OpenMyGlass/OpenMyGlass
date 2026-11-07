@@ -295,7 +295,7 @@ pub trait PackageSink {
 /// [`super::TrustStore::record_install`], which consumes it and returns the
 /// [`super::RecordedPackage`] the transfer needs. It says nothing about what the package does: see
 /// the design doc.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct VerifiedPackage {
     pub(super) app_id: String,
     pub(super) version: Version,
@@ -304,6 +304,18 @@ pub struct VerifiedPackage {
     pub(super) publisher_key: [u8; 32],
     pub(super) signature: [u8; 64],
     pub(super) statement: Vec<u8>,
+}
+
+/// Leaves out the statement and the signature, so a log line cannot become an `AppOffer`.
+impl std::fmt::Debug for VerifiedPackage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifiedPackage")
+            .field("app_id", &self.app_id)
+            .field("version", &self.version)
+            .field("sha256", &to_hex(&self.sha256))
+            .field("size", &self.size)
+            .finish_non_exhaustive()
+    }
 }
 
 impl VerifiedPackage {
