@@ -382,7 +382,7 @@ fn profiles_and_names_cross_the_boundary() {
     );
     assert_eq!(
         link_profile_constrained().max_auto_attachment_bytes,
-        Some(16 * 1024 * 1024)
+        Some(256 * 1024)
     );
     assert_eq!(link_profile_fast().max_auto_attachment_bytes, None);
     assert_eq!(time_zone_names()[2], "Roma, Paris, Madrid");

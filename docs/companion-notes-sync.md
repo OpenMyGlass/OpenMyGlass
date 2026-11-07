@@ -67,7 +67,7 @@ The owner has not answered these yet. Each is one constant, so the answer is a o
 | Question | Default in the code | Where |
 |---|---|---|
 | Delete a note from the Glass after sync? | Yes, only after the phone's verified acknowledgements | `DeletePolicy::default()` in `omg-core` |
-| Automatic sync limit per attachment on a slow link | 64 MiB on Bluetooth Classic, 16 MiB on BLE | `AUTO_SYNC_LIMIT_MODERATE`, `AUTO_SYNC_LIMIT_CONSTRAINED` in `omg-core` |
+| Automatic sync limit per attachment on a slow link | Decided for BLE: 256 KiB. Still a default: 64 MiB on Bluetooth Classic | `AUTO_SYNC_LIMIT_MODERATE`, `AUTO_SYNC_LIMIT_CONSTRAINED` in `omg-core` |
 | May one note mix photos and video? | Yes | `ALLOW_PHOTOS_WITH_VIDEO` in `omg-protocol` |
 
 glassd pins `omg-core` by commit, so a change here reaches it when the pin moves.
@@ -78,13 +78,13 @@ The side that pulls chooses the chunk size per request, from a `LinkProfile` giv
 
 | Profile | Chunk × window | Attachments that sync on their own | Meant for |
 |---|---|---|---|
-| `constrained` | 4 KiB × 2 | up to 16 MiB | Bluetooth LE |
+| `constrained` | 1 KiB × 2 | up to 256 KiB | Bluetooth LE |
 | `moderate` | 16 KiB × 2 | up to 64 MiB | Bluetooth Classic |
 | `fast` | 48 KiB × 8 | any | Wi-Fi |
 
-A small window keeps navigation and notification frames from waiting behind a long queue of chunks. **These numbers are starting values, not measurements**: RFCOMM throughput on the Glass is still unmeasured (see `media-sync.md`).
+A small window keeps navigation and notification frames from waiting behind a long queue of chunks. The BLE numbers come from what a prototype measured on the Glass, about 3 kB/s from it: two 1 KiB chunks are under a second ahead of a frame sent during a transfer, and 256 KiB takes about 90 s. The largest chunk of 48 KiB still crosses BLE if a peer asks for it, in about 16 s. The others are starting values: RFCOMM throughput on the Glass is still unmeasured (see `media-sync.md`).
 
-Within a note the recording goes first, then smaller files before bigger ones, so a transcript does not wait for a video. An attachment over the profile's limit is left for a faster link (`Deferred{NeedsFasterLink}`) without holding up the next note. `media-sync.md` keeps Bluetooth pulls manual for battery reasons; this limit is how notes respect that while still syncing "on their own". Asking the Glass to bring Wi-Fi up (`WifiBringUpRequest`) is not wired yet.
+Within a note the recording goes first, then smaller files before bigger ones, so a transcript does not wait for a video. An attachment over the profile's limit is left for a faster link (`Deferred{NeedsFasterLink}`) without holding up the next note. `media-sync.md` keeps Bluetooth pulls manual for battery reasons; this limit is how notes respect that while still syncing "on their own". Asking the Glass to bring Wi-Fi up (`WifiBringUpRequest`) is not wired yet, so a waiting attachment moves when the owner connects over Wi-Fi.
 
 ## Compatibility
 

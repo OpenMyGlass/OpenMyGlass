@@ -144,6 +144,129 @@ pub fn link_profile_fast() -> LinkProfile {
     omg_core::notes::LinkProfile::fast().into()
 }
 
+/// The GATT service a BLE link uses. See `omg_core::ble`.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BleService {
+    pub service_uuid: String,
+    /// Phone to Glass: write without response.
+    pub rx_uuid: String,
+    /// Glass to phone: notify, with the descriptor below.
+    pub tx_uuid: String,
+    pub cccd_uuid: String,
+    /// The ATT MTU to ask for.
+    pub mtu: u16,
+}
+
+#[uniffi::export]
+pub fn ble_service() -> BleService {
+    use omg_core::ble;
+    BleService {
+        service_uuid: ble::SERVICE_UUID.into(),
+        rx_uuid: ble::RX_UUID.into(),
+        tx_uuid: ble::TX_UUID.into(),
+        cccd_uuid: ble::CCCD_UUID.into(),
+        mtu: ble::REQUESTED_MTU,
+    }
+}
+
+/// What to do next with the writes of a BLE link.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum BleWriteStep {
+    /// One write without response. Ask again when the stack has taken it.
+    Write { bytes: Vec<u8> },
+    /// Nothing may go for this long.
+    Wait { ms: u32 },
+    /// Everything was handed over.
+    Idle,
+}
+
+/// Spaces the writes of a BLE link, because a phone's stack would otherwise queue them for
+/// seconds ahead of anything sent later. One per link. See `omg_core::ble`.
+#[derive(uniffi::Object)]
+pub struct BleWritePacer {
+    inner: Mutex<omg_core::ble::WritePacer>,
+}
+
+impl Default for BleWritePacer {
+    fn default() -> Self {
+        BleWritePacer {
+            inner: Mutex::new(omg_core::ble::WritePacer::new()),
+        }
+    }
+}
+
+#[uniffi::export]
+impl BleWritePacer {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<BleWritePacer> {
+        Arc::new(BleWritePacer::default())
+    }
+
+    /// The negotiated ATT MTU.
+    pub fn set_mtu(&self, mtu: u16) {
+        self.lock().set_mtu(mtu);
+    }
+
+    /// Bytes to send, as `CoreOutput::outgoing` gives them.
+    pub fn push(&self, bytes: Vec<u8>) {
+        self.lock().push(&bytes);
+    }
+
+    /// What to do at `now_ms`, on a clock that does not go backwards.
+    pub fn next_step(&self, now_ms: u64) -> BleWriteStep {
+        match self.lock().next_step(now_ms) {
+            omg_core::ble::WriteStep::Write(bytes) => BleWriteStep::Write { bytes },
+            omg_core::ble::WriteStep::Wait(ms) => BleWriteStep::Wait { ms },
+            omg_core::ble::WriteStep::Idle => BleWriteStep::Idle,
+        }
+    }
+}
+
+impl BleWritePacer {
+    fn lock(&self) -> std::sync::MutexGuard<'_, omg_core::ble::WritePacer> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+/// How long to wait before trying the Glass again. One per supervised link. See
+/// `omg_core::reconnect`.
+#[derive(uniffi::Object)]
+pub struct ReconnectBackoff {
+    inner: Mutex<omg_core::reconnect::Backoff>,
+}
+
+impl Default for ReconnectBackoff {
+    fn default() -> Self {
+        ReconnectBackoff {
+            inner: Mutex::new(omg_core::reconnect::Backoff::new()),
+        }
+    }
+}
+
+#[uniffi::export]
+impl ReconnectBackoff {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<ReconnectBackoff> {
+        Arc::new(ReconnectBackoff::default())
+    }
+
+    /// An attempt ended, after a link of `lasted_ms`, or 0 if none opened. How long to wait now.
+    pub fn next_wait_ms(&self, lasted_ms: u64) -> u32 {
+        self.lock().next_wait_ms(lasted_ms)
+    }
+
+    /// The owner asked for a link: the next failure starts from the shortest wait again.
+    pub fn reset(&self) {
+        self.lock().reset();
+    }
+}
+
+impl ReconnectBackoff {
+    fn lock(&self) -> std::sync::MutexGuard<'_, omg_core::reconnect::Backoff> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
 /// Names of the time zones `GlassSettings::timezone_id` indexes.
 #[uniffi::export]
 pub fn time_zone_names() -> Vec<String> {
