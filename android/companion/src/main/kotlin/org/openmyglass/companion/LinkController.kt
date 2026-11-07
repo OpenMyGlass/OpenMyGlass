@@ -75,13 +75,14 @@ typealias LinkOpener = (cancelled: () -> Boolean) -> ByteLink
  *
  * [onEvents] is also called with no events each time an attempt ends, because a link that simply
  * dropped has no event of its own and the screen must still stop saying it is connected.
- * [onOpenFailed] says why the wanted link did not open. It and [onEvents] run on the link's threads.
+ * [onOpenFailed] says why the wanted link did not open, with the id [connect] returned for it. It and
+ * [onEvents] run on the link's threads, so check [wants] once on the screen's thread.
  */
 class LinkController(
     private val core: CompanionCoreInterface,
     private val freeBytes: () -> Long,
     private val backoff: ReconnectBackoffInterface = ReconnectBackoff(),
-    private val onOpenFailed: (String) -> Unit = {},
+    private val onOpenFailed: (request: Long, why: String) -> Unit = { _, _ -> },
     private val onEvents: (List<CoreEvent>) -> Unit,
 ) {
     /** Ends the wait between pumps. */
@@ -90,7 +91,11 @@ class LinkController(
     /** Ends the wait between attempts. Only the owner asking for something does that. */
     private val retry = Semaphore(0)
 
-    @Volatile private var open: LinkOpener? = null
+    /** One per [connect], so that asking again with the same opener is still a new request. */
+    private class Request(val id: Long, val opener: LinkOpener)
+
+    @Volatile private var open: Request? = null
+    private var requests = 0L
 
     @Volatile private var current: ByteLink? = null
     private var supervisor: Thread? = null
@@ -98,16 +103,24 @@ class LinkController(
     /** The link that is open now, whatever its phase, to tell what carries it. */
     val running: ByteLink? get() = current
 
-    /** Keep a link open with what [opener] returns, instead of any link there is now. */
+    /**
+     * Keep a link open with what [opener] returns, instead of any link there is now. Returns the
+     * request's id, which [wants] and [onOpenFailed] use.
+     */
     @Synchronized
-    fun connect(opener: LinkOpener) {
-        open = opener
+    fun connect(opener: LinkOpener): Long {
+        val request = Request(++requests, opener)
+        open = request
         current?.close()
         if (supervisor?.isAlive != true) {
             supervisor = Thread({ supervise() }, "omg-link").apply { start() }
         }
         retry.release()
+        return request.id
     }
+
+    /** The link [connect] returned [request] for is still the one wanted. */
+    fun wants(request: Long) = open?.id == request
 
     /** Close the link and stay down. */
     fun disconnect() {
@@ -129,40 +142,40 @@ class LinkController(
     private fun supervise() {
         while (true) {
             // Under the lock, so that a connect() either sees this thread gone or is seen here.
-            val opener = synchronized(this) {
+            val request = synchronized(this) {
                 open.also { if (it == null) supervisor = null }
             } ?: return
             var lastedMs = 0L
-            openLink(opener)?.let { link ->
+            openLink(request)?.let { link ->
                 val started = System.nanoTime()
                 // Before the check: connect() sets `open` and then closes `current`, so a link
                 // nobody wants any more is either not run here or closed there.
                 current = link
-                if (open === opener) runLink(link) else link.close()
+                if (open === request) runLink(link) else link.close()
                 current = null
                 lastedMs = (System.nanoTime() - started) / 1_000_000
             }
             onEvents(core.pump().events)
             // Emptied before the check: a request after the check ends the wait.
             retry.drainPermits()
-            if (open === opener) {
+            if (open === request) {
                 retry.tryAcquire(backoff.nextWaitMs(lastedMs.toULong()).toLong(), TimeUnit.MILLISECONDS)
             }
-            if (open !== opener) backoff.reset()
+            if (open !== request) backoff.reset()
         }
     }
 
-    private fun openLink(opener: LinkOpener): ByteLink? = try {
-        opener { open !== opener }
+    private fun openLink(request: Request): ByteLink? = try {
+        request.opener { open !== request }
     } catch (e: IOException) {
-        openFailed(opener, e)
+        openFailed(request, e)
     } catch (e: RuntimeException) {
         // The framework's way of saying the same thing, and no reason to lose the app.
-        openFailed(opener, e)
+        openFailed(request, e)
     }
 
-    private fun openFailed(opener: LinkOpener, e: Exception): ByteLink? {
-        if (open === opener) onOpenFailed(e.message ?: e.toString())
+    private fun openFailed(request: Request, e: Exception): ByteLink? {
+        if (open === request) onOpenFailed(request.id, e.message ?: e.toString())
         return null
     }
 

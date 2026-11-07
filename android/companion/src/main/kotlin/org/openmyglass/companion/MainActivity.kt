@@ -91,10 +91,13 @@ class MainActivity : Activity() {
         link = LinkController(
             core,
             { filesDir.usableSpace },
-            onOpenFailed = { why ->
+            onOpenFailed = { request, why ->
                 main.post {
-                    lastProblem = why
-                    refreshStatus()
+                    // The owner may have asked for something else since.
+                    if (link.wants(request)) {
+                        lastProblem = why
+                        refreshStatus()
+                    }
                 }
             },
         ) { events ->
@@ -262,10 +265,16 @@ class MainActivity : Activity() {
                     refreshStatus()
                 },
                 button("Unpair") {
-                    core.unpair()
-                    prefs.edit().remove(KEY_BLE_ADDRESS).apply()
+                    // The Unpair frame is queued before the bond is cleared, so the link closes
+                    // either way. Only the stored address follows what the core managed.
+                    lastProblem = try {
+                        core.unpair()
+                        prefs.edit().remove(KEY_BLE_ADDRESS).apply()
+                        null
+                    } catch (e: org.openmyglass.corebindings.CoreFailure) {
+                        "Could not forget the Glass on this phone: ${e.message}"
+                    }
                     linkNote = null
-                    lastProblem = null
                     // The Glass forgets this phone only if the core's last frame reaches it.
                     link.disconnectAfterFlush()
                     refreshStatus()

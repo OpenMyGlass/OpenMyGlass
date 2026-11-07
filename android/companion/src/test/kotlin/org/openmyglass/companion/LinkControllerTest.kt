@@ -33,9 +33,12 @@ class LinkControllerTest {
     private inner class FakeCore : CompanionCoreInterface by unexpected {
         val linksUp = AtomicInteger()
         val linksDown = AtomicInteger()
-        val outgoing = LinkedBlockingQueue<ByteArray>()
+        /** What the next pumps return, each whole, so a pump never sees half of a step. */
+        val outputs = LinkedBlockingQueue<CoreOutput>()
 
-        @Volatile var closeLink = false
+        fun queue(bytes: ByteArray = ByteArray(0), closeLink: Boolean = false) {
+            outputs.add(CoreOutput(bytes, emptyList(), closeLink))
+        }
 
         override fun setFreeBytes(freeBytes: ULong?) = Unit
 
@@ -51,12 +54,7 @@ class LinkControllerTest {
 
         override fun snapshot() = SNAPSHOT
 
-        override fun pump(): CoreOutput {
-            val bytes = outgoing.poll() ?: ByteArray(0)
-            val close = closeLink
-            closeLink = false
-            return CoreOutput(bytes, emptyList(), close)
-        }
+        override fun pump(): CoreOutput = outputs.poll() ?: CoreOutput(ByteArray(0), emptyList(), false)
     }
 
     private class FakeBackoff(val waitMs: UInt) : ReconnectBackoffInterface {
@@ -114,7 +112,7 @@ class LinkControllerTest {
         core,
         { 0L },
         backoff,
-        { failures.add(it) },
+        { _, why -> failures.add(why) },
     ) { deliveries.incrementAndGet() }.also { controller = it }
 
     @After
@@ -149,7 +147,7 @@ class LinkControllerTest {
         }
         eventually("the link is up") { core.linksUp.get() == 1 }
         // Closing the link makes the reader wake everyone, which used to end the wait as well.
-        core.closeLink = true
+        core.queue(closeLink = true)
         c.poke()
         eventually("the link is down") { core.linksDown.get() == 1 }
         assertStays("no second attempt during the wait") { opens.get() == 1 }
@@ -226,14 +224,39 @@ class LinkControllerTest {
     }
 
     @Test
+    fun askingAgainWithTheSameOpenerIsStillANewRequest() {
+        val c = controller(FakeBackoff(60_000u))
+        val links = LinkedBlockingQueue<FakeLink>()
+        val opener: LinkOpener = { FakeLink().also { links.add(it) } }
+        val first = c.connect(opener)
+        eventually("the first is up") { core.linksUp.get() == 1 }
+        val second = c.connect(opener)
+        assertTrue(first != second)
+        assertFalse(c.wants(first))
+        assertTrue(c.wants(second))
+        // At once, not after the 60 s wait a retry of the same request would get.
+        eventually("the second is up") { core.linksUp.get() == 2 }
+        assertTrue(links.take().closed.await(5, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun aRequestIsNoLongerWantedOnceStopped() {
+        val c = controller(FakeBackoff(60_000u))
+        val request = c.connect { throw IOException("no Glass found") }
+        eventually("it failed") { failures.size == 1 }
+        assertTrue(c.wants(request))
+        c.disconnect()
+        assertFalse(c.wants(request))
+    }
+
+    @Test
     fun theLastFrameIsFlushedBeforeACloseTheCoreAskedFor() {
         val c = controller(FakeBackoff(60_000u))
         val link = FakeLink()
         c.connect { link }
         eventually("the link is up") { core.linksUp.get() == 1 }
         val last = byteArrayOf(7)
-        core.outgoing.add(last)
-        core.closeLink = true
+        core.queue(last, closeLink = true)
         c.poke()
         eventually("the link is down") { core.linksDown.get() == 1 }
         assertEquals(listOf("write", "flush", "close"), link.calls.toList())
@@ -250,7 +273,7 @@ class LinkControllerTest {
             link
         }
         eventually("the link is up") { core.linksUp.get() == 1 }
-        core.outgoing.add(byteArrayOf(9))
+        core.queue(byteArrayOf(9))
         c.disconnectAfterFlush()
         eventually("the link is down") { core.linksDown.get() == 1 }
         assertEquals(listOf("write", "flush", "close"), link.calls.toList())

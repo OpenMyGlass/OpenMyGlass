@@ -33,7 +33,7 @@
              in code and fit any of these, so none of them needs a new activity. -->
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|fontScale|density|locale|layoutDirection"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|fontScale|fontWeightAdjustment|density|locale|layoutDirection|mcc|mnc|colorMode|touchscreen|grammaticalGender"
             android:exported="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
