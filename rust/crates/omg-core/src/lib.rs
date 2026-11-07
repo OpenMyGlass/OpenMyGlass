@@ -10,6 +10,8 @@
 //! * [`secure`] — encrypts the link after the handshake, whichever frontend drives it.
 //! * [`notes`] — notes with attachments and deferred sync: pure state machines for both
 //!   sides, a crash-safe queue, and the speech engine traits the phone apps implement.
+//! * [`apps`] — the Applications section: repository manifests as untrusted input, version
+//!   selection, and verified downloads through an injected fetcher.
 //!
 //! With the `async-link` feature, for frontends that let the core own the link:
 //!
@@ -22,6 +24,7 @@
 //! note sync are implemented and tested end-to-end. Everything else in [`omg_protocol`] is
 //! typed and scaffolded.
 
+pub mod apps;
 pub mod ble;
 pub mod companion_link;
 pub mod identity;
