@@ -94,8 +94,8 @@ class CompanionProcess private constructor(context: Context) {
     /** Main thread only. The last thing that went wrong with the link. */
     var lastProblem: String? = null
 
-    /** Main thread only. Counts what the owner asked of the link: connect or disconnect. */
-    var linkRequests = 0L
+    /** Main thread only. The link request the owner made last, as `LinkController.connect` gave it. */
+    var linkRequest: Long? = null
 
     /** Main thread only. Numbers requests to read a note aloud, across screens. */
     var lastSpeechRequest = 0uL

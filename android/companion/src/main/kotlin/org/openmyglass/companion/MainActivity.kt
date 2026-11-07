@@ -170,13 +170,23 @@ class MainActivity : Activity(), CompanionScreen {
                 main.post {
                     if (!isDestroyed) {
                         failed()
-                        onLinkFailed("The core failed: ${e.message ?: e}")
+                        coreFailed(e)
                     }
                 }
                 return@execute
             }
             main.post { if (!isDestroyed) then(result) }
         }
+    }
+
+    /**
+     * Shows that the core failed. It does not refresh, since a refresh calls the core and would
+     * fail the same way, over and over: the next refresh for another reason shows the status.
+     */
+    private fun coreFailed(e: Exception) {
+        val why = "The core failed: ${e.message ?: e}"
+        lastProblem = why
+        say(why)
     }
 
     /** Runs [call] on the core's thread and shows why it failed, if it did. */
@@ -233,8 +243,7 @@ class MainActivity : Activity(), CompanionScreen {
         prefs.edit().putString(KEY_ADDRESS, text).putString(KEY_LINK, LINK_TCP).apply()
         linkNote = null
         lastProblem = null
-        process.linkRequests++
-        link.connect { TcpLink(host, port) }
+        process.linkRequest = link.connect { TcpLink(host, port) }
         refreshStatus()
     }
 
@@ -257,8 +266,7 @@ class MainActivity : Activity(), CompanionScreen {
         prefs.edit().putString(KEY_LINK, LINK_BLE).apply()
         linkNote = "Looking for the Glass over Bluetooth"
         lastProblem = null
-        process.linkRequests++
-        link.connect { cancelled ->
+        process.linkRequest = link.connect { cancelled ->
             val address = prefs.getString(KEY_BLE_ADDRESS, null)
                 .takeIf { core.snapshot().bondedTo != null }
             BleLink.open(applicationContext, address, cancelled)
@@ -392,28 +400,35 @@ class MainActivity : Activity(), CompanionScreen {
                 button("Disconnect") {
                     linkNote = null
                     lastProblem = null
-                    process.linkRequests++
+                    process.linkRequest = null
                     link.disconnect()
                     refreshStatus()
                 },
                 button("Unpair") {
-                    // Waits behind other calls. A link the owner asks for meanwhile is newer than
-                    // this, and must not be ended by it.
-                    val asked = process.linkRequests
+                    // Both taken now: the call waits behind others, and what the owner asks for
+                    // meanwhile is newer than this tap.
+                    val target = known?.linkId
+                    val asked = process.linkRequest
+                    if (target == null || asked == null) {
+                        lastProblem = "Connect to the Glass first, so it forgets this phone too"
+                        refreshStatus()
+                        return@button
+                    }
                     onCore({
-                        // If this phone cannot forget the bond, the core tells the Glass nothing
-                        // and the link stays, so both ends still agree.
+                        // The core does nothing unless that same link is up and running, so the
+                        // Glass is always told, and it never ends a newer link. If this phone
+                        // cannot forget the bond, the core tells the Glass nothing and the link
+                        // stays, so both ends still agree.
                         try {
-                            core.unpair()
+                            core.unpair(target)
                             prefs.edit().remove(KEY_BLE_ADDRESS).apply()
-                            // The Glass forgets this phone only if the core's last frame reaches it.
-                            // On the main thread, where requests are made, so none slips in between.
-                            main.post {
-                                if (process.linkRequests == asked) link.disconnectAfterFlush()
-                            }
+                            // The Glass forgets this phone only if the core's last frame reaches
+                            // it. Staying down is what keeps the link from pairing again by itself,
+                            // unless the owner has asked for another link since.
+                            link.disconnectAfterFlush(asked)
                             null
                         } catch (e: org.openmyglass.corebindings.CoreFailure) {
-                            "Could not forget the Glass on this phone: ${e.message}"
+                            "Could not unpair: ${e.message}"
                         }
                     }) { problem ->
                         lastProblem = problem
@@ -1049,6 +1064,9 @@ class MainActivity : Activity(), CompanionScreen {
             } catch (e: org.openmyglass.corebindings.CoreFailure) {
                 e.message
             }
+        }, failed = {
+            // The error itself is said by onCore.
+            if (speechWanted == request) stopPlayback()
         }) { problem ->
             if (problem != null && speechWanted == request) {
                 stopPlayback()

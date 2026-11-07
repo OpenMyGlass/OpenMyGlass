@@ -49,7 +49,7 @@ A blocked write never stops reading, which matters on small Bluetooth buffers, w
 For a UI: `snapshot()` is the link and what the Glass last reported, `notes()` is the list, and `CoreEvent`s say when to read them again.
 
 - **Settings:** `change_settings` sends only the fields set. The Glass clamps values and answers with the full mirror as `SettingsChanged`. Radios have `set_radio` and `set_airplane_mode`. A field the Glass does not report stays `None`, and the UI hides it: today that is `brightness`, which glassd does not have.
-- **Pairing:** `link_up(profile, allow_pairing)`. Set `allow_pairing` only when the owner asked to pair.
+- **Pairing:** `link_up(profile, allow_pairing)`. Set `allow_pairing` only when the owner asked to pair. `unpair(link_id)` needs the running link the owner tapped it on, from `snapshot().link_id`, and changes nothing otherwise: the phone never forgets while the Glass is not told, and an old Unpair never ends a newer link. Afterwards the app stays down until the owner asks for a link, or it would pair again by itself.
 - **Notes from the Glass** arrive by themselves. Attachment paths are set once a file is verified.
 - **Notes on the phone** (`add_phone_note`) are stored on the phone only. The protocol syncs in one direction, from Glass to phone. A transcription cut short by the app stopping runs again on the next start.
 - **A note's state:** `NoteInfo` says whether it is `transcribing`, what it is `waiting` for, and whether it is `deletable` or `speakable`. `snapshot().receiving` is the note being pulled, and `CoreEvent::NoteProgress` says when to read it, about once a second.

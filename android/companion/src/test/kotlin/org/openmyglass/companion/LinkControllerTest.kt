@@ -297,6 +297,25 @@ class LinkControllerTest {
     }
 
     @Test
+    fun aQueuedUnpairDoesNotEndALinkAskedForAfterIt() {
+        val c = controller(FakeBackoff(60_000u))
+        val tapped = c.connect { FakeLink() }
+        eventually("the link is up") { core.linksUp.get() == 1 }
+        // The owner taps Unpair, then Connect before the Unpair runs.
+        val newer = FakeLink()
+        val asked = c.connect { newer }
+        eventually("the newer link runs") { c.running === newer }
+        assertFalse(c.disconnectAfterFlush(tapped))
+        assertTrue(c.wants(asked))
+        assertStays("the newer link stays") { newer.closed.count == 1L }
+
+        // The same, with nothing asked for since: it stays down.
+        assertTrue(c.disconnectAfterFlush(asked))
+        eventually("the link is down") { newer.closed.count == 0L }
+        assertFalse(c.wants(asked))
+    }
+
+    @Test
     fun aConnectRightAfterUnpairWaitsForTheFlush() {
         val c = controller(FakeBackoff(60_000u))
         val old = FakeLink(flushHolds = true)
@@ -387,6 +406,6 @@ class LinkControllerTest {
 
     private companion object {
         val NOTHING_KNOWN = GlassState(null, null, null, null, null, null, null, null, null, null, null)
-        val SNAPSHOT = CoreSnapshot(LinkPhase.DOWN, "Glass", "key", NOTHING_KNOWN, null, 0u)
+        val SNAPSHOT = CoreSnapshot(LinkPhase.DOWN, "Glass", "key", NOTHING_KNOWN, null, 0u, null)
     }
 }

@@ -92,6 +92,9 @@ pub enum CoreFailure {
     /// A note breaks the limits, or a file of it could not be read.
     #[error("invalid note: {0}")]
     InvalidNote(String),
+    /// This needs the Glass, over the link named, and that link is not up and running.
+    #[error("not connected: {0}")]
+    NotConnected(String),
 }
 
 /// Why a speech engine produced nothing.
@@ -538,6 +541,8 @@ pub struct CoreSnapshot {
     pub receiving: Option<NoteTransfer>,
     /// Notes whose records could not be read. They are kept aside on disk and not listed.
     pub notes_set_aside: u32,
+    /// The link up now, whatever its phase, for [`CompanionCore::unpair`].
+    pub link_id: Option<u64>,
 }
 
 /// Something that happened since the last [`CompanionCore::pump`].
@@ -921,6 +926,8 @@ impl Drop for DirClaim {
 }
 
 struct Link {
+    /// Counts links over the life of the core, for the app to name one.
+    id: u64,
     machine: CompanionLink,
     decoder: FrameDecoder,
     profile: LinkProfile,
@@ -948,6 +955,8 @@ struct Inner {
     speech_generation: Arc<AtomicU64>,
     speech_file: Option<PathBuf>,
     last_progress: Option<(CoreNoteTransfer, u64)>,
+    /// The id of the last link brought up.
+    last_link_id: u64,
 }
 
 /// See the crate docs.
@@ -1077,6 +1086,7 @@ impl CompanionCore {
                 speech_generation,
                 speech_file: None,
                 last_progress: None,
+                last_link_id: 0,
             }),
             engines,
             stt_tx,
@@ -1110,7 +1120,9 @@ impl CompanionCore {
         inner.close_link = false;
         inner.outgoing.clear();
         inner.glass = GlassState::default();
+        inner.last_link_id += 1;
         inner.link = Some(Link {
+            id: inner.last_link_id,
             machine,
             decoder: FrameDecoder::new(),
             profile,
@@ -1197,6 +1209,7 @@ impl CompanionCore {
             receiving: inner.from_glass.machine().transfer().map(Into::into),
             notes_set_aside: (inner.from_glass.set_aside().len()
                 + inner.from_phone.set_aside().len()) as u32,
+            link_id: inner.link.as_ref().map(|l| l.id),
         }
     }
 
@@ -1233,13 +1246,37 @@ impl CompanionCore {
         }));
     }
 
-    /// Forgets the bonded Glass, and tells it to forget this phone if a link is up. If this
+    /// Forgets the bonded Glass and tells it to forget this phone, over the link `link_id` names,
+    /// as [`CoreSnapshot::link_id`] gave it. That link must be up and past its handshake: the phone
+    /// never forgets while the Glass is not told, and an Unpair asked for one link never ends a
+    /// newer one. Anything else is [`CoreFailure::NotConnected`], and nothing changes. If this
     /// phone cannot forget, nothing is sent and the link stays: the two ends keep agreeing.
-    pub fn unpair(&self) -> Result<(), CoreFailure> {
+    ///
+    /// The link then closes. The app must not open another by itself, or it would pair again: a
+    /// new bond needs the owner to ask.
+    pub fn unpair(&self, link_id: u64) -> Result<(), CoreFailure> {
         let mut inner = self.lock();
+        match &inner.link {
+            Some(link) if link.id == link_id && link.machine.is_running() => {}
+            Some(link) if link.id == link_id => {
+                return Err(CoreFailure::NotConnected(
+                    "the Glass is still connecting, try again in a moment".into(),
+                ))
+            }
+            Some(_) => {
+                return Err(CoreFailure::NotConnected(
+                    "the connection changed since, try again".into(),
+                ))
+            }
+            None => {
+                return Err(CoreFailure::NotConnected(
+                    "connect to the Glass first, so it forgets this phone too".into(),
+                ))
+            }
+        }
         inner.store.clear_paired().map_err(storage)?;
         inner.send(&Frame::Unpair);
-        inner.close_link = inner.link.is_some();
+        inner.close_link = true;
         Ok(())
     }
 

@@ -263,16 +263,61 @@ fn an_unpair_this_phone_cannot_store_tells_the_glass_nothing() {
     // Where the store writes before its rename.
     let blocker = tmp.path().join("companion.tmp");
     std::fs::create_dir(&blocker).unwrap();
-    assert!(phone.unpair().is_err());
+    let link = phone.snapshot().link_id.unwrap();
+    assert!(phone.unpair(link).is_err());
     assert!(phone.snapshot().bonded_to.is_some());
     // The Glass would end the link on an Unpair.
     thread::sleep(Duration::from_millis(300));
     assert_eq!(phone.snapshot().phase, LinkPhase::Running);
 
     std::fs::remove_dir(&blocker).unwrap();
-    phone.unpair().unwrap();
+    phone.unpair(link).unwrap();
     assert!(phone.snapshot().bonded_to.is_none());
     // The core asks for the close itself, with no event, and the app's pump stops on it.
+    let start = Instant::now();
+    while !app.pump.as_ref().unwrap().is_finished() {
+        assert!(start.elapsed() < Duration::from_secs(10), "the link stayed");
+        thread::sleep(Duration::from_millis(5));
+    }
+    app.close();
+}
+
+#[test]
+fn an_unpair_needs_the_running_link_it_was_meant_for_or_changes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = Arc::new(FakeEngines::default());
+    let (addr, _rt) = sim_glass(None, false);
+    let phone = core(tmp.path(), &engines);
+    let not_connected = |r: Result<(), CoreFailure>| matches!(r, Err(CoreFailure::NotConnected(_)));
+
+    // Pairing first, then no link at all: the Glass could not be told.
+    let app = App::connect(phone.clone(), &addr, true);
+    app.wait_for("the settings", |e| settings_of(e).is_some());
+    let old = phone.snapshot().link_id.unwrap();
+    app.close();
+    assert_eq!(phone.snapshot().link_id, None);
+    assert!(not_connected(phone.unpair(old)));
+    assert!(phone.snapshot().bonded_to.is_some());
+
+    // A link still in its handshake: the frame would be dropped, so it is refused.
+    phone.link_up(link_profile_fast(), false);
+    let connecting = phone.snapshot().link_id.unwrap();
+    assert_ne!(connecting, old);
+    assert!(not_connected(phone.unpair(connecting)));
+    assert!(!phone.pump().close_link);
+    phone.link_down();
+
+    // A newer link than the one the owner tapped Unpair on: it stays, and so does the bond.
+    let app = App::connect(phone.clone(), &addr, false);
+    app.wait_for("the settings", |e| settings_of(e).is_some());
+    assert!(not_connected(phone.unpair(old)));
+    assert!(phone.snapshot().bonded_to.is_some());
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(phone.snapshot().phase, LinkPhase::Running);
+
+    // The running link it names: forgotten, the Glass told, the link closing.
+    phone.unpair(phone.snapshot().link_id.unwrap()).unwrap();
+    assert!(phone.snapshot().bonded_to.is_none());
     let start = Instant::now();
     while !app.pump.as_ref().unwrap().is_finished() {
         assert!(start.elapsed() < Duration::from_secs(10), "the link stayed");
@@ -612,17 +657,39 @@ fn speech_finished_during_a_link_reaches_the_pump_and_with_no_link_the_poll() {
     app.wait_for("the link", |e| {
         e.iter().any(|e| matches!(e, CoreEvent::LinkRunning { .. }))
     });
-    add_voice_note(&phone, tmp.path(), None);
-    app.wait_for("the transcript", |_| phone.notes()[0].transcript.is_some());
+    let changes = |e: &[CoreEvent]| {
+        e.iter()
+            .filter(|e| matches!(e, CoreEvent::NotesChanged))
+            .count()
+    };
+    let before = changes(&app.events.lock().unwrap());
+    let held = engines.hold.lock().unwrap();
+    let id = add_voice_note(&phone, tmp.path(), None);
+    // One for the note, delivered with it.
+    app.wait_for("the new note", |e| changes(e) == before + 1);
+    // The transcript's own change, polled for hard, still goes to the pump.
+    drop(held);
+    let mut polled = Vec::new();
+    let start = Instant::now();
+    while changes(&app.events.lock().unwrap()) < before + 2 {
+        polled.extend(phone.poll());
+        assert!(start.elapsed() < Duration::from_secs(10), "no transcript");
+    }
+    assert!(polled.is_empty(), "the poll took {polled:?}");
+    assert!(phone
+        .notes()
+        .iter()
+        .any(|n| n.id == id && n.transcript.is_some()));
     app.close();
 
-    // With no link, the poll is all there is.
+    // With no link the poll is all there is, and it delivers the change.
     let id = add_voice_note(&phone, tmp.path(), None);
-    poll_until(&phone, |_| {
-        phone
-            .notes()
-            .iter()
-            .any(|n| n.id == id && n.transcript.is_some())
+    poll_until(&phone, |e| {
+        changes(e) >= 2
+            && phone
+                .notes()
+                .iter()
+                .any(|n| n.id == id && n.transcript.is_some())
     });
 }
 
@@ -699,12 +766,35 @@ fn a_transcription_that_keeps_stopping_the_app_is_given_up_until_the_owner_asks(
     let tmp = tempfile::tempdir().unwrap();
     let engines = TestEngines::with_words("parole");
     let held = engines.hold.lock().unwrap();
+    // The worker counts a start just before the engine, on its own thread: wait for it, as a
+    // process would have got that far before the engine took it down.
+    let counted = |n: u32| {
+        let dir = tmp.path().join("stt-attempts");
+        let start = Instant::now();
+        loop {
+            let count = std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| std::fs::read_to_string(e.unwrap().path()).ok())
+                .filter_map(|s| s.parse::<u32>().ok())
+                .max();
+            if count == Some(n) {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "never counted {n}: {count:?}"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    };
     let phone = test_core(tmp.path(), &engines);
     let id = add_voice_note(&phone, tmp.path(), None);
+    counted(1);
     drop(phone); // The first start, ended by the engine. Nothing came back.
-    for _ in 0..2 {
+    for n in 2..=3 {
         let phone = test_core(tmp.path(), &engines);
         assert!(phone.notes()[0].transcribing);
+        counted(n);
         drop(phone);
     }
     let phone = test_core(tmp.path(), &engines);
