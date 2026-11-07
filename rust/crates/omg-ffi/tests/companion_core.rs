@@ -49,6 +49,8 @@ impl TextToSpeechEngine for FakeEngines {
             pcm: text.bytes().cycle().take(100_000).collect(),
         })
     }
+
+    fn cancel(&self) {}
 }
 
 /// What an app does around a socket.
@@ -420,7 +422,17 @@ struct TestEngines {
     words: Mutex<Option<String>>,
     /// While held, a transcription waits.
     hold: Mutex<()>,
+    /// Transcriptions left to answer "busy".
+    busy_left: AtomicU32,
+    stt_now: AtomicU32,
+    stt_max: AtomicU32,
     said: Mutex<Vec<String>>,
+    /// Audio for each piece of speech, in bytes. 2 if unset.
+    pcm_per_piece: AtomicU32,
+    /// A synthesis waits until cancelled, once.
+    block_tts: AtomicBool,
+    tts_blocked: AtomicBool,
+    cancels: AtomicU32,
 }
 
 impl TestEngines {
@@ -434,6 +446,16 @@ impl TestEngines {
 impl SpeechToTextEngine for TestEngines {
     fn transcribe(&self, _: String, _: String, _: NoteLocale) -> Result<String, SpeechFailure> {
         drop(self.hold.lock().unwrap());
+        let now = self.stt_now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.stt_max.fetch_max(now, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(5));
+        self.stt_now.fetch_sub(1, Ordering::SeqCst);
+        // One worker runs these, as a test elsewhere checks.
+        let busy = self.busy_left.load(Ordering::SeqCst);
+        if busy > 0 {
+            self.busy_left.store(busy - 1, Ordering::SeqCst);
+            return Err(SpeechFailure::Busy);
+        }
         self.words
             .lock()
             .unwrap()
@@ -447,11 +469,30 @@ impl TextToSpeechEngine for TestEngines {
         if self.words.lock().unwrap().is_none() {
             return Err(SpeechFailure::Unavailable);
         }
+        if self.block_tts.swap(false, Ordering::SeqCst) {
+            self.tts_blocked.store(true, Ordering::SeqCst);
+            let start = Instant::now();
+            while self.cancels.load(Ordering::SeqCst) == 0 {
+                assert!(start.elapsed() < Duration::from_secs(10), "never cancelled");
+                thread::sleep(Duration::from_millis(1));
+            }
+            return Err(SpeechFailure::Failed {
+                reason: "cancelled".into(),
+            });
+        }
         self.said.lock().unwrap().push(text);
+        let len = match self.pcm_per_piece.load(Ordering::SeqCst) {
+            0 => 2,
+            n => n as usize,
+        };
         Ok(SpeechAudio {
             sample_rate: 8000,
-            pcm: vec![9, 9],
+            pcm: vec![9; len],
         })
+    }
+
+    fn cancel(&self) {
+        self.cancels.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -528,10 +569,66 @@ fn polling_leaves_what_the_pump_must_write_alone() {
     assert!(phone.poll().is_empty());
     assert!(!phone.pump().outgoing.is_empty(), "the handshake went out");
     phone.link_down();
-    // And the handshake really works after a poll: the rest is the ordinary path.
+
+    // Polling all through a real handshake loses no byte of it.
     let app = App::connect(phone.clone(), &addr, true);
-    phone.poll();
+    let start = Instant::now();
+    while phone.snapshot().phase != LinkPhase::Running {
+        phone.poll();
+        assert!(start.elapsed() < Duration::from_secs(10), "no handshake");
+    }
     app.close();
+}
+
+#[test]
+fn a_second_core_on_one_directory_is_refused_while_the_first_lives() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("x");
+    let first = test_core(tmp.path(), &engines);
+    let second = CompanionCore::new(
+        tmp.path().to_string_lossy().into_owned(),
+        "test phone".into(),
+        "0".into(),
+        engines.clone(),
+        engines.clone(),
+    );
+    assert!(matches!(second, Err(CoreFailure::Storage(_))));
+    drop(first);
+    test_core(tmp.path(), &engines);
+}
+
+#[test]
+fn transcriptions_run_one_at_a_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("parole");
+    let phone = test_core(tmp.path(), &engines);
+    for _ in 0..4 {
+        add_voice_note(&phone, tmp.path(), None);
+    }
+    poll_until(&phone, |_| {
+        phone.notes().iter().all(|n| n.transcript.is_some())
+    });
+    assert_eq!(engines.stt_max.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_busy_recognizer_is_tried_again_and_never_called_no_engine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("parole");
+    engines.busy_left.store(1, Ordering::SeqCst);
+    let phone = test_core(tmp.path(), &engines);
+    add_voice_note(&phone, tmp.path(), None);
+    poll_until(&phone, |_| phone.notes()[0].transcript.is_some());
+
+    // Busy every time: the note says so, and asking again works.
+    engines.busy_left.store(u32::MAX, Ordering::SeqCst);
+    let id = add_voice_note(&phone, tmp.path(), None);
+    let note = |phone: &CompanionCore| phone.notes().into_iter().find(|n| n.id == id).unwrap();
+    poll_until(&phone, |_| note(&phone).transcript_error.is_some());
+    assert!(note(&phone).transcript_error.unwrap().contains("busy"));
+    engines.busy_left.store(0, Ordering::SeqCst);
+    phone.retranscribe_note(id.clone()).unwrap();
+    poll_until(&phone, |_| note(&phone).transcript.is_some());
 }
 
 #[test]
@@ -549,6 +646,38 @@ fn a_transcription_cut_short_by_the_app_stopping_runs_again_on_the_next_start() 
     poll_until(&phone, |_| phone.notes()[0].transcript.is_some());
     assert_eq!(phone.notes()[0].transcript.as_deref(), Some("dopo"));
     drop(held);
+}
+
+#[test]
+fn a_transcription_that_keeps_stopping_the_app_is_given_up_until_the_owner_asks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("parole");
+    let held = engines.hold.lock().unwrap();
+    let phone = test_core(tmp.path(), &engines);
+    let id = add_voice_note(&phone, tmp.path(), None);
+    drop(phone); // The first start, ended by the engine. Nothing came back.
+    for _ in 0..2 {
+        let phone = test_core(tmp.path(), &engines);
+        assert!(phone.notes()[0].transcribing);
+        drop(phone);
+    }
+    let phone = test_core(tmp.path(), &engines);
+    poll_until(&phone, |_| phone.notes()[0].transcript_error.is_some());
+    assert!(phone.notes()[0]
+        .transcript_error
+        .as_ref()
+        .unwrap()
+        .contains("stopping the app"));
+
+    // It stays given up on the next start, which is the point.
+    drop(phone);
+    let phone = test_core(tmp.path(), &engines);
+    assert!(!phone.notes()[0].transcribing);
+
+    drop(held);
+    phone.retranscribe_note(id).unwrap();
+    poll_until(&phone, |_| phone.notes()[0].transcript.is_some());
+    assert_eq!(phone.notes()[0].transcript.as_deref(), Some("parole"));
 }
 
 #[test]
@@ -572,10 +701,21 @@ fn no_engine_is_reported_and_asking_again_works_once_there_is_one() {
     assert_eq!(note.transcript.as_deref(), Some("adesso"));
     assert_eq!(note.transcript_error, None);
 
-    assert!(matches!(
-        phone.retranscribe_note("zz".into()),
-        Err(CoreFailure::InvalidNote(_))
-    ));
+    for unknown in ["zz".to_string(), "ab".repeat(16)] {
+        assert!(matches!(
+            phone.retranscribe_note(unknown),
+            Err(CoreFailure::InvalidNote(why)) if why == "no such note"
+        ));
+    }
+}
+
+fn ready_path(events: &[CoreEvent], wanted: u64) -> Option<String> {
+    events.iter().find_map(|e| match e {
+        CoreEvent::NoteSpeechReady {
+            request_id, path, ..
+        } if *request_id == wanted => Some(path.clone()),
+        _ => None,
+    })
 }
 
 #[test]
@@ -586,81 +726,113 @@ fn a_note_is_read_aloud_with_no_link_and_only_the_latest_request_counts() {
     let id = add_voice_note(&phone, tmp.path(), Some("scritto"));
     poll_until(&phone, |_| phone.notes()[0].transcript.is_some());
 
-    phone.speak_note(id.clone()).unwrap();
-    let ready = |events: &[CoreEvent]| {
-        events.iter().find_map(|e| match e {
-            CoreEvent::NoteSpeechReady { path, .. } => Some(path.clone()),
-            _ => None,
-        })
-    };
-    let events = poll_until(&phone, |e| ready(e).is_some());
-    let first = ready(&events).unwrap();
+    phone.speak_note(id.clone(), 1).unwrap();
+    let events = poll_until(&phone, |e| ready_path(e, 1).is_some());
+    let first = ready_path(&events, 1).unwrap();
     assert_eq!(*engines.said.lock().unwrap(), ["scritto\nsentito"]);
     let wav = std::fs::read(&first).unwrap();
     assert_eq!(&wav[..4], b"RIFF");
+    assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 2);
     assert_eq!(&wav[44..], [9, 9]);
 
     // The next request replaces the audio, and stopping removes it.
-    phone.speak_note(id.clone()).unwrap();
+    phone.speak_note(id.clone(), 2).unwrap();
     assert!(!Path::new(&first).exists());
-    let events = poll_until(&phone, |e| ready(e).is_some());
-    let second = ready(&events).unwrap();
+    let events = poll_until(&phone, |e| ready_path(e, 2).is_some());
+    let second = ready_path(&events, 2).unwrap();
     assert_ne!(first, second);
     phone.stop_speaking();
     assert!(!Path::new(&second).exists());
 
-    // Stopped while it runs: nothing is announced, and nothing stays on disk.
-    phone.speak_note(id.clone()).unwrap();
-    phone.stop_speaking();
-    let speech_dir = tmp.path().join("speech");
-    let start = Instant::now();
-    while engines.said.lock().unwrap().len() < 3 {
-        assert!(start.elapsed() < Duration::from_secs(10));
-        thread::sleep(Duration::from_millis(2));
-    }
-    thread::sleep(Duration::from_millis(50));
-    assert!(ready(&phone.poll()).is_none());
-    assert_eq!(std::fs::read_dir(&speech_dir).unwrap().count(), 0);
-
-    // No engine: the reason reaches the owner.
+    // No engine: the reason reaches the owner, with the request it answers.
     *engines.words.lock().unwrap() = None;
-    phone.speak_note(id).unwrap();
+    phone.speak_note(id, 3).unwrap();
     let events = poll_until(&phone, |e| {
         e.iter()
             .any(|e| matches!(e, CoreEvent::NoteSpeechFailed { .. }))
     });
     assert!(events.iter().any(|e| matches!(
         e,
-        CoreEvent::NoteSpeechFailed { reason, .. } if reason.contains("no text-to-speech")
+        CoreEvent::NoteSpeechFailed { request_id: 3, reason, .. }
+            if reason.contains("no text-to-speech")
     )));
 }
 
 #[test]
-fn long_text_reaches_the_engine_in_pieces_and_comes_back_as_one_audio() {
+fn stopping_cancels_the_engine_and_leaves_nothing_behind() {
     let tmp = tempfile::tempdir().unwrap();
     let engines = TestEngines::with_words("x");
+    let phone = test_core(tmp.path(), &engines);
+    let id = phone
+        .add_phone_note(Some("testo".into()), NoteLocale::It, Vec::new())
+        .unwrap();
+    engines.block_tts.store(true, Ordering::SeqCst);
+    phone.speak_note(id.clone(), 1).unwrap();
+    let start = Instant::now();
+    while !engines.tts_blocked.load(Ordering::SeqCst) {
+        assert!(start.elapsed() < Duration::from_secs(10), "never started");
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(engines.cancels.load(Ordering::SeqCst), 0);
+    phone.stop_speaking();
+    assert_eq!(engines.cancels.load(Ordering::SeqCst), 1);
+
+    // Answers arrive in order, so once the next request is answered, the stopped one has been too.
+    phone.speak_note(id, 2).unwrap();
+    let events = poll_until(&phone, |e| ready_path(e, 2).is_some());
+    assert!(ready_path(&events, 1).is_none());
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::NoteSpeechFailed { request_id: 1, .. })));
+    let left: Vec<_> = std::fs::read_dir(tmp.path().join("speech"))
+        .unwrap()
+        .map(|e| e.unwrap().path().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, [ready_path(&events, 2).unwrap()]);
+}
+
+#[test]
+fn requests_replaced_while_waiting_never_reach_the_engine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("x");
+    let phone = test_core(tmp.path(), &engines);
+    let id = phone
+        .add_phone_note(Some("testo".into()), NoteLocale::It, Vec::new())
+        .unwrap();
+    engines.block_tts.store(true, Ordering::SeqCst);
+    phone.speak_note(id.clone(), 1).unwrap();
+    let start = Instant::now();
+    while !engines.tts_blocked.load(Ordering::SeqCst) {
+        assert!(start.elapsed() < Duration::from_secs(10), "never started");
+        thread::sleep(Duration::from_millis(1));
+    }
+    for request in 2..=20 {
+        phone.speak_note(id.clone(), request).unwrap();
+    }
+    poll_until(&phone, |e| ready_path(e, 20).is_some());
+    assert_eq!(engines.said.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_long_note_comes_back_as_one_audio_past_the_limit_of_the_wire() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("x");
+    engines.pcm_per_piece.store(4 << 20, Ordering::SeqCst);
     let phone = test_core(tmp.path(), &engines);
     let long = "Una frase che si ripete. ".repeat(1000);
     let id = phone
         .add_phone_note(Some(long.clone()), NoteLocale::It, Vec::new())
         .unwrap();
-    phone.speak_note(id).unwrap();
-    let events = poll_until(&phone, |e| {
-        e.iter()
-            .any(|e| matches!(e, CoreEvent::NoteSpeechReady { .. }))
-    });
+    phone.speak_note(id, 1).unwrap();
+    let events = poll_until(&phone, |e| ready_path(e, 1).is_some());
     let said = engines.said.lock().unwrap().clone();
     assert!(said.len() > 1);
     assert!(said.iter().all(|p| p.len() <= 3000));
     assert_eq!(said.join(" "), long.trim());
-    let path = events
-        .iter()
-        .find_map(|e| match e {
-            CoreEvent::NoteSpeechReady { path, .. } => Some(path.clone()),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(std::fs::read(path).unwrap().len(), 44 + 2 * said.len());
+    let data = said.len() as u64 * (4 << 20);
+    assert!(data > omg_protocol::MAX_TTS_AUDIO_BYTES, "too short a test");
+    let wav = std::fs::metadata(ready_path(&events, 1).unwrap()).unwrap();
+    assert_eq!(wav.len(), 44 + data);
 }
 
 #[test]
@@ -684,7 +856,7 @@ fn a_note_with_nothing_to_read_says_so() {
         .unwrap();
     assert!(!phone.notes()[0].speakable);
     assert!(matches!(
-        phone.speak_note(id),
+        phone.speak_note(id, 1),
         Err(CoreFailure::InvalidNote(_))
     ));
 }
@@ -714,7 +886,7 @@ fn a_phone_note_is_deleted_with_its_files_and_stays_deleted() {
     assert_eq!(phone.notes().len(), 1);
     assert!(matches!(
         phone.delete_note(id),
-        Err(CoreFailure::InvalidNote(_))
+        Err(CoreFailure::InvalidNote(why)) if why == "no such note"
     ));
     drop(phone);
     let phone = test_core(tmp.path(), &engines);
@@ -783,6 +955,99 @@ fn a_note_too_big_for_the_link_says_what_it_waits_for_and_cannot_be_deleted_yet(
     app.close();
 
     assert!(phone.snapshot().receiving.is_none());
+}
+
+fn queue_photo(glass_dir: &Path, photo: &Path, len: usize) {
+    std::fs::write(photo, vec![2u8; len]).unwrap();
+    let mut queue = GlassNotes::open(glass_dir, SenderConfig::default()).unwrap();
+    queue
+        .add_note(
+            &NoteDraft {
+                created_at_ms: 1,
+                locale: Locale::It,
+                text: Some("foto".into()),
+                attachments: vec![AttachmentSource {
+                    kind: AttachmentKind::Photo,
+                    mime: "image/jpeg".into(),
+                    path: photo.to_path_buf(),
+                    duration_ms: None,
+                }],
+            },
+            1,
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_transfer_shows_how_far_it_has_come() {
+    let tmp = tempfile::tempdir().unwrap();
+    let glass_dir = tmp.path().join("glass");
+    queue_photo(&glass_dir, &tmp.path().join("p.jpg"), 200_000);
+    let (addr, _rt) = sim_glass(Some(&glass_dir), false);
+    let engines = Arc::new(FakeEngines::default());
+    let phone = core(&tmp.path().join("phone"), &engines);
+    assert_eq!(phone.snapshot().receiving, None);
+
+    let app = App::connect_with(phone.clone(), &addr, true, link_profile_constrained());
+    let start = Instant::now();
+    let mut seen = 0;
+    let mut moved = false;
+    while phone.notes().first().is_none_or(|n| !n.complete) {
+        if let Some(t) = phone.snapshot().receiving {
+            assert_eq!(t.total_bytes, 200_000);
+            assert!(t.received_bytes >= seen, "it went backwards");
+            moved |= t.received_bytes > seen && seen > 0;
+            seen = t.received_bytes;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "no sync");
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(moved, "the transfer was never seen moving");
+    assert_eq!(phone.snapshot().receiving, None);
+    app.wait_for("a report", |e| {
+        e.iter().any(|e| matches!(e, CoreEvent::NoteProgress))
+    });
+    app.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_delete_ends_the_link_and_the_note_is_still_there_on_the_next() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let glass_dir = tmp.path().join("glass");
+    queue_photo(&glass_dir, &tmp.path().join("p.jpg"), 1000);
+    let (addr, _rt) = sim_glass(Some(&glass_dir), false);
+    let engines = Arc::new(FakeEngines::default());
+    let dir = tmp.path().join("phone");
+    let phone = core(&dir, &engines);
+    let app = App::connect(phone.clone(), &addr, true);
+    app.wait_for("the sync", |e| {
+        e.iter().any(|e| matches!(e, CoreEvent::NoteSynced { .. }))
+    });
+    let id = phone.notes().remove(0).id;
+
+    let notes_dir = dir.join("notes-from-glass");
+    let mode = |m| std::fs::Permissions::from_mode(m);
+    std::fs::set_permissions(&notes_dir, mode(0o555)).unwrap();
+    let failed = phone.delete_note(id.clone());
+    std::fs::set_permissions(&notes_dir, mode(0o755)).unwrap();
+    assert!(matches!(failed, Err(CoreFailure::Storage(_))));
+    app.wait_for("the link to end", |e| {
+        e.iter()
+            .any(|e| matches!(e, CoreEvent::LinkClosed { reason: Some(_) }))
+    });
+    app.close();
+    assert_eq!(phone.notes()[0].id, id);
+
+    let app = App::connect(phone.clone(), &addr, false);
+    app.wait_for("the link", |e| {
+        e.iter().any(|e| matches!(e, CoreEvent::LinkRunning { .. }))
+    });
+    phone.delete_note(id).unwrap();
+    assert!(phone.notes().is_empty());
+    app.close();
 }
 
 #[test]

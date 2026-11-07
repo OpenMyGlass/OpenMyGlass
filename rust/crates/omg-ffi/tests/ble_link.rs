@@ -38,6 +38,8 @@ impl TextToSpeechEngine for NoEngines {
     fn synthesize(&self, _: String, _: NoteLocale) -> Result<SpeechAudio, SpeechFailure> {
         Err(SpeechFailure::Unavailable)
     }
+
+    fn cancel(&self) {}
 }
 
 /// Stands in for the radio. Each read hands at most one notification's worth to the core.

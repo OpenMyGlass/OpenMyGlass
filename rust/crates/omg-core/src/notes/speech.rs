@@ -92,25 +92,22 @@ pub fn split_for_speech(text: &str, max_bytes: usize) -> Vec<&str> {
     pieces
 }
 
-/// A WAV file holding `audio`, for a phone's media player.
-pub fn wav_bytes(audio: &SynthesizedAudio) -> Vec<u8> {
-    const HEADER: u32 = 44;
-    let data = u32::try_from(audio.pcm.len()).unwrap_or(u32::MAX - HEADER);
-    let data = data.min(u32::MAX - HEADER);
-    let mut wav = Vec::with_capacity(HEADER as usize + data as usize);
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(HEADER - 8 + data).to_le_bytes());
-    wav.extend_from_slice(b"WAVEfmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
-    wav.extend_from_slice(&audio.sample_rate.to_le_bytes());
-    wav.extend_from_slice(&audio.sample_rate.saturating_mul(2).to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes()); // bytes per frame
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data.to_le_bytes());
-    wav.extend_from_slice(&audio.pcm[..data as usize]);
+/// The header of a WAV file with `data_len` bytes of [`SynthesizedAudio::pcm`] behind it, for a
+/// phone's media player.
+pub fn wav_header(sample_rate: u32, data_len: u32) -> [u8; 44] {
+    let mut wav = [0u8; 44];
+    wav[..4].copy_from_slice(b"RIFF");
+    wav[4..8].copy_from_slice(&data_len.saturating_add(36).to_le_bytes());
+    wav[8..16].copy_from_slice(b"WAVEfmt ");
+    wav[16..20].copy_from_slice(&16u32.to_le_bytes());
+    wav[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM
+    wav[22..24].copy_from_slice(&1u16.to_le_bytes()); // mono
+    wav[24..28].copy_from_slice(&sample_rate.to_le_bytes());
+    wav[28..32].copy_from_slice(&sample_rate.saturating_mul(2).to_le_bytes());
+    wav[32..34].copy_from_slice(&2u16.to_le_bytes()); // bytes per frame
+    wav[34..36].copy_from_slice(&16u16.to_le_bytes());
+    wav[36..40].copy_from_slice(b"data");
+    wav[40..44].copy_from_slice(&data_len.to_le_bytes());
     wav
 }
 
@@ -175,18 +172,24 @@ mod tests {
     }
 
     #[test]
+    fn a_four_byte_character_is_kept_whole_at_any_limit() {
+        let text = "a😀b😀😀c";
+        for limit in 0..=8 {
+            let pieces = split_for_speech(text, limit);
+            assert_eq!(pieces.concat(), text, "limit {limit}");
+        }
+        assert_eq!(split_for_speech("😀😀", 5), ["😀", "😀"]);
+    }
+
+    #[test]
     fn a_wav_says_what_it_holds() {
-        let wav = wav_bytes(&SynthesizedAudio {
-            sample_rate: 16_000,
-            pcm: vec![1, 2, 3, 4],
-        });
-        assert_eq!(wav.len(), 48);
+        let wav = wav_header(16_000, 4);
         assert_eq!(&wav[..4], b"RIFF");
         assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()), 40);
         assert_eq!(&wav[8..16], b"WAVEfmt ");
         assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
         assert_eq!(u32::from_le_bytes(wav[28..32].try_into().unwrap()), 32_000);
+        assert_eq!(&wav[36..40], b"data");
         assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 4);
-        assert_eq!(&wav[44..], [1, 2, 3, 4]);
     }
 }

@@ -21,23 +21,30 @@
 //! A note can change with no link at all, when speech finishes on this phone, and nothing pumps
 //! then. So while the app is open, a third thread calls [`CompanionCore::poll`] now and then.
 //!
-//! Every call is safe from any thread. Only [`CompanionCore::add_phone_note`], the speech engines
-//! and a store on a slow disk can take long, and the first two do not hold the core's lock.
+//! Every call is safe from any thread, and **none belongs on a UI thread**: a call waits for the
+//! core's lock, which the link's reader holds while it syncs a file or hashes a whole attachment,
+//! for seconds on a big video. [`CompanionCore::add_phone_note`] also copies and hashes its files.
+//!
+//! One core per directory. A second one on the same directory is refused while the first is alive,
+//! so an app keeps a single core for the life of its process.
 
 uniffi::setup_scaffolding!();
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::{Seek, Write},
     path::{Path, PathBuf},
     sync::{
+        atomic::{AtomicU64, Ordering},
         mpsc::{channel, Receiver, Sender},
         Arc, Mutex,
     },
+    time::Duration,
 };
 
 use omg_core::{
     notes::{
-        record::OutgoingState, split_for_speech, wav_bytes, AttachmentSource, CompanionNotes,
+        record::OutgoingState, split_for_speech, wav_header, AttachmentSource, CompanionNotes,
         GlassNotes, IncomingNote, NoteDraft, NoteTransfer as CoreNoteTransfer, OutgoingNote,
         ReceiverEvent, RetryPolicy, SenderConfig, SpeechError, SpeechJob, SpeechOutcome,
         SpeechToText, SynthesizeRequest, SynthesizedAudio, TextToSpeech, TranscribeRequest,
@@ -47,7 +54,7 @@ use omg_core::{
 use omg_protocol::{
     capability, AttachmentKind, BatteryStatus, Frame, FrameDecoder, GlassStatus, NoteDeferReason,
     NoteId, NoteRejectReason, NoteSyncStatus, NoteTranscript, NoteTranscriptError, Radio,
-    RadioState, SetAirplaneMode, SetLocale, SetRadio, Settings, StatusRequest, MAX_TTS_AUDIO_BYTES,
+    RadioState, SetAirplaneMode, SetLocale, SetRadio, Settings, StatusRequest,
 };
 
 const STATE_FILE: &str = "companion.json";
@@ -57,6 +64,18 @@ const PHONE_NOTES_DIR: &str = "notes-from-phone";
 const SPEECH_DIR: &str = "speech";
 /// A speech engine gets at most this much text at a time. Android's limit is 4000 characters.
 const SPEECH_PIECE_BYTES: usize = 3000;
+/// Marks recordings being transcribed, so a transcription that takes the app down can be told
+/// from one that was merely cut short.
+const STT_ATTEMPTS_DIR: &str = "stt-attempts";
+/// Starts of one transcription that may end without a result before it stops being resumed.
+const MAX_STT_ATTEMPTS: u32 = 3;
+const STT_GAVE_UP: &str = "transcribing it kept stopping the app";
+/// A recognizer another app is using gets this many tries, this far apart.
+const STT_BUSY_TRIES: u32 = 3;
+const STT_BUSY_WAIT: Duration = Duration::from_secs(1);
+const STT_BUSY: &str = "the speech recognizer is busy";
+/// A WAV file cannot say it holds more.
+const MAX_WAV_DATA_BYTES: u64 = u32::MAX as u64 - 44;
 /// How often a transfer reports its progress.
 const PROGRESS_INTERVAL_MS: u64 = 1000;
 
@@ -80,6 +99,9 @@ pub enum SpeechFailure {
     /// No engine here, or none for this language.
     #[error("no speech engine available")]
     Unavailable,
+    /// The engine is there, and in use by someone else for now. The core tries again.
+    #[error("the speech engine is busy")]
+    Busy,
     /// The engine failed.
     #[error("speech engine failed: {reason}")]
     Failed {
@@ -98,6 +120,7 @@ impl From<SpeechFailure> for SpeechError {
     fn from(e: SpeechFailure) -> Self {
         match e {
             SpeechFailure::Unavailable => SpeechError::Unavailable,
+            SpeechFailure::Busy => SpeechError::Failed(STT_BUSY.into()),
             SpeechFailure::Failed { reason } => SpeechError::Failed(reason),
         }
     }
@@ -569,6 +592,8 @@ pub enum CoreEvent {
     /// The audio [`CompanionCore::speak_note`] asked for. Play it from `path`, until the next
     /// call to `speak_note` or `stop_speaking`, which remove the file.
     NoteSpeechReady {
+        /// What the caller passed to `speak_note`.
+        request_id: u64,
         /// The note.
         note_id: String,
         /// A WAV file.
@@ -576,6 +601,8 @@ pub enum CoreEvent {
     },
     /// [`CompanionCore::speak_note`] produced nothing.
     NoteSpeechFailed {
+        /// What the caller passed to `speak_note`.
+        request_id: u64,
         /// The note.
         note_id: String,
         /// Why, for the owner.
@@ -722,8 +749,12 @@ pub struct SpeechAudio {
 /// on the Glass. Blocking, as above.
 #[uniffi::export(with_foreign)]
 pub trait TextToSpeechEngine: Send + Sync {
-    /// Speak `text`.
+    /// Speak `text`, at most a few thousand bytes of it.
     fn synthesize(&self, text: String, locale: NoteLocale) -> Result<SpeechAudio, SpeechFailure>;
+
+    /// Called from another thread: make a `synthesize` in progress return now, with any error.
+    /// Doing nothing is allowed, and only costs the wait for that piece.
+    fn cancel(&self);
 }
 
 struct Engines {
@@ -733,13 +764,19 @@ struct Engines {
 
 impl SpeechToText for Engines {
     fn transcribe(&self, request: &TranscribeRequest) -> Result<String, SpeechError> {
-        self.stt
-            .transcribe(
+        let mut tries = 1;
+        loop {
+            let result = self.stt.transcribe(
                 request.audio_path.to_string_lossy().into_owned(),
                 request.mime.clone(),
                 request.locale.into(),
-            )
-            .map_err(Into::into)
+            );
+            if !matches!(result, Err(SpeechFailure::Busy)) || tries >= STT_BUSY_TRIES {
+                return result.map_err(Into::into);
+            }
+            tries += 1;
+            std::thread::sleep(STT_BUSY_WAIT);
+        }
     }
 }
 
@@ -779,10 +816,65 @@ enum Finished {
     PhoneTranscript(NoteId, u16, Result<String, SpeechError>),
     /// A note read aloud on this phone.
     Spoken {
+        request_id: u64,
         generation: u64,
         note_id: NoteId,
         result: Result<PathBuf, String>,
     },
+}
+
+/// Work for the one thread that runs speech-to-text: a phone's recognizer does one at a time.
+enum SttJob {
+    Glass(SpeechJob),
+    Phone(TranscribeRequest),
+}
+
+/// Reading a note aloud on this phone.
+struct PhoneSpeech {
+    request_id: u64,
+    generation: u64,
+    request: SynthesizeRequest,
+    path: PathBuf,
+}
+
+/// Work for the one thread that runs text-to-speech.
+enum TtsJob {
+    Glass(SpeechJob),
+    Phone(PhoneSpeech),
+}
+
+/// Whether a transcription should start.
+enum SttStart {
+    Run,
+    AlreadyRunning,
+    GaveUp,
+}
+
+/// Directories with a live core.
+static OPEN_DIRS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// Holds a directory for one core: two would each overwrite what the other wrote.
+struct DirClaim(PathBuf);
+
+impl DirClaim {
+    fn take(dir: &Path) -> Result<DirClaim, CoreFailure> {
+        let dir = dir.canonicalize().map_err(storage)?;
+        let mut open = OPEN_DIRS.lock().unwrap_or_else(|p| p.into_inner());
+        if !open.insert(dir.clone()) {
+            return Err(CoreFailure::Storage(format!(
+                "{} is already open in this process",
+                dir.display()
+            )));
+        }
+        Ok(DirClaim(dir))
+    }
+}
+
+impl Drop for DirClaim {
+    fn drop(&mut self) {
+        let mut open = OPEN_DIRS.lock().unwrap_or_else(|p| p.into_inner());
+        open.remove(&self.0);
+    }
 }
 
 struct Link {
@@ -805,11 +897,12 @@ struct Inner {
     close_link: bool,
     /// Why notes from the Glass are waiting, since the last link came up.
     deferred: BTreeMap<NoteId, String>,
-    /// Phone notes with speech-to-text running.
-    phone_stt: BTreeSet<NoteId>,
+    /// Recordings queued for speech-to-text or in it, on either side.
+    stt_running: BTreeSet<(NoteId, u16)>,
+    stt_attempts_dir: PathBuf,
     speech_dir: PathBuf,
-    /// Only the latest `speak_note` counts.
-    speech_generation: u64,
+    /// Only the latest `speak_note` counts. Shared with the thread that runs it.
+    speech_generation: Arc<AtomicU64>,
     speech_file: Option<PathBuf>,
     last_progress: Option<(CoreNoteTransfer, u64)>,
 }
@@ -820,6 +913,11 @@ pub struct CompanionCore {
     inner: Mutex<Inner>,
     engines: Arc<Engines>,
     done_tx: Sender<Finished>,
+    stt_tx: Sender<SttJob>,
+    tts_tx: Sender<TtsJob>,
+    /// The generation being read aloud right now, or 0.
+    speaking_now: Arc<AtomicU64>,
+    _claim: DirClaim,
     done_rx: Mutex<Receiver<Finished>>,
 }
 
@@ -842,7 +940,7 @@ fn end_reason(end: &LinkEnd) -> String {
 }
 
 fn parse_note_id(id: &str) -> Result<NoteId, CoreFailure> {
-    NoteId::from_hex(id).ok_or_else(|| CoreFailure::InvalidNote("no such note".into()))
+    NoteId::from_hex(id).ok_or_else(no_such_note)
 }
 
 /// What reading a note aloud says: its text, then what was heard, unless they are the same.
@@ -890,6 +988,7 @@ impl CompanionCore {
     ) -> Result<Arc<CompanionCore>, CoreFailure> {
         let root = PathBuf::from(data_dir);
         std::fs::create_dir_all(&root).map_err(storage)?;
+        let claim = DirClaim::take(&root)?;
         let store = Store::load_or_create(root.join(STATE_FILE)).map_err(storage)?;
         let from_glass = CompanionNotes::open(root.join(GLASS_NOTES_DIR), RetryPolicy::default())
             .map_err(storage)?;
@@ -902,7 +1001,19 @@ impl CompanionCore {
             _ => {}
         }
         std::fs::create_dir_all(&speech_dir).map_err(storage)?;
+        let stt_attempts_dir = root.join(STT_ATTEMPTS_DIR);
+        std::fs::create_dir_all(&stt_attempts_dir).map_err(storage)?;
         let (done_tx, done_rx) = channel();
+        let engines = Arc::new(Engines { stt, tts });
+        let speech_generation = Arc::new(AtomicU64::new(0));
+        let speaking_now = Arc::new(AtomicU64::new(0));
+        let stt_tx = spawn_stt_worker(engines.clone(), done_tx.clone());
+        let tts_tx = spawn_tts_worker(
+            engines.clone(),
+            done_tx.clone(),
+            speech_generation.clone(),
+            speaking_now.clone(),
+        );
         let core = Arc::new(CompanionCore {
             inner: Mutex::new(Inner {
                 store,
@@ -916,14 +1027,19 @@ impl CompanionCore {
                 events: Vec::new(),
                 close_link: false,
                 deferred: BTreeMap::new(),
-                phone_stt: BTreeSet::new(),
+                stt_running: BTreeSet::new(),
+                stt_attempts_dir,
                 speech_dir,
-                speech_generation: 0,
+                speech_generation,
                 speech_file: None,
                 last_progress: None,
             }),
-            engines: Arc::new(Engines { stt, tts }),
+            engines,
             done_tx,
+            stt_tx,
+            tts_tx,
+            speaking_now,
+            _claim: claim,
             done_rx: Mutex::new(done_rx),
         });
         core.resume_phone_transcripts();
@@ -1152,17 +1268,24 @@ impl CompanionCore {
         let id = parse_note_id(&note_id)?;
         let mut inner = self.lock();
         let deleted = if inner.from_phone.machine().note(&id).is_some() {
-            inner.from_phone.forget(&id, now_ms())
+            inner.from_phone.forget(&id, now_ms()).map_err(storage)?
+        } else if inner.from_glass.machine().note(&id).is_some() {
+            inner.from_glass.forget(&id, now_ms()).map_err(|e| {
+                // The driver has reloaded itself and no longer knows this link: as it asks, this
+                // counts as losing the link, and the next one starts clean.
+                inner.link_failed(format!("note storage: {e}"));
+                storage(e)
+            })?
         } else {
-            inner.from_glass.forget(&id, now_ms())
-        }
-        .map_err(storage)?;
+            return Err(no_such_note());
+        };
         if !deleted {
             return Err(CoreFailure::InvalidNote(
                 "it is still arriving from the Glass".into(),
             ));
         }
         inner.deferred.remove(&id);
+        inner.forget_stt_attempts(id);
         inner.events.push(CoreEvent::NotesChanged);
         Ok(())
     }
@@ -1172,51 +1295,53 @@ impl CompanionCore {
     pub fn retranscribe_note(&self, note_id: String) -> Result<(), CoreFailure> {
         let id = parse_note_id(&note_id)?;
         let mut inner = self.lock();
+        // The owner asking is worth a fresh count, whatever happened before.
+        inner.forget_stt_attempts(id);
         if inner.from_phone.machine().note(&id).is_some() {
             self.start_phone_transcript(&mut inner, id);
-        } else {
+        } else if inner.from_glass.machine().note(&id).is_some() {
             let frames = inner.from_glass.retranscribe(&id, now_ms());
             inner.note_frames(frames);
             self.start_speech(&mut inner);
+        } else {
+            return Err(no_such_note());
         }
         inner.events.push(CoreEvent::NotesChanged);
         Ok(())
     }
 
-    /// Reads a note aloud on this phone, with no link needed: synthesis runs on its own thread,
-    /// and the audio arrives as [`CoreEvent::NoteSpeechReady`] or the reason why not as
-    /// [`CoreEvent::NoteSpeechFailed`]. Replaces any earlier request.
-    pub fn speak_note(&self, note_id: String) -> Result<(), CoreFailure> {
+    /// Reads a note aloud on this phone, with no link needed. The audio arrives as
+    /// [`CoreEvent::NoteSpeechReady`] or the reason why not as [`CoreEvent::NoteSpeechFailed`],
+    /// carrying `request_id`, so a caller can tell an answer to an earlier request. Replaces any
+    /// earlier request, and what it was reading stops.
+    pub fn speak_note(&self, note_id: String, request_id: u64) -> Result<(), CoreFailure> {
         let id = parse_note_id(&note_id)?;
         let mut inner = self.lock();
-        let note = inner
-            .note_info(&id)
-            .ok_or_else(|| CoreFailure::InvalidNote("no such note".into()))?;
+        let note = inner.note_info(&id).ok_or_else(no_such_note)?;
         let text = read_aloud_text(note.text.as_deref(), note.transcript.as_deref())
             .ok_or_else(|| CoreFailure::InvalidNote("this note has nothing to read".into()))?;
         let generation = inner.stop_speaking();
         let path = inner.speech_dir.join(format!("{generation}.wav"));
         drop(inner);
-        let request = SynthesizeRequest {
-            note_id: id,
-            text,
-            locale: note.locale.into(),
-        };
-        let (engines, done) = (self.engines.clone(), self.done_tx.clone());
-        std::thread::spawn(move || {
-            let result = speak(&engines, &request, path);
-            let _ = done.send(Finished::Spoken {
-                generation,
+        self.cancel_running_speech();
+        let _ = self.tts_tx.send(TtsJob::Phone(PhoneSpeech {
+            request_id,
+            generation,
+            request: SynthesizeRequest {
                 note_id: id,
-                result,
-            });
-        });
+                text,
+                locale: note.locale.into(),
+            },
+            path,
+        }));
         Ok(())
     }
 
-    /// Forgets what [`speak_note`](CompanionCore::speak_note) asked for or made.
+    /// Forgets what [`speak_note`](CompanionCore::speak_note) asked for or made, and stops the
+    /// engine if it is at it.
     pub fn stop_speaking(&self) {
         self.lock().stop_speaking();
+        self.cancel_running_speech();
     }
 }
 
@@ -1240,8 +1365,8 @@ impl CompanionCore {
         inner
     }
 
-    /// Transcribes the recording of a phone note on its own thread, unless it already has text
-    /// or that is already happening.
+    /// Queues the recording of a phone note for speech-to-text, unless it already has text or
+    /// is already on its way.
     fn start_phone_transcript(&self, inner: &mut Inner, id: NoteId) {
         let Some(note) = inner.from_phone.machine().note(&id) else {
             return;
@@ -1269,19 +1394,19 @@ impl CompanionCore {
             mime: voice.mime.clone(),
             locale: note.manifest.locale,
         };
-        if !inner.phone_stt.insert(id) {
-            return;
+        match inner.stt_start(id, attachment_id) {
+            SttStart::Run => {
+                let _ = self.stt_tx.send(SttJob::Phone(request));
+            }
+            SttStart::AlreadyRunning => {}
+            SttStart::GaveUp => {
+                let _ = self.done_tx.send(Finished::PhoneTranscript(
+                    id,
+                    attachment_id,
+                    Err(SpeechError::Failed(STT_GAVE_UP.into())),
+                ));
+            }
         }
-        let (engines, done) = (self.engines.clone(), self.done_tx.clone());
-        std::thread::spawn(move || {
-            let e = engines.as_ref();
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| e.transcribe(&request)))
-                    .unwrap_or_else(|_| {
-                        Err(SpeechError::Failed("the speech engine crashed".into()))
-                    });
-            let _ = done.send(Finished::PhoneTranscript(id, attachment_id, result));
-        });
     }
 
     /// A recording with neither text nor a reason means the app stopped while transcribing it.
@@ -1301,15 +1426,29 @@ impl CompanionCore {
         }
     }
 
-    /// Hands speech jobs to their own threads: they take far longer than a heartbeat.
+    /// Hands speech jobs to their threads: they take far longer than a heartbeat.
     fn start_speech(&self, inner: &mut Inner) {
         for job in inner.from_glass.take_speech_jobs() {
-            let (engines, done) = (self.engines.clone(), self.done_tx.clone());
-            std::thread::spawn(move || {
-                let outcome = run_job(&job, &engines);
-                // The link may be gone: the job then runs again on the next one.
-                let _ = done.send(Finished::Speech(outcome));
-            });
+            let SpeechJob::Transcribe(request) = &job else {
+                let _ = self.tts_tx.send(TtsJob::Glass(job));
+                continue;
+            };
+            match inner.stt_start(request.note_id, request.attachment_id) {
+                SttStart::Run => {
+                    let _ = self.stt_tx.send(SttJob::Glass(job));
+                }
+                SttStart::AlreadyRunning => {}
+                SttStart::GaveUp => {
+                    let _ = self.done_tx.send(Finished::Speech(job.failed(STT_GAVE_UP)));
+                }
+            }
+        }
+    }
+
+    /// Stops the engine if it is reading aloud. The generation has already moved on.
+    fn cancel_running_speech(&self) {
+        if self.speaking_now.load(Ordering::SeqCst) != 0 {
+            self.engines.tts.cancel();
         }
     }
 }
@@ -1320,29 +1459,137 @@ fn run_job(job: &SpeechJob, engines: &Arc<Engines>) -> SpeechOutcome {
         .unwrap_or_else(|_| job.failed("the speech engine crashed"))
 }
 
-/// Synthesizes `request` into a WAV file at `path`. Blocking.
-fn speak(
+/// The thread for speech-to-text. It ends when the core is gone.
+fn spawn_stt_worker(engines: Arc<Engines>, done: Sender<Finished>) -> Sender<SttJob> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        for job in rx {
+            let finished = match job {
+                // The link may be gone: the result is stored all the same.
+                SttJob::Glass(job) => Finished::Speech(run_job(&job, &engines)),
+                SttJob::Phone(request) => {
+                    let e = engines.as_ref();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        e.transcribe(&request)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(SpeechError::Failed("the speech engine crashed".into()))
+                    });
+                    Finished::PhoneTranscript(request.note_id, request.attachment_id, result)
+                }
+            };
+            let _ = done.send(finished);
+        }
+    });
+    tx
+}
+
+/// The thread for text-to-speech. Requests replaced while they waited here are skipped.
+fn spawn_tts_worker(
+    engines: Arc<Engines>,
+    done: Sender<Finished>,
+    latest: Arc<AtomicU64>,
+    speaking_now: Arc<AtomicU64>,
+) -> Sender<TtsJob> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        for job in rx {
+            let job = match job {
+                TtsJob::Glass(job) => {
+                    let _ = done.send(Finished::Speech(run_job(&job, &engines)));
+                    continue;
+                }
+                TtsJob::Phone(job) => job,
+            };
+            // Set before the check: a stop after the check sees this and cancels the engine.
+            speaking_now.store(job.generation, Ordering::SeqCst);
+            if latest.load(Ordering::SeqCst) == job.generation {
+                let result = speak(&engines, &job, &latest);
+                speaking_now.store(0, Ordering::SeqCst);
+                let _ = done.send(Finished::Spoken {
+                    request_id: job.request_id,
+                    generation: job.generation,
+                    note_id: job.request.note_id,
+                    result,
+                });
+            }
+            speaking_now.store(0, Ordering::SeqCst);
+        }
+    });
+    tx
+}
+
+/// Synthesizes into a WAV file a piece at a time, so a long note neither sits in memory nor runs
+/// on after it stopped being wanted. Leaves no file behind unless it succeeds. Blocking.
+fn speak(engines: &Arc<Engines>, job: &PhoneSpeech, latest: &AtomicU64) -> Result<PathBuf, String> {
+    let result = write_speech(engines, job, latest);
+    if result.is_err() {
+        remove_file(&job.path);
+    }
+    result.map(|()| job.path.clone())
+}
+
+fn write_speech(
     engines: &Arc<Engines>,
-    request: &SynthesizeRequest,
-    path: PathBuf,
-) -> Result<PathBuf, String> {
-    let e = engines.as_ref();
-    let audio = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| e.synthesize(request)))
-        .unwrap_or_else(|_| Err(SpeechError::Failed("the speech engine crashed".into())))
+    job: &PhoneSpeech,
+    latest: &AtomicU64,
+) -> Result<(), String> {
+    let mut file = std::fs::File::create(&job.path).map_err(|e| e.to_string())?;
+    file.write_all(&wav_header(0, 0))
+        .map_err(|e| e.to_string())?;
+    let mut sample_rate = None;
+    let mut written = 0u64;
+    for piece in split_for_speech(&job.request.text, SPEECH_PIECE_BYTES) {
+        if latest.load(Ordering::SeqCst) != job.generation {
+            return Err("stopped".into());
+        }
+        let tts = engines.tts.as_ref();
+        let locale = job.request.locale.into();
+        let audio = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tts.synthesize(piece.into(), locale)
+        }))
+        .unwrap_or_else(|_| {
+            Err(SpeechFailure::Failed {
+                reason: "the speech engine crashed".into(),
+            })
+        })
         .map_err(|e| match e {
-            SpeechError::Unavailable => {
+            SpeechFailure::Unavailable => {
                 "no text-to-speech engine on this phone for this language".to_string()
             }
-            SpeechError::Failed(why) => why,
+            SpeechFailure::Busy => "the speech engine is busy".to_string(),
+            SpeechFailure::Failed { reason } => reason,
         })?;
-    if audio.pcm.is_empty() || audio.sample_rate == 0 {
+        if *sample_rate.get_or_insert(audio.sample_rate) != audio.sample_rate {
+            return Err("the engine changed its sample rate".into());
+        }
+        written += audio.pcm.len() as u64;
+        if written > MAX_WAV_DATA_BYTES {
+            return Err("the audio is too long".into());
+        }
+        file.write_all(&audio.pcm).map_err(|e| e.to_string())?;
+    }
+    let sample_rate = sample_rate.unwrap_or(0);
+    if written == 0 || sample_rate == 0 {
         return Err("the engine returned no audio".into());
     }
-    if audio.pcm.len() as u64 > MAX_TTS_AUDIO_BYTES {
-        return Err("the audio is too long".into());
-    }
-    std::fs::write(&path, wav_bytes(&audio)).map_err(|e| e.to_string())?;
-    Ok(path)
+    file.rewind().map_err(|e| e.to_string())?;
+    file.write_all(&wav_header(sample_rate, written as u32))
+        .map_err(|e| e.to_string())
+}
+
+/// Whether a transfer has something new to report: at once at its start, then only if it moved,
+/// and not more often than [`PROGRESS_INTERVAL_MS`].
+fn progress_due(
+    last: Option<(CoreNoteTransfer, u64)>,
+    transfer: CoreNoteTransfer,
+    now: u64,
+) -> bool {
+    last.is_none_or(|(last, at)| last != transfer && now.saturating_sub(at) >= PROGRESS_INTERVAL_MS)
+}
+
+fn no_such_note() -> CoreFailure {
+    CoreFailure::InvalidNote("no such note".into())
 }
 
 fn remove_file(path: &Path) {
@@ -1402,7 +1649,8 @@ fn note_from_glass(inner: &Inner, n: &IncomingNote) -> NoteInfo {
             })
             .collect(),
         complete: n.complete,
-        transcribing: inner.from_glass.machine().is_transcribing(&id),
+        // The machine forgets a job when the link goes, and the job runs on.
+        transcribing: inner.from_glass.machine().is_transcribing(&id) || inner.stt_is_running(id),
         waiting: if n.complete {
             None
         } else {
@@ -1460,7 +1708,7 @@ fn note_from_phone(inner: &Inner, n: &OutgoingNote) -> NoteInfo {
             n.state,
             OutgoingState::Queued | OutgoingState::Synced { .. }
         ),
-        transcribing: inner.phone_stt.contains(&id),
+        transcribing: inner.stt_is_running(id),
         waiting: None,
         deletable: true,
         speakable: read_aloud_text(
@@ -1487,11 +1735,55 @@ impl Inner {
     /// Makes any `speak_note` so far not count, and removes its audio. Returns the generation
     /// for the next one.
     fn stop_speaking(&mut self) -> u64 {
-        self.speech_generation += 1;
         if let Some(path) = self.speech_file.take() {
             remove_file(&path);
         }
-        self.speech_generation
+        self.speech_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn stt_is_running(&self, id: NoteId) -> bool {
+        self.stt_running.iter().any(|(note, _)| *note == id)
+    }
+
+    fn stt_marker(&self, id: NoteId, attachment: u16) -> PathBuf {
+        self.stt_attempts_dir
+            .join(format!("{}-{attachment}", id.to_hex()))
+    }
+
+    /// Counts a start on disk first, so a transcription that takes the whole app down cannot do
+    /// so on every launch. A result removes the count.
+    fn stt_start(&mut self, id: NoteId, attachment: u16) -> SttStart {
+        if !self.stt_running.insert((id, attachment)) {
+            return SttStart::AlreadyRunning;
+        }
+        let marker = self.stt_marker(id, attachment);
+        let attempts: u32 = std::fs::read_to_string(&marker)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if attempts >= MAX_STT_ATTEMPTS {
+            return SttStart::GaveUp;
+        }
+        // If this fails the disk is full, and the count is the least of the problems.
+        let _ = std::fs::write(&marker, (attempts + 1).to_string());
+        SttStart::Run
+    }
+
+    fn stt_finished(&mut self, id: NoteId, attachment: u16) {
+        self.stt_running.remove(&(id, attachment));
+        remove_file(&self.stt_marker(id, attachment));
+    }
+
+    fn forget_stt_attempts(&self, id: NoteId) {
+        let prefix = format!("{}-", id.to_hex());
+        let Ok(entries) = std::fs::read_dir(&self.stt_attempts_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                remove_file(&entry.path());
+            }
+        }
     }
 
     fn send(&mut self, frame: &Frame) {
@@ -1705,10 +1997,7 @@ impl Inner {
             self.last_progress = None;
             return;
         };
-        let due = self.last_progress.is_none_or(|(last, at)| {
-            last != transfer && now.saturating_sub(at) >= PROGRESS_INTERVAL_MS
-        });
-        if due {
+        if progress_due(self.last_progress, transfer, now) {
             self.last_progress = Some((transfer, now));
             self.events.push(CoreEvent::NoteProgress);
         }
@@ -1717,6 +2006,14 @@ impl Inner {
     fn finished(&mut self, f: Finished) {
         match f {
             Finished::Speech(outcome) => {
+                if let SpeechOutcome::Transcribed {
+                    note_id,
+                    attachment_id,
+                    ..
+                } = &outcome
+                {
+                    self.stt_finished(*note_id, *attachment_id);
+                }
                 let frames = self.from_glass.complete_speech(outcome, now_ms());
                 // Without a link the frames are dropped: the Glass asks again on the next one.
                 if self.link.as_ref().is_some_and(|l| l.notes_sync) {
@@ -1726,11 +2023,12 @@ impl Inner {
                 }
             }
             Finished::Spoken {
+                request_id,
                 generation,
                 note_id,
                 result,
             } => {
-                if generation != self.speech_generation {
+                if generation != self.speech_generation.load(Ordering::SeqCst) {
                     // Replaced or stopped while it ran.
                     if let Ok(path) = &result {
                         remove_file(path);
@@ -1743,15 +2041,20 @@ impl Inner {
                         let shown = path.to_string_lossy().into_owned();
                         self.speech_file = Some(path);
                         CoreEvent::NoteSpeechReady {
+                            request_id,
                             note_id,
                             path: shown,
                         }
                     }
-                    Err(reason) => CoreEvent::NoteSpeechFailed { note_id, reason },
+                    Err(reason) => CoreEvent::NoteSpeechFailed {
+                        request_id,
+                        note_id,
+                        reason,
+                    },
                 });
             }
             Finished::PhoneTranscript(note_id, attachment_id, result) => {
-                self.phone_stt.remove(&note_id);
+                self.stt_finished(note_id, attachment_id);
                 let (text, error) = match result {
                     Ok(text) => (text, None),
                     Err(SpeechError::Unavailable) => {
@@ -1800,5 +2103,25 @@ impl Inner {
             }
             self.note_events();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_is_reported_at_the_start_then_only_when_it_moved_and_not_too_often() {
+        let at = |received_bytes| CoreNoteTransfer {
+            note_id: NoteId([1; 16]),
+            received_bytes,
+            total_bytes: 100,
+        };
+        assert!(progress_due(None, at(0), 5));
+        assert!(!progress_due(Some((at(0), 5)), at(10), 5 + 999));
+        assert!(progress_due(Some((at(0), 5)), at(10), 5 + 1000));
+        assert!(!progress_due(Some((at(10), 5)), at(10), 5 + 5000));
+        // A clock going backwards only delays a report.
+        assert!(!progress_due(Some((at(0), 5)), at(10), 1));
     }
 }

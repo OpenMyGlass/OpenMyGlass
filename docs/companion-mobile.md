@@ -42,6 +42,10 @@ poller:  loop { sleep(500 ms); show(core.poll()) }
 
 A blocked write never stops reading, which matters on small Bluetooth buffers, where two peers could otherwise each wait for the other to read. Bytes leave in the order the core produced them, whichever thread called it. `poll()` exists because nothing pumps with no link, yet a transcript or a note read aloud can finish then. It leaves what `pump()` must write alone, so it needs no coordination with the link's threads.
 
+**No call belongs on a UI thread.** A call waits for the core's lock, which the reader holds while it syncs a file or hashes a whole attachment, for seconds on a big video. The Android screen makes all its calls on one background thread and draws what comes back.
+
+**One core per directory, for the life of the process.** A second one on the same directory is refused while the first is alive. On Android, `CompanionProcess` holds the core, the link and the draft, so a screen being recreated or closed ends none of them.
+
 For a UI: `snapshot()` is the link and what the Glass last reported, `notes()` is the list, and `CoreEvent`s say when to read them again.
 
 - **Settings:** `change_settings` sends only the fields set. The Glass clamps values and answers with the full mirror as `SettingsChanged`. Radios have `set_radio` and `set_airplane_mode`. A field the Glass does not report stays `None`, and the UI hides it: today that is `brightness`, which glassd does not have.
@@ -49,8 +53,8 @@ For a UI: `snapshot()` is the link and what the Glass last reported, `notes()` i
 - **Notes from the Glass** arrive by themselves. Attachment paths are set once a file is verified.
 - **Notes on the phone** (`add_phone_note`) are stored on the phone only. The protocol syncs in one direction, from Glass to phone. A transcription cut short by the app stopping runs again on the next start.
 - **A note's state:** `NoteInfo` says whether it is `transcribing`, what it is `waiting` for, and whether it is `deletable` or `speakable`. `snapshot().receiving` is the note being pulled, and `CoreEvent::NoteProgress` says when to read it, about once a second.
-- **Reading a note aloud** (`speak_note`) needs no link. The core picks the text, its own and then what was heard, runs the engine on its own thread and writes a WAV file. The app gets `NoteSpeechReady{path}` or `NoteSpeechFailed{reason}` and only plays the file.
-- **Asking for a transcript again** (`retranscribe_note`) is for a recording with no text, for instance once there is an engine. Failures are not retried by themselves.
+- **Reading a note aloud** (`speak_note`) needs no link. The core picks the text, its own and then what was heard, and writes a WAV file a piece at a time. The app gets `NoteSpeechReady{path}` or `NoteSpeechFailed{reason}`, each with the `request_id` it passed, and only plays the file. `stop_speaking` calls the engine's `cancel`.
+- **Asking for a transcript again** (`retranscribe_note`) is for a recording with no text, for instance once there is an engine. Failures are not retried by themselves. A transcription that was interrupted is, up to 3 starts, counted on disk, so one that takes the app down cannot do so on every launch. After that the note says so, and the owner can ask again.
 - **Deleting** (`delete_note`) removes a note and its files from this phone. A note from the Glass must be all here: the Glass would offer an incomplete one again. If the Glass never got the acknowledgement of a note deleted here, it offers it again and the note comes back, which is the safe way for that to go wrong.
 
 ## The BLE link
@@ -104,9 +108,9 @@ Known limits:
 - The link lives as long as the app's process: there is no foreground service, so nothing syncs while Android has stopped the app. See the BLE section below.
 - Speech uses the platform's engines, and a phone may have none. On the test phone (crDroid, no Google apps) neither exists, so notes say there is no transcript, and `AndroidTts` and `AndroidStt` have never produced anything. The fix is to bundle engines. Vosk is already used in `android/app`.
 - A note cannot be sent to the Glass, and a note that has not finished arriving cannot be discarded from here.
-- A draft lives only as long as the app's process.
+- A draft lives only as long as the app's process: closing the screen keeps it, and Android killing the process loses it.
 - The note list builds every note up front, so a very long list will be slow.
 
 ## Speech
 
-`SpeechToTextEngine` and `TextToSpeechEngine` are implemented by each app and always run on the companion. Files do not cross the boundary: an engine gets a path and returns text, or returns PCM. An engine that has no answer returns `Unavailable`, which reaches the Glass as the reason there is no text. Text over 3000 bytes goes to the TTS engine in pieces, cut after a sentence or a word, because Android takes 4000 characters at most. The app gets one audio.
+`SpeechToTextEngine` and `TextToSpeechEngine` are implemented by each app and always run on the companion. Files do not cross the boundary: an engine gets a path and returns text, or returns PCM. An engine that has no answer returns `Unavailable`, which reaches the Glass as the reason there is no text. Text over 3000 bytes goes to the TTS engine in pieces, cut after a sentence or a word, because Android takes 4000 characters at most. The app gets one audio. One thread runs speech-to-text and one runs text-to-speech, so engines see one request at a time. An engine answering `Busy` is tried again 3 times, a second apart, before the note says so.

@@ -33,7 +33,7 @@ pub use receiver::{NoteReceiver, NoteTransfer, ReceiverEffect, ReceiverEvent};
 pub use record::{IncomingNote, OutgoingNote, OutgoingState};
 pub use sender::{DeletePolicy, NoteSender, SenderConfig, SenderEffect, SenderEvent};
 pub use speech::{
-    split_for_speech, wav_bytes, NoEngine, SpeechError, SpeechToText, SynthesizeRequest,
+    split_for_speech, wav_header, NoEngine, SpeechError, SpeechToText, SynthesizeRequest,
     SynthesizedAudio, TextToSpeech, TranscribeRequest,
 };
 pub use store::NoteStore;
