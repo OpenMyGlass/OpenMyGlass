@@ -171,6 +171,54 @@ pub enum TrustError {
     /// A higher version was installed after the install was planned.
     #[error("a higher version is already installed")]
     BelowFloor,
+    /// The install was planned against a record that was forgotten before it was recorded.
+    #[error("the app was forgotten while it was being installed")]
+    RecordMissing,
+}
+
+/// A package that passed its checks and is recorded in the [`TrustStore`]: what a transfer to the
+/// Glass needs, for `AppOffer`. Only [`TrustStore::record_install`] makes one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RecordedPackage {
+    package: VerifiedPackage,
+}
+
+impl RecordedPackage {
+    /// The app.
+    pub fn app_id(&self) -> &str {
+        &self.package.app_id
+    }
+
+    /// The version.
+    pub fn version(&self) -> &Version {
+        &self.package.version
+    }
+
+    /// The hash the bytes were checked against, which names the file in the
+    /// [`super::PackageStore`].
+    pub fn sha256(&self) -> &Sha256Digest {
+        &self.package.sha256
+    }
+
+    /// The exact size.
+    pub fn size(&self) -> u64 {
+        self.package.size
+    }
+
+    /// The key that signed the release.
+    pub fn publisher_key(&self) -> &[u8; 32] {
+        &self.package.publisher_key
+    }
+
+    /// The publisher's signature over [`statement`](Self::statement).
+    pub fn signature(&self) -> &[u8; 64] {
+        &self.package.signature
+    }
+
+    /// The signed bytes, so the Glass can verify the release without the manifest.
+    pub fn statement(&self) -> &[u8] {
+        &self.package.statement
+    }
 }
 
 /// The records, in one JSON file, with a lock file beside it.
@@ -225,14 +273,16 @@ impl TrustStore {
         Ok(observed)
     }
 
-    /// Remembers a finished install, durably. Call before telling the owner it is done. Checks
-    /// the release again against the file as it is now: the key, the repository, the hash, the
-    /// withdrawals and the floor. It does not need the ticket's state to be the newest one.
+    /// Remembers a verified download, durably, and returns what may be handed to the Glass. Call
+    /// it before the transfer: the [`RecordedPackage`] it returns is the only way to the signed
+    /// statement the Glass needs. Checks the release again against the file as it is now: the
+    /// key, the repository, the hash, the withdrawals and the floor. It does not need the ticket's
+    /// state to be the newest one.
     pub fn record_install(
         &mut self,
         ticket: &InstallTicket<'_>,
-        package: &VerifiedPackage,
-    ) -> Result<(), TrustError> {
+        package: VerifiedPackage,
+    ) -> Result<RecordedPackage, TrustError> {
         let (app, release) = (ticket.app(), ticket.release());
         if package.app_id() != app.id
             || *package.version() != release.version
@@ -248,6 +298,9 @@ impl TrustStore {
                     record.absorb(app);
                     record
                 }
+                // Planned against a record that is gone: the owner forgot the app meanwhile. Not
+                // turned into a first use nobody consented to.
+                None if !ticket.first_use() => return Err(TrustError::RecordMissing),
                 None => {
                     let record = TrustRecord {
                         id: app.id.clone(),
@@ -270,7 +323,8 @@ impl TrustStore {
                 record.highest = Some((release.version.clone(), release.sha256));
             }
             Ok(true)
-        })
+        })?;
+        Ok(RecordedPackage { package })
     }
 
     /// Drops everything about this id. The next install of it is a first use, under any key, from

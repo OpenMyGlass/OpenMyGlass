@@ -12,6 +12,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -289,18 +290,20 @@ pub trait PackageSink {
     fn abort(&mut self);
 }
 
-/// Proof that a stream of bytes matched a release's size and hash, with what the Glass needs to
-/// check it again. Only [`DownloadVerifier::finish`] makes one. It says nothing about what the
-/// package does: see the design doc.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Proof that a stream of bytes matched a release's size and hash. Only
+/// [`DownloadVerifier::finish`] makes one. It is not yet allowed onto the Glass: that takes
+/// [`super::TrustStore::record_install`], which consumes it and returns the
+/// [`super::RecordedPackage`] the transfer needs. It says nothing about what the package does: see
+/// the design doc.
+#[derive(Debug, PartialEq, Eq)]
 pub struct VerifiedPackage {
-    app_id: String,
-    version: Version,
-    sha256: Sha256Digest,
-    size: u64,
-    publisher_key: [u8; 32],
-    signature: [u8; 64],
-    statement: Vec<u8>,
+    pub(super) app_id: String,
+    pub(super) version: Version,
+    pub(super) sha256: Sha256Digest,
+    pub(super) size: u64,
+    pub(super) publisher_key: [u8; 32],
+    pub(super) signature: [u8; 64],
+    pub(super) statement: Vec<u8>,
 }
 
 impl VerifiedPackage {
@@ -327,16 +330,6 @@ impl VerifiedPackage {
     /// The key that signed the release.
     pub fn publisher_key(&self) -> &[u8; 32] {
         &self.publisher_key
-    }
-
-    /// The publisher's signature over [`statement`](Self::statement).
-    pub fn signature(&self) -> &[u8; 64] {
-        &self.signature
-    }
-
-    /// The signed bytes, so the Glass can verify the release without the manifest.
-    pub fn statement(&self) -> &[u8] {
-        &self.statement
     }
 }
 
@@ -410,7 +403,7 @@ impl PackageStore {
 
     /// Starts receiving the package with this hash, in a new file of its own, so concurrent
     /// downloads of one hash cannot touch each other's bytes.
-    pub fn begin(&self, sha256: &Sha256Digest) -> io::Result<FileSink> {
+    pub fn begin(&self, sha256: &Sha256Digest) -> io::Result<FileSink<'_>> {
         let hash = to_hex(sha256);
         for _ in 0..8 {
             let part = self.dir.join(format!("{hash}.{}.part", random_part()?));
@@ -421,6 +414,7 @@ impl PackageStore {
                         part,
                         target: self.path_of(sha256),
                         expected: *sha256,
+                        _store: PhantomData,
                     })
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -440,15 +434,28 @@ impl PackageStore {
 }
 
 /// A [`PackageSink`] on a file of its own: a unique `.part` until commit, which hashes the file
-/// itself and only then renames it. Dropped without a commit, it removes the `.part`.
-pub struct FileSink {
+/// itself and only then renames it. Dropped without a commit, it removes the `.part`. It borrows
+/// its [`PackageStore`], so the store, and with it the directory lock, outlive every running
+/// download: no new store can be opened on the directory and clear this `.part`.
+///
+/// ```compile_fail
+/// use omg_core::apps::PackageStore;
+/// let dir = std::env::temp_dir().join("omg-filesink-doc");
+/// let sink = {
+///     let store = PackageStore::open(&dir).unwrap();
+///     store.begin(&[0; 32]).unwrap()
+/// }; // the store, and its lock, would end here while the sink lives on
+/// drop(sink);
+/// ```
+pub struct FileSink<'a> {
     file: Option<File>,
     part: PathBuf,
     target: PathBuf,
     expected: Sha256Digest,
+    _store: PhantomData<&'a PackageStore>,
 }
 
-impl FileSink {
+impl FileSink<'_> {
     fn file_matches(file: &mut File, expected: &Sha256Digest) -> io::Result<bool> {
         file.seek(SeekFrom::Start(0))?;
         let mut hasher = Sha256::new();
@@ -465,7 +472,7 @@ impl FileSink {
     }
 }
 
-impl PackageSink for FileSink {
+impl PackageSink for FileSink<'_> {
     fn write(&mut self, chunk: &[u8]) -> io::Result<()> {
         self.file
             .as_mut()
@@ -498,7 +505,7 @@ impl PackageSink for FileSink {
     }
 }
 
-impl Drop for FileSink {
+impl Drop for FileSink<'_> {
     fn drop(&mut self) {
         if self.file.is_some() {
             self.abort();

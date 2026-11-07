@@ -151,7 +151,7 @@ GitHub is read as a plain file, not through its API. The API is rate limited per
 A manifest may redirect only within its repository (`RepositorySource::covers`). Otherwise an open redirect on a trusted host would show someone else's manifest under that host's name, and an attacker's own key can sign for any repository URL.
 
 - **GitHub:** every repository shares `raw.githubusercontent.com`, so the same origin would let `/alice/tool/...` redirect to `/mallory/x/...`. The rule is the same owner and repository instead, compared without case.
-- **A site:** the same origin. `apex` to `www` counts as another origin, so the owner adds the final address. On a site shared between users, a same-origin redirect can still reach another user's manifest. The label would then be wrong, and signatures do not help when the other user signs for that URL. So **a shared host is one trust domain**, and the UI should show the full manifest URL for a site.
+- **A site:** the same origin. `apex` to `www` counts as another origin, so the owner adds the final address. On a site shared between users, a same-origin redirect can still reach another user's manifest. The label would then be wrong, and signatures do not help when the other user signs for that URL. So **a site repository is one trust domain per origin**: everyone who can publish on that origin can redirect its manifests, and the UI should show the full manifest URL for a site.
 
 Flow, once the UI exists **[design]**:
 
@@ -163,7 +163,9 @@ Flow, once the UI exists **[design]**:
 
 `select_release` ranks: the highest version not withdrawn, not below the installed floor, that runs on this Glass (`target`, `min_api`) and asks only for known permissions. Pre-releases only if the owner opted in. File order means nothing, and it reports what it skipped and why.
 
-**In the core's API, `plan_install` is the only way to start an install.** It reads the record from the `TrustStore` itself, so a caller cannot leave the memory out. `fetch_package`, `DownloadVerifier` and `TrustStore::record_install` need the `InstallTicket` it returns. `AppEntry` and `Release` have private fields and only `Manifest::parse` makes them, so a ticket is always for a verified release. `record_install` checks the release again against the file under the lock: key, repository, hash, withdrawals and floor. A ticket planned against a stale or empty store therefore cannot record a forged key or go under the floor.
+**In the core's API, `plan_install` is the only way to start an install.** It reads the record from the `TrustStore` itself, so a caller cannot leave the memory out. `fetch_package`, `DownloadVerifier` and `TrustStore::record_install` need the `InstallTicket` it returns. `AppEntry` and `Release` have private fields and only `Manifest::parse` makes them, so a ticket is always for a verified release. `record_install` checks the release again against the file under the lock: key, repository, hash, withdrawals and floor. A ticket planned against a stale or empty store therefore cannot record a forged key or go under the floor, and a ticket planned against a record that was forgotten meanwhile is refused rather than turned into a first use.
+
+The order is fixed by types: `fetch_package` gives a `VerifiedPackage`, `record_install` consumes it and returns a `RecordedPackage`, and only a `RecordedPackage` gives the signed statement and signature for `AppOffer`. So the install is recorded, and checked again, **before the package is handed to the Glass**. A `FileSink` borrows its `PackageStore`, so the store and its directory lock outlive every running download.
 
 That is a guarantee about code that uses this API. A frontend can still write its own HTTP download and send any bytes to the Glass, which is why the Glass's own checks (section 10) are the real backstop. The ticket also says whether this is a first use and which permissions need the owner's yes, but showing those is the UI's job and nothing in the core can force it.
 
@@ -206,7 +208,7 @@ Where the file lives is the frontend's choice. It should be in the app's private
 
 ### What a static manifest can and cannot prevent
 
-A signed state can only be edited by the key holder, but a host can still **serve an older genuine state**. Memory catches that only for what this companion has already seen.
+A signed state can only be edited by the key holder, but a host can still **serve an older genuine state**. Memory catches that only for what this companion has already seen, and **only for app ids already in its `TrustStore`**, that is apps installed from it at least once and not forgotten. Browsing a repository, or `observe` on an unknown id, remembers nothing.
 
 | Attack, by someone with the hosting but not the key | Result |
 |---|---|
@@ -330,7 +332,7 @@ No install on the Glass in this pass. This is the interface it would need.
 Appended at the end of `Frame` (postcard encodes by position), inside the encrypted session, replacing the unused `Addon*` scaffold. No frame carries a URL: the phone downloads and the Glass never fetches.
 
 ```
-Companion -> Glass  AppOffer { statement, signature, publisher_key }   (all from VerifiedPackage)
+Companion -> Glass  AppOffer { statement, signature, publisher_key }   (all from RecordedPackage)
 Glass -> Companion  AppOfferReply { accepted, reason, resume_at, free_bytes }
 Companion -> Glass  AppChunk { sha256, offset, bytes }
 Glass -> Companion  AppChunkAck { next_offset }

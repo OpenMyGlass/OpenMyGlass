@@ -35,5 +35,5 @@ pub use select::{
     InstalledApp, SelectOptions, Selection, SkipReason, UpdateStatus, KNOWN_PERMISSIONS,
 };
 pub use source::{RepositorySource, SourceError};
-pub use trust::{Observed, TrustError, TrustProblem, TrustRecord, TrustStore};
+pub use trust::{Observed, RecordedPackage, TrustError, TrustProblem, TrustRecord, TrustStore};
 pub use url::{HttpsUrl, UrlError};

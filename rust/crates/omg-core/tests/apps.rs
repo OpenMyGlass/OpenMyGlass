@@ -801,7 +801,7 @@ fn installed_from(app: &AppEntry) -> (tempfile::TempDir, TrustStore, InstalledAp
     let ticket = plan_install(app, &empty_store().1, None, &profile(), WITH_PRE).unwrap();
     assert!(ticket.first_use());
     let package = verified(&ticket);
-    store.record_install(&ticket, &package).unwrap();
+    store.record_install(&ticket, package).unwrap();
     let installed = installed_of(&ticket);
     (dir, store, installed)
 }
@@ -1175,7 +1175,7 @@ fn two_states_with_one_number_are_refused() {
     let (_other, elsewhere) = empty_store();
     let ticket = plan_install(&fork, &elsewhere, None, &profile(), STABLE).unwrap();
     assert!(matches!(
-        store.record_install(&ticket, &verified(&ticket)),
+        store.record_install(&ticket, verified(&ticket)),
         Err(TrustError::Problem(TrustProblem::StateForked))
     ));
 }
@@ -1205,21 +1205,21 @@ fn a_ticket_planned_without_the_memory_cannot_be_recorded_against_it() {
     let ticket = plan_install(&withdrawn, &empty, None, &profile(), STABLE).unwrap();
     assert!(ticket.first_use());
     assert!(matches!(
-        store.record_install(&ticket, &verified(&ticket)),
+        store.record_install(&ticket, verified(&ticket)),
         Err(TrustError::Withdrawn)
     ));
 
     let older = app_state(&key(), 3, &[], vec![release_json("1.0.0", b"old")]);
     let ticket = plan_install(&older, &empty, None, &profile(), STABLE).unwrap();
     assert!(matches!(
-        store.record_install(&ticket, &verified(&ticket)),
+        store.record_install(&ticket, verified(&ticket)),
         Err(TrustError::BelowFloor)
     ));
 
     let thief = app_state(&other_key(), 9, &[], vec![release_json("9.0.0", b"evil")]);
     let ticket = plan_install(&thief, &empty, None, &profile(), STABLE).unwrap();
     assert!(matches!(
-        store.record_install(&ticket, &verified(&ticket)),
+        store.record_install(&ticket, verified(&ticket)),
         Err(TrustError::Problem(TrustProblem::PublisherChanged))
     ));
     // None of that changed the record.
@@ -1251,7 +1251,7 @@ fn a_newer_state_seen_during_a_download_does_not_void_it_but_a_withdrawal_does()
         ],
     );
     assert_eq!(store.observe(&three).unwrap(), Observed::Updated);
-    store.record_install(&ticket, &verified(&ticket)).unwrap();
+    store.record_install(&ticket, verified(&ticket)).unwrap();
     assert_eq!(store.get(APP).unwrap().sequence, 3);
     assert_eq!(
         store.get(APP).unwrap().highest.as_ref().unwrap().0,
@@ -1275,9 +1275,33 @@ fn a_newer_state_seen_during_a_download_does_not_void_it_but_a_withdrawal_does()
     );
     assert_eq!(store.observe(&six).unwrap(), Observed::Updated);
     assert!(matches!(
-        store.record_install(&ticket, &verified(&ticket)),
+        store.record_install(&ticket, verified(&ticket)),
         Err(TrustError::Withdrawn)
     ));
+}
+
+#[test]
+fn a_forget_during_an_install_is_not_turned_into_a_first_use() {
+    let first = app_state(&key(), 1, &[], vec![release_json("1.0.0", b"old")]);
+    let (dir, mut store, installed) = installed_from(&first);
+    let two = app_state(
+        &key(),
+        2,
+        &[],
+        vec![release_json("1.0.0", b"old"), release_json("1.1.0", b"new")],
+    );
+    let ticket = plan_install(&two, &store, Some(&installed), &profile(), STABLE).unwrap();
+    assert!(!ticket.first_use());
+    // Meanwhile another instance forgets the app, at the owner's request.
+    let mut other = TrustStore::open(dir.path().join("trust.json")).unwrap();
+    other.forget(APP).unwrap();
+    assert!(matches!(
+        store.record_install(&ticket, verified(&ticket)),
+        Err(TrustError::RecordMissing)
+    ));
+    // A refused change leaves this instance's view as it was; the file has no record.
+    store.reload().unwrap();
+    assert!(store.get(APP).is_none());
 }
 
 #[test]
@@ -1319,14 +1343,14 @@ fn two_store_instances_on_one_file_keep_each_others_changes() {
 
     let tally = app_of(vec![release_json("1.0.0", b"old")]);
     let ticket = plan_install(&tally, &a, None, &profile(), STABLE).unwrap();
-    a.record_install(&ticket, &verified(&ticket)).unwrap();
+    a.record_install(&ticket, verified(&ticket)).unwrap();
 
     // b has not seen it, records another app, and must not erase the first.
     let mut other = unsigned_app("com.example.other", 1, vec![release_json("1.0.0", b"x")]);
     sign_app(&mut other, &key(), &repository());
     let other = parse(&manifest_json(vec![other])).unwrap().apps()[0].clone();
     let ticket = plan_install(&other, &b, None, &profile(), STABLE).unwrap();
-    b.record_install(&ticket, &verified(&ticket)).unwrap();
+    b.record_install(&ticket, verified(&ticket)).unwrap();
     assert!(b.get(APP).is_some(), "b read the file again under the lock");
 
     // c's view is still empty, so it plans the thief's app as a first use. Recording it, under
@@ -1335,7 +1359,7 @@ fn two_store_instances_on_one_file_keep_each_others_changes() {
     let ticket = plan_install(&thief, &c, None, &profile(), STABLE).unwrap();
     assert!(ticket.first_use());
     assert!(matches!(
-        c.record_install(&ticket, &verified(&ticket)),
+        c.record_install(&ticket, verified(&ticket)),
         Err(TrustError::Problem(TrustProblem::PublisherChanged))
     ));
 
@@ -1356,7 +1380,7 @@ fn a_failed_write_changes_nothing() {
     let mut store = TrustStore::open(&path).unwrap();
     let tally = app_of(vec![release_json("1.0.0", b"old")]);
     let ticket = plan_install(&tally, &store, None, &profile(), STABLE).unwrap();
-    store.record_install(&ticket, &verified(&ticket)).unwrap();
+    store.record_install(&ticket, verified(&ticket)).unwrap();
     assert_eq!(
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
@@ -1403,7 +1427,7 @@ fn uninstalling_forgets_nothing_and_the_memory_survives_a_restart() {
             vec![release_json("1.5.0", b"bad"), release_json("2.0.0", b"new")],
         );
         let ticket = plan_install(&first, &empty_store().1, None, &profile(), STABLE).unwrap();
-        store.record_install(&ticket, &verified(&ticket)).unwrap();
+        store.record_install(&ticket, verified(&ticket)).unwrap();
     }
     // The app is uninstalled: nothing about the store changes. The companion restarts.
     let mut store = TrustStore::open(&path).unwrap();
@@ -1649,12 +1673,16 @@ fn a_good_download_lands_under_its_hash_with_what_the_glass_needs() {
         PACKAGE
     );
 
-    // An AppOffer can be built: the Glass can check this with no manifest.
-    let glass_side = ed25519_dalek::VerifyingKey::from_bytes(package.publisher_key()).unwrap();
+    // An AppOffer can be built, but only once the install is recorded: the Glass can check this
+    // with no manifest.
+    let (_trust_dir, mut trust) = empty_store();
+    let recorded = trust.record_install(&ticket, package).unwrap();
+    assert_eq!(recorded.app_id(), APP);
+    let glass_side = ed25519_dalek::VerifyingKey::from_bytes(recorded.publisher_key()).unwrap();
     glass_side
         .verify(
-            package.statement(),
-            &Signature::from_bytes(package.signature()),
+            recorded.statement(),
+            &Signature::from_bytes(recorded.signature()),
         )
         .unwrap();
 
@@ -2018,7 +2046,7 @@ fn add_a_github_repository_install_then_update_then_survive_a_takeover() {
     let control = FetchControl::for_package(ticket.release().size());
     let package = fetch_package(&fetcher, &ticket, &mut sink, &control).unwrap();
     assert_eq!(fetcher.asked().last().unwrap(), GITHUB_ASSET_REDIRECT);
-    trust.record_install(&ticket, &package).unwrap();
+    trust.record_install(&ticket, package).unwrap();
     let installed = installed_of(&ticket);
 
     // A new version appears, the same way.
@@ -2044,7 +2072,7 @@ fn add_a_github_repository_install_then_update_then_survive_a_takeover() {
         std::fs::read(packages.path_of(updated.sha256())).unwrap(),
         v2
     );
-    trust.record_install(&ticket, &updated).unwrap();
+    trust.record_install(&ticket, updated).unwrap();
     let installed = installed_of(&ticket);
 
     // The account is stolen: a valid manifest under the thief's key, malicious "update" included.

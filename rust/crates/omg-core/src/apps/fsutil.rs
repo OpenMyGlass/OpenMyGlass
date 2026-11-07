@@ -71,9 +71,12 @@ impl FileLock {
     }
 }
 
+/// Makes a rename in `path`'s directory durable. A bare file name lives in the current
+/// directory, whose parent is the empty path.
 #[cfg(unix)]
 pub(super) fn sync_parent(path: &Path) -> io::Result<()> {
     match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => File::open(".")?.sync_all(),
         Some(parent) => File::open(parent)?.sync_all(),
         None => Ok(()),
     }
@@ -82,4 +85,18 @@ pub(super) fn sync_parent(path: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 pub(super) fn sync_parent(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_file_name_syncs_the_current_directory() {
+        // `Path::new("trust.json").parent()` is `Some("")`, which cannot be opened.
+        assert_eq!(Path::new("trust.json").parent(), Some(Path::new("")));
+        sync_parent(Path::new("trust.json")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        sync_parent(&dir.path().join("x")).unwrap();
+    }
 }
