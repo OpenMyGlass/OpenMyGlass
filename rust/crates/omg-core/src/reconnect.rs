@@ -2,7 +2,17 @@
 //! wait alike: every attempt on BLE costs a scan, which Android throttles, and wakes the Glass.
 
 /// The wait after the first failure, in milliseconds.
+///
+/// Also what keeps an Unpair from pairing again by itself: after `unpair`, the core closes the
+/// link and the Android app stops its supervisor at once, which must land before this wait ends
+/// and the supervisor reconnects, with pairing allowed since the bond is gone. Keep it at least a
+/// second; the assert below fails the build otherwise.
 pub const MIN_WAIT_MS: u32 = 1_000;
+
+const _: () = assert!(
+    MIN_WAIT_MS >= 1_000,
+    "an Unpair relies on a reconnect waiting at least a second"
+);
 /// The longest wait, in milliseconds.
 pub const MAX_WAIT_MS: u32 = 30_000;
 
