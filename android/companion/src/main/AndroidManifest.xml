@@ -29,8 +29,11 @@
         android:allowBackup="false"
         android:label="OpenMyGlass Companion"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <!-- The activity owns the link, so being recreated would end it. Its views are all built
+             in code and fit any of these, so none of them needs a new activity. -->
         <activity
             android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|fontScale|density|locale|layoutDirection"
             android:exported="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>

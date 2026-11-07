@@ -32,6 +32,7 @@ import android.widget.Switch
 import android.widget.TextView
 import org.openmyglass.corebindings.CompanionCore
 import org.openmyglass.corebindings.CoreEvent
+import org.openmyglass.corebindings.CoreSnapshot
 import org.openmyglass.corebindings.GlassRadio
 import org.openmyglass.corebindings.GlassSettings
 import org.openmyglass.corebindings.LinkPhase
@@ -87,17 +88,28 @@ class MainActivity : Activity() {
             AndroidStt(engineContext),
             AndroidTts(engineContext),
         )
-        link = LinkController(core, { filesDir.usableSpace }) { events ->
+        link = LinkController(
+            core,
+            { filesDir.usableSpace },
+            onOpenFailed = { why ->
+                main.post {
+                    lastProblem = why
+                    refreshStatus()
+                }
+            },
+        ) { events ->
             main.post { onEvents(events) }
         }
         setContentView(buildUi())
-        // Needs the window's decor, which setContentView creates.
-        window.insetsController?.setSystemBarsAppearance(
-            WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
-            WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
-        )
+        // Needs the window's decor, which setContentView creates. Android 10 keeps its default bars.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            window.insetsController?.setSystemBarsAppearance(
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                    WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                    WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+            )
+        }
         refreshAll()
         // A bonded phone goes back to its Glass by itself, over the link it last used, so waiting
         // notes sync. It does not ask for permissions unasked.
@@ -111,7 +123,6 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        bleAttempt = null
         link.disconnect()
         player?.release()
         super.onDestroy()
@@ -122,24 +133,24 @@ class MainActivity : Activity() {
     private fun connect() {
         val text = address.text.toString().trim()
         val host = text.substringBeforeLast(':')
-        val port = text.substringAfterLast(':').toIntOrNull()
+        val port = text.substringAfterLast(':').toIntOrNull()?.takeIf { it in 1..65535 }
         if (host.isEmpty() || port == null) {
             status.text = "Address must be host:port"
             return
         }
         prefs.edit().putString(KEY_ADDRESS, text).putString(KEY_LINK, LINK_TCP).apply()
-        bleAttempt = null
         linkNote = null
+        lastProblem = null
         link.connect { TcpLink(host, port) }
         refreshStatus()
     }
 
-    /** Set while a BLE link is wanted. A scan in progress stops when this is no longer its own. */
-    @Volatile private var bleAttempt: Any? = null
-
-    /** The address of the BLE link in use, saved once the Glass has proved itself. */
-    @Volatile private var bleAddress: String? = null
+    /** What is going on while no link is up, set while a BLE link is wanted. */
     private var linkNote: String? = null
+
+    /** The link in use is over Bluetooth. Wanting one, or having had one, does not count. */
+    private fun overBluetooth(s: CoreSnapshot = core.snapshot()) =
+        s.phase == LinkPhase.RUNNING && link.running is BleLink
 
     /** Finds the Glass by its service: no address to type. Asks for the permissions first. */
     private fun connectBle() {
@@ -149,16 +160,11 @@ class MainActivity : Activity() {
             return
         }
         prefs.edit().putString(KEY_LINK, LINK_BLE).apply()
-        val attempt = Any()
-        bleAttempt = attempt
         linkNote = "Looking for the Glass over Bluetooth"
+        lastProblem = null
         val known = prefs.getString(KEY_BLE_ADDRESS, null)
             .takeIf { core.snapshot().bondedTo != null }
-        link.connect {
-            BleLink.open(applicationContext, known) { bleAttempt !== attempt }.also {
-                bleAddress = it.address
-            }
-        }
+        link.connect { cancelled -> BleLink.open(applicationContext, known, cancelled) }
         refreshStatus()
     }
 
@@ -181,8 +187,8 @@ class MainActivity : Activity() {
                 is CoreEvent.LinkRunning -> {
                     lastProblem = null
                     // This Glass passed the handshake: the next scan looks for it alone.
-                    if (bleAttempt != null) {
-                        bleAddress?.let { prefs.edit().putString(KEY_BLE_ADDRESS, it).apply() }
+                    (link.running as? BleLink)?.address?.let {
+                        prefs.edit().putString(KEY_BLE_ADDRESS, it).apply()
                     }
                 }
                 is CoreEvent.NoteDeferred -> lastProblem = "Note waiting: ${e.reason}"
@@ -209,11 +215,11 @@ class MainActivity : Activity() {
         status.text = buildString {
             append(
                 when (s.phase) {
-                    LinkPhase.DOWN -> linkNote?.takeIf { bleAttempt != null } ?: "Not connected"
+                    LinkPhase.DOWN -> linkNote ?: "Not connected"
                     LinkPhase.HANDSHAKE -> "Connecting"
                     LinkPhase.RUNNING ->
                         "Connected to ${g.name ?: "Glass"}" +
-                            if (bleAttempt != null) " over Bluetooth" else ""
+                            if (overBluetooth(s)) " over Bluetooth" else ""
                 },
             )
             s.bondedTo?.let { append("\nPaired with $it") }
@@ -222,9 +228,11 @@ class MainActivity : Activity() {
             g.pendingNotes?.let { append("\nNotes waiting on the Glass: $it") }
             lastProblem?.let { append("\n$it") }
         }
-        wifi.setShown(g.wifiOn)
-        bluetooth.setShown(g.bluetoothOn)
-        airplane.setShown(g.airplaneMode)
+        // The core keeps the last values after a link ends, and a change would go nowhere then.
+        val up = s.phase == LinkPhase.RUNNING
+        wifi.setShown(g.wifiOn.takeIf { up })
+        bluetooth.setShown(g.bluetoothOn.takeIf { up })
+        airplane.setShown(g.airplaneMode.takeIf { up })
     }
 
     private fun org.openmyglass.corebindings.GlassState.battery_line(): String? =
@@ -248,16 +256,19 @@ class MainActivity : Activity() {
                 button("Connect") { connect() },
                 button("Bluetooth") { connectBle() },
                 button("Disconnect") {
-                    bleAttempt = null
+                    linkNote = null
+                    lastProblem = null
                     link.disconnect()
                     refreshStatus()
                 },
                 button("Unpair") {
                     core.unpair()
                     prefs.edit().remove(KEY_BLE_ADDRESS).apply()
-                    bleAttempt = null
-                    link.poke()
-                    main.postDelayed({ link.disconnect(); refreshStatus() }, 300)
+                    linkNote = null
+                    lastProblem = null
+                    // The Glass forgets this phone only if the core's last frame reaches it.
+                    link.disconnectAfterFlush()
+                    refreshStatus()
                 },
             ),
         )
@@ -293,17 +304,16 @@ class MainActivity : Activity() {
     private fun buildGlassPage(): View {
         settingsBox = column()
         heading("Radios")
-        wifi = plainSwitch("Wi-Fi") { core.setRadio(GlassRadio.WIFI, it); link.poke() }
+        wifi = plainSwitch("Wi-Fi") { on -> whenRunning { core.setRadio(GlassRadio.WIFI, on) } }
+        // On the Glass, Bluetooth runs when it is wanted and airplane mode is off.
         bluetooth = plainSwitch("Bluetooth") { on ->
-            confirmIfItDropsTheLink(bluetooth, !on, "Bluetooth") {
-                core.setRadio(GlassRadio.BLUETOOTH, on)
-                link.poke()
+            confirmIfItDropsTheLink(!on, "Turning Bluetooth off", "turn Bluetooth back on") {
+                whenRunning { core.setRadio(GlassRadio.BLUETOOTH, on) }
             }
         }
         airplane = plainSwitch("Airplane mode") { on ->
-            confirmIfItDropsTheLink(airplane, on, "Airplane mode") {
-                core.setAirplaneMode(on)
-                link.poke()
+            confirmIfItDropsTheLink(on, "Turning airplane mode on", "turn airplane mode off") {
+                whenRunning { core.setAirplaneMode(on) }
             }
         }
 
@@ -372,8 +382,18 @@ class MainActivity : Activity() {
 
     private fun send(change: GlassSettings) {
         if (showing) return
-        core.changeSettings(change)
-        link.poke()
+        whenRunning { core.changeSettings(change) }
+    }
+
+    /** The core drops a change with no running link, so say so instead. */
+    private fun whenRunning(change: () -> Unit) {
+        if (core.snapshot().phase == LinkPhase.RUNNING) {
+            change()
+            link.poke()
+        } else {
+            lastProblem = "Not sent: the Glass is not connected"
+            refreshStatus()
+        }
     }
 
     private fun heading(text: String) {
@@ -388,22 +408,22 @@ class MainActivity : Activity() {
 
     /**
      * This phone reaches the Glass over the radio the owner is about to turn off, and only the
-     * Glass itself can then turn it back on: ask first, and put the switch back on "no".
+     * Glass itself can then turn it back on: ask first, and on "no" show what the Glass reports.
      */
-    private fun confirmIfItDropsTheLink(view: Switch, dropsRadio: Boolean, what: String, apply: () -> Unit) {
-        if (!dropsRadio || bleAttempt == null) {
+    private fun confirmIfItDropsTheLink(dropsRadio: Boolean, what: String, undo: String, apply: () -> Unit) {
+        if (!dropsRadio || !overBluetooth()) {
             apply()
             return
         }
         AlertDialog.Builder(this)
             .setTitle("Disconnect from the Glass?")
             .setMessage(
-                "This phone is connected over Bluetooth, so changing $what will end the connection. " +
-                    "To connect again, turn Bluetooth back on from the settings on the Glass.",
+                "This phone is connected over Bluetooth, so $what will end the connection. " +
+                    "To connect again, $undo from the settings on the Glass.",
             )
             .setPositiveButton("Continue") { _, _ -> apply() }
-            .setNegativeButton("Cancel") { _, _ -> view.setShown(!view.isChecked) }
-            .setOnCancelListener { view.setShown(!view.isChecked) }
+            .setNegativeButton("Cancel") { _, _ -> refreshStatus() }
+            .setOnCancelListener { refreshStatus() }
             .show()
     }
 

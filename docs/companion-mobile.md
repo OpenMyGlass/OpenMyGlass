@@ -67,6 +67,8 @@ disconnect:    end of stream, then core.link_down(); open again
 
 - **Writes are paced in the core** (`omg_core::ble::WritePacer`, `BleWritePacer` here), at 3 kB/s, because Android queued unpaced writes for up to 13 s ahead of anything sent later. The blocking write is the core's backpressure. Reading never waits for it.
 - **A reconnect is a new session:** a new handshake, nothing carried over. A bond makes it automatic, and note sync resumes from disk.
+- **Trying again** waits by `omg_core::reconnect`: it doubles up to 30 s, and only a link that lasted that long or the owner asking resets it, because each attempt is a scan, which Android throttles, and wakes the Glass.
+- **The last frame** of a link has no acknowledgement. Before a close the core asked for, `BleLink.flush` waits for the stack to take the last run and gives the radio half a second. That makes it likely, not certain, that an `Unpair` arrives.
 - **Over the limit:** the profile sets 1 KiB chunks, 2 in flight, and syncs attachments up to 256 KiB by itself. A bigger one waits for a link with no limit (`Deferred{NeedsFasterLink}`). See `companion-notes-sync.md`.
 - **iOS** writes the same few lines around `CBPeripheral`, with `canSendWriteWithoutResponse` in place of the Android callback. `BleLink.kt` holds no logic it needs to copy beyond this.
 

@@ -1,8 +1,10 @@
 package org.openmyglass.companion
 
-import org.openmyglass.corebindings.CompanionCore
+import org.openmyglass.corebindings.CompanionCoreInterface
 import org.openmyglass.corebindings.CoreEvent
 import org.openmyglass.corebindings.LinkProfile
+import org.openmyglass.corebindings.ReconnectBackoff
+import org.openmyglass.corebindings.ReconnectBackoffInterface
 import org.openmyglass.corebindings.linkProfileFast
 import java.io.IOException
 import java.net.InetSocketAddress
@@ -23,6 +25,9 @@ interface ByteLink {
     @Throws(IOException::class)
     fun write(bytes: ByteArray)
 
+    /** Blocks, within a limit, until what [write] took has had its chance to leave. */
+    fun flush() = Unit
+
     fun close()
 }
 
@@ -42,7 +47,13 @@ class TcpLink(host: String, port: Int) : ByteLink {
         }
     }
 
-    override fun close() = socket.close()
+    override fun close() {
+        try {
+            socket.close()
+        } catch (_: IOException) {
+            // It is closed as far as this app can tell.
+        }
+    }
 
     private companion object {
         const val CONNECT_TIMEOUT_MS = 5000
@@ -50,68 +61,109 @@ class TcpLink(host: String, port: Int) : ByteLink {
 }
 
 /**
+ * Opens a link and blocks until it is up. Fails with an [IOException]. It should give up, the same
+ * way, once `cancelled` returns true: nobody wants this link any more.
+ */
+typealias LinkOpener = (cancelled: () -> Boolean) -> ByteLink
+
+/**
  * Keeps a link to the Glass while [open] is set, reconnecting after a loss: notes sync by
  * themselves whenever it comes back. The threads are the two `docs/companion-mobile.md` asks
  * for, plus one that supervises.
  *
  * This lives as long as the app's process. There is no background service yet.
+ *
+ * [onEvents] is also called with no events each time an attempt ends, because a link that simply
+ * dropped has no event of its own and the screen must still stop saying it is connected.
+ * [onOpenFailed] says why the wanted link did not open. It and [onEvents] run on the link's threads.
  */
 class LinkController(
-    private val core: CompanionCore,
+    private val core: CompanionCoreInterface,
     private val freeBytes: () -> Long,
+    private val backoff: ReconnectBackoffInterface = ReconnectBackoff(),
+    private val onOpenFailed: (String) -> Unit = {},
     private val onEvents: (List<CoreEvent>) -> Unit,
 ) {
+    /** Ends the wait between pumps. */
     private val wake = Semaphore(0)
 
-    @Volatile private var open: (() -> ByteLink)? = null
+    /** Ends the wait between attempts. Only the owner asking for something does that. */
+    private val retry = Semaphore(0)
+
+    @Volatile private var open: LinkOpener? = null
 
     @Volatile private var current: ByteLink? = null
     private var supervisor: Thread? = null
 
+    /** The link that is open now, whatever its phase, to tell what carries it. */
+    val running: ByteLink? get() = current
+
     /** Keep a link open with what [opener] returns, instead of any link there is now. */
     @Synchronized
-    fun connect(opener: () -> ByteLink) {
+    fun connect(opener: LinkOpener) {
         open = opener
         current?.close()
         if (supervisor?.isAlive != true) {
             supervisor = Thread({ supervise() }, "omg-link").apply { start() }
         }
-        // It may be waiting out a backoff from another link.
-        wake.release()
+        retry.release()
     }
 
     /** Close the link and stay down. */
     fun disconnect() {
         open = null
         current?.close()
+        retry.release()
+    }
+
+    /** Stay down, after writing what the core has queued. A scan in progress stops at once. */
+    fun disconnectAfterFlush() {
+        open = null
         wake.release()
+        retry.release()
     }
 
     /** Call after anything that may have queued bytes in the core. */
     fun poke() = wake.release()
 
     private fun supervise() {
-        var backoffMs = MIN_BACKOFF_MS
         while (true) {
-            val opener = open ?: break
-            try {
-                val link = opener()
+            // Under the lock, so that a connect() either sees this thread gone or is seen here.
+            val opener = synchronized(this) {
+                open.also { if (it == null) supervisor = null }
+            } ?: return
+            var lastedMs = 0L
+            openLink(opener)?.let { link ->
+                val started = System.nanoTime()
+                // Before the check: connect() sets `open` and then closes `current`, so a link
+                // nobody wants any more is either not run here or closed there.
                 current = link
-                if (open != null) {
-                    runLink(link)
-                    backoffMs = MIN_BACKOFF_MS
-                } else {
-                    link.close()
-                }
-            } catch (_: IOException) {
-                // The next attempt is below.
+                if (open === opener) runLink(link) else link.close()
+                current = null
+                lastedMs = (System.nanoTime() - started) / 1_000_000
             }
-            current = null
-            deliver(core.pump().events)
-            if (open == null) break
-            wake.tryAcquire(backoffMs, TimeUnit.MILLISECONDS)
-            backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
+            onEvents(core.pump().events)
+            // Emptied before the check: a request after the check ends the wait.
+            retry.drainPermits()
+            if (open === opener) {
+                retry.tryAcquire(backoff.nextWaitMs(lastedMs.toULong()).toLong(), TimeUnit.MILLISECONDS)
+            }
+            if (open !== opener) backoff.reset()
         }
+    }
+
+    private fun openLink(opener: LinkOpener): ByteLink? = try {
+        opener { open !== opener }
+    } catch (e: IOException) {
+        openFailed(opener, e)
+    } catch (e: RuntimeException) {
+        // The framework's way of saying the same thing, and no reason to lose the app.
+        openFailed(opener, e)
+    }
+
+    private fun openFailed(opener: LinkOpener, e: Exception): ByteLink? {
+        if (open === opener) onOpenFailed(e.message ?: e.toString())
+        return null
     }
 
     private fun runLink(link: ByteLink) {
@@ -136,13 +188,18 @@ class LinkController(
         }, "omg-read").apply { start() }
 
         try {
-            while (!ended.get() && open != null) {
+            while (!ended.get()) {
                 wake.tryAcquire(PUMP_INTERVAL_MS, TimeUnit.MILLISECONDS)
                 wake.drainPermits()
+                // Read before the pump, so what was queued before the owner stopped still goes.
+                val stopping = open == null
                 val out = core.pump()
                 if (out.outgoing.isNotEmpty()) link.write(out.outgoing)
                 deliver(out.events)
-                if (out.closeLink) break
+                if (out.closeLink || stopping) {
+                    link.flush()
+                    break
+                }
             }
         } catch (_: IOException) {
             // Handled below like any other end.
@@ -160,7 +217,5 @@ class LinkController(
     private companion object {
         const val PUMP_INTERVAL_MS = 200L
         const val READ_BUFFER = 64 * 1024
-        const val MIN_BACKOFF_MS = 1000L
-        const val MAX_BACKOFF_MS = 30_000L
     }
 }

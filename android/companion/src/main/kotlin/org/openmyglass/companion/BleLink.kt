@@ -208,12 +208,21 @@ class BleLink private constructor(private val cancelled: () -> Boolean) : ByteLi
     private fun writeRun(run: ByteArray) {
         val g = gatt ?: throw IOException("not connected")
         val c = rx ?: throw IOException("not connected")
+        // Across the retries as well: a refusal looks the same as busy, and may never end.
+        val end = SystemClock.elapsedRealtime() + WRITE_CALLBACK_TIMEOUT_MS
         while (true) {
-            if (!writeSlot.tryAcquire(WRITE_CALLBACK_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            val left = end - SystemClock.elapsedRealtime()
+            if (left <= 0 || !writeSlot.tryAcquire(left, TimeUnit.MILLISECONDS)) {
                 throw IOException("the Bluetooth stack stopped taking writes")
             }
             if (!alive) throw IOException("the link is gone")
-            if (startWrite(g, c, run)) return
+            val started = try {
+                startWrite(g, c, run)
+            } catch (e: RuntimeException) {
+                // From Android 13 a dead Bluetooth process comes out of the write as this.
+                throw IOException("the Bluetooth stack failed a write", e)
+            }
+            if (started) return
             // The stack is busy: not an error, it has a moment's work to do first.
             writeSlot.release()
             Thread.sleep(STACK_BUSY_MS)
@@ -236,13 +245,33 @@ class BleLink private constructor(private val cancelled: () -> Boolean) : ByteLi
         }
     }
 
+    /**
+     * Writes without response have no acknowledgement, so this is the best a phone can do: wait for
+     * the stack to take the last run, then give the radio a moment before a disconnect, which drops
+     * what is still queued. Without it, the last frame of a link rarely gets out.
+     */
+    override fun flush() {
+        if (!alive) return
+        if (writeSlot.tryAcquire(FLUSH_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            writeSlot.release()
+            Thread.sleep(FLUSH_LINGER_MS)
+        }
+    }
+
     override fun close() {
         alive = false
         incoming.add(END)
         writeSlot.release()
         gatt?.let {
-            it.disconnect()
-            it.close()
+            // A stack on its way down may throw from these, and the link is over either way.
+            try {
+                it.disconnect()
+            } catch (_: RuntimeException) {
+            }
+            try {
+                it.close()
+            } catch (_: RuntimeException) {
+            }
         }
         gatt = null
     }
@@ -259,6 +288,9 @@ class BleLink private constructor(private val cancelled: () -> Boolean) : ByteLi
         /** Stalls of 3.6 s were measured, so this is well above them. */
         private const val WRITE_CALLBACK_TIMEOUT_MS = 15_000L
         private const val STACK_BUSY_MS = 5L
+
+        private const val FLUSH_TIMEOUT_MS = 2_000L
+        private const val FLUSH_LINGER_MS = 500L
 
         /** A stack that has just stopped scanning connects more reliably after a moment. */
         private const val AFTER_SCAN_MS = 300L
@@ -294,12 +326,11 @@ class BleLink private constructor(private val cancelled: () -> Boolean) : ByteLi
             } catch (e: IOException) {
                 link.close()
                 throw e
-            } catch (e: SecurityException) {
+            } catch (e: RuntimeException) {
+                // How the framework reports Bluetooth going off or a permission being withdrawn,
+                // from any of the calls above.
                 link.close()
-                throw IOException(e)
-            } catch (e: IllegalArgumentException) {
-                link.close()
-                throw IOException(e)
+                throw IOException("Bluetooth failed: ${e.message}", e)
             }
         }
 
@@ -340,7 +371,11 @@ class BleLink private constructor(private val cancelled: () -> Boolean) : ByteLi
                 }
                 throw IOException("no Glass found")
             } finally {
-                scanner.stopScan(callback)
+                try {
+                    scanner.stopScan(callback)
+                } catch (_: IllegalStateException) {
+                    // Bluetooth went off, which ended the scan as well.
+                }
             }
         }
     }

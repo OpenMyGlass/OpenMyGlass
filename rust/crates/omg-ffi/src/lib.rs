@@ -228,6 +228,45 @@ impl BleWritePacer {
     }
 }
 
+/// How long to wait before trying the Glass again. One per supervised link. See
+/// `omg_core::reconnect`.
+#[derive(uniffi::Object)]
+pub struct ReconnectBackoff {
+    inner: Mutex<omg_core::reconnect::Backoff>,
+}
+
+impl Default for ReconnectBackoff {
+    fn default() -> Self {
+        ReconnectBackoff {
+            inner: Mutex::new(omg_core::reconnect::Backoff::new()),
+        }
+    }
+}
+
+#[uniffi::export]
+impl ReconnectBackoff {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<ReconnectBackoff> {
+        Arc::new(ReconnectBackoff::default())
+    }
+
+    /// An attempt ended, after a link of `lasted_ms`, or 0 if none opened. How long to wait now.
+    pub fn next_wait_ms(&self, lasted_ms: u64) -> u32 {
+        self.lock().next_wait_ms(lasted_ms)
+    }
+
+    /// The owner asked for a link: the next failure starts from the shortest wait again.
+    pub fn reset(&self) {
+        self.lock().reset();
+    }
+}
+
+impl ReconnectBackoff {
+    fn lock(&self) -> std::sync::MutexGuard<'_, omg_core::reconnect::Backoff> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
 /// Names of the time zones `GlassSettings::timezone_id` indexes.
 #[uniffi::export]
 pub fn time_zone_names() -> Vec<String> {

@@ -26,6 +26,7 @@ pub mod ble;
 pub mod companion_link;
 pub mod identity;
 pub mod notes;
+pub mod reconnect;
 pub mod secure;
 #[cfg(feature = "async-link")]
 pub mod session;
