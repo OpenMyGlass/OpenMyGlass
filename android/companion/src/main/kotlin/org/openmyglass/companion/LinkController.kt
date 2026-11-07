@@ -69,7 +69,7 @@ typealias LinkOpener = (cancelled: () -> Boolean) -> ByteLink
 /**
  * Keeps a link to the Glass while [open] is set, reconnecting after a loss: notes sync by
  * themselves whenever it comes back. The threads are the two `docs/companion-mobile.md` asks
- * for, plus one that supervises, and one that polls so a note changing with no link still shows.
+ * for, plus one that supervises.
  *
  * This lives as long as the app's process. There is no background service yet.
  *
@@ -107,12 +107,6 @@ class LinkController(
 
     /** The link that is open now, whatever its phase, to tell what carries it. */
     val running: ByteLink? get() = current
-
-    @Volatile private var closed = false
-    private val poller = Thread({ poll() }, "omg-poll").apply {
-        isDaemon = true
-        start()
-    }
 
     /**
      * Keep a link open with what [opener] returns, instead of any link there is now. Returns the
@@ -168,25 +162,6 @@ class LinkController(
         }, "omg-flush-limit").apply {
             isDaemon = true
             start()
-        }
-    }
-
-    /** Disconnect, and stop polling for good. */
-    fun close() {
-        closed = true
-        poller.interrupt()
-        disconnect()
-    }
-
-    private fun poll() {
-        try {
-            while (!closed) {
-                Thread.sleep(POLL_INTERVAL_MS)
-                val events = core.poll()
-                if (events.isNotEmpty()) onEvents(events, null)
-            }
-        } catch (_: InterruptedException) {
-            // Closed.
         }
     }
 
@@ -286,7 +261,6 @@ class LinkController(
         /** Above BleLink's own limits on a flush, so that it gives up before this does. */
         const val FLUSH_LIMIT_MS = 5_000L
         const val PUMP_INTERVAL_MS = 200L
-        const val POLL_INTERVAL_MS = 500L
         const val READ_BUFFER = 64 * 1024
     }
 }

@@ -34,12 +34,22 @@ class VoiceRecorder(private val file: File) {
                     out.write(Wav.placeholder())
                     val buffer = ByteArray(minBuffer)
                     record.startRecording()
+                    var heard = false
                     while (running) {
                         val n = record.read(buffer, 0, buffer.size)
-                        if (n > 0) out.write(buffer, 0, n)
+                        // Below zero is an error that stays: the microphone was taken away.
+                        if (n < 0) {
+                            failed = true
+                            break
+                        }
+                        if (n > 0) {
+                            out.write(buffer, 0, n)
+                            heard = true
+                        }
                     }
+                    if (!heard) failed = true
                 }
-                Wav.finish(file, RATE)
+                if (!failed) Wav.finish(file, RATE)
             } catch (_: IOException) {
                 // Most likely a full disk.
                 failed = true
@@ -55,6 +65,7 @@ class VoiceRecorder(private val file: File) {
     fun stop(): Int? {
         running = false
         thread?.join()
+        thread = null
         return if (failed) null else (System.currentTimeMillis() - startedAt).toInt()
     }
 

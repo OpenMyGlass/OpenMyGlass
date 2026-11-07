@@ -19,6 +19,7 @@ import org.openmyglass.corebindings.SpeechFailure
 import org.openmyglass.corebindings.SpeechToTextEngine
 import org.openmyglass.corebindings.TextToSpeechEngine
 import java.io.File
+import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -33,59 +34,96 @@ private fun NoteLocale.toJava(): Locale = when (this) {
 
 /**
  * The platform's text-to-speech. Speech always runs here on the companion, never on the Glass.
- * The core calls this on its own thread, so waiting is fine.
+ * The core calls [synthesize] on its one speech thread, so waiting is fine, and one engine serves
+ * every piece.
  */
 class AndroidTts(private val context: Context) : TextToSpeechEngine {
+    private class Piece {
+        val done = CountDownLatch(1)
+        val error = AtomicReference<String?>(null)
+    }
+
+    @Volatile private var engine: TextToSpeech? = null
+
+    @Volatile private var piece: Piece? = null
+
     override fun synthesize(text: String, locale: NoteLocale): SpeechAudio {
+        val tts = engine ?: start()
+        if (tts.isLanguageAvailable(locale.toJava()) < TextToSpeech.LANG_AVAILABLE) {
+            throw SpeechFailure.Unavailable()
+        }
+        tts.language = locale.toJava()
+        return synthesizeToPcm(tts, text)
+    }
+
+    override fun cancel() {
+        engine?.stop()
+        piece?.let {
+            it.error.set("stopped")
+            it.done.countDown()
+        }
+    }
+
+    private fun start(): TextToSpeech {
         val ready = CountDownLatch(1)
         val status = AtomicReference(TextToSpeech.ERROR)
         val tts = TextToSpeech(context) { s ->
             status.set(s)
             ready.countDown()
         }
-        try {
-            if (!ready.await(10, TimeUnit.SECONDS) || status.get() != TextToSpeech.SUCCESS) {
-                throw SpeechFailure.Unavailable()
-            }
-            if (tts.isLanguageAvailable(locale.toJava()) < TextToSpeech.LANG_AVAILABLE) {
-                throw SpeechFailure.Unavailable()
-            }
-            tts.language = locale.toJava()
-            return synthesizeToPcm(tts, text)
-        } finally {
+        if (!ready.await(10, TimeUnit.SECONDS) || status.get() != TextToSpeech.SUCCESS) {
             tts.shutdown()
+            throw SpeechFailure.Unavailable()
         }
+        engine = tts
+        return tts
+    }
+
+    /** It may have died with its service, so the next piece starts another. */
+    private fun forget(tts: TextToSpeech) {
+        engine = null
+        tts.shutdown()
     }
 
     private fun synthesizeToPcm(tts: TextToSpeech, text: String): SpeechAudio {
         val file = File.createTempFile("tts", ".wav", context.cacheDir)
+        val current = Piece()
+        piece = current
         try {
-            val done = CountDownLatch(1)
-            val error = AtomicReference<String?>(null)
             tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(id: String?) = Unit
-                override fun onDone(id: String?) = done.countDown()
+                override fun onDone(id: String?) = current.done.countDown()
 
                 @Deprecated("Deprecated in Android")
                 override fun onError(id: String?) {
-                    error.set("the engine reported an error")
-                    done.countDown()
+                    current.error.compareAndSet(null, "the engine reported an error")
+                    current.done.countDown()
                 }
 
                 override fun onError(id: String?, code: Int) {
-                    error.set("the engine reported error $code")
-                    done.countDown()
+                    current.error.compareAndSet(null, "the engine reported error $code")
+                    current.done.countDown()
+                }
+
+                override fun onStop(id: String?, interrupted: Boolean) {
+                    current.error.compareAndSet(null, "stopped")
+                    current.done.countDown()
                 }
             })
             if (tts.synthesizeToFile(text, Bundle(), file, "note") != TextToSpeech.SUCCESS) {
+                forget(tts)
                 throw SpeechFailure.Failed("the engine refused the text")
             }
-            if (!done.await(60, TimeUnit.SECONDS)) throw SpeechFailure.Failed("timed out")
-            error.get()?.let { throw SpeechFailure.Failed(it) }
+            if (!current.done.await(60, TimeUnit.SECONDS)) {
+                forget(tts)
+                throw SpeechFailure.Failed("timed out")
+            }
+            current.error.get()?.let { throw SpeechFailure.Failed(it) }
             val audio = Wav.parse(file.readBytes())
                 ?: throw SpeechFailure.Failed("the engine did not produce PCM")
             return SpeechAudio(audio.sampleRate.toUInt(), audio.samples)
         } finally {
+            piece = null
             file.delete()
         }
     }
@@ -107,16 +145,21 @@ class AndroidStt(private val context: Context) : SpeechToTextEngine {
         val audio = Wav.parse(File(audioPath).readBytes()) ?: throw SpeechFailure.Unavailable()
         val pipe = ParcelFileDescriptor.createPipe()
         val writer = Thread {
-            ParcelFileDescriptor.AutoCloseOutputStream(pipe[1]).use { it.write(audio.samples) }
+            try {
+                ParcelFileDescriptor.AutoCloseOutputStream(pipe[1]).use { it.write(audio.samples) }
+            } catch (_: IOException) {
+                // The recognizer stopped reading, which it may do whenever it has its answer.
+            }
         }
         val result = AtomicReference<Result<String>?>(null)
         val done = CountDownLatch(1)
         val main = Handler(Looper.getMainLooper())
         var recognizer: SpeechRecognizer? = null
         main.post {
-            recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(context).apply {
-                setRecognitionListener(listener(result, done))
-                startListening(
+            try {
+                recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(context).apply {
+                    setRecognitionListener(listener(result, done))
+                    startListening(
                     Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                         .putExtra(
                             RecognizerIntent.EXTRA_LANGUAGE_MODEL,
@@ -127,9 +170,15 @@ class AndroidStt(private val context: Context) : SpeechToTextEngine {
                         .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
                         .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
                         .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, audio.sampleRate),
-                )
+                    )
+                }
+                writer.start()
+            } catch (e: RuntimeException) {
+                // On the main thread this would take the app down.
+                pipe[1].close()
+                result.set(Result.failure(SpeechFailure.Failed(e.message ?: "the recognizer did not start")))
+                done.countDown()
             }
-            writer.start()
         }
         val answered = done.await(120, TimeUnit.SECONDS)
         main.post { recognizer?.destroy() }
@@ -150,9 +199,9 @@ class AndroidStt(private val context: Context) : SpeechToTextEngine {
                 val failure = when (error) {
                     SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
                     SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE,
-                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
                     SpeechRecognizer.ERROR_CLIENT,
                     -> SpeechFailure.Unavailable()
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> SpeechFailure.Busy()
                     else -> SpeechFailure.Failed("recognizer error $error")
                 }
                 result.set(Result.failure(failure))

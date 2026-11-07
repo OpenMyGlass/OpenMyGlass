@@ -34,7 +34,6 @@ import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.VideoView
-import org.openmyglass.corebindings.CompanionCore
 import org.openmyglass.corebindings.CoreEvent
 import org.openmyglass.corebindings.CoreSnapshot
 import org.openmyglass.corebindings.GlassRadio
@@ -60,9 +59,11 @@ import kotlin.concurrent.thread
  * The first screen of the companion: the link, every Glass setting, and notes. All logic is in
  * the Rust core. This only draws what it reports and calls it.
  */
-class MainActivity : Activity() {
-    private lateinit var core: CompanionCore
-    private lateinit var link: LinkController
+class MainActivity : Activity(), CompanionScreen {
+    private lateinit var process: CompanionProcess
+    private val core get() = process.core
+    private val link get() = process.link
+    private val draft get() = process.draft
     private val main = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("companion", MODE_PRIVATE) }
 
@@ -80,13 +81,15 @@ class MainActivity : Activity() {
     private lateinit var glassPage: View
     private lateinit var notesPage: View
 
-    private val pending = mutableListOf<NewAttachment>()
     private var recorder: VoiceRecorder? = null
     private var recording: File? = null
     private var player: MediaPlayer? = null
 
-    /** Set from asking the core to read a note until the audio arrives or the owner stops it. */
-    private var speechWanted = false
+    /** The request to read a note, from asking until the audio arrives or the owner stops it. */
+    private var speechWanted: ULong? = null
+
+    /** The full-screen photo or video on show. */
+    private var viewer: Dialog? = null
     private val thumbnails = LruCache<String, Bitmap>(THUMBNAILS_KEPT)
     private val photoLoader = Executors.newSingleThreadExecutor()
 
@@ -97,33 +100,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // A draft is not kept across runs, so its copies are left over from a run that ended.
-        cacheDir.listFiles()?.filter { f -> CACHE_PREFIXES.any { f.name.startsWith(it) } }?.forEach { it.delete() }
-        val engineContext = applicationContext
-        core = CompanionCore(
-            File(filesDir, "companion").path,
-            android.os.Build.MODEL,
-            packageManager.getPackageInfo(packageName, 0).versionName ?: "0",
-            AndroidStt(engineContext),
-            AndroidTts(engineContext),
-        )
-        link = LinkController(
-            core,
-            { filesDir.usableSpace },
-            onOpenFailed = { request, why ->
-                main.post {
-                    // The owner may have asked for something else since.
-                    if (link.wants(request)) {
-                        lastProblem = why
-                        refreshStatus()
-                    }
-                }
-            },
-        ) { events, from ->
-            // Read now: by the time the post runs, another link may be the current one.
-            val bleAddress = (from as? BleLink)?.address
-            main.post { onEvents(events, bleAddress) }
-        }
+        process = CompanionProcess.of(this)
         setContentView(buildUi())
         // Needs the window's decor, which setContentView creates. Android 10 keeps its default bars.
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
@@ -134,24 +111,86 @@ class MainActivity : Activity() {
                     WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
             )
         }
+        process.screen = this
         refreshAll()
         // A bonded phone goes back to its Glass by itself, over the link it last used, so waiting
-        // notes sync. It does not ask for permissions unasked.
-        if (core.snapshot().bondedTo != null) {
-            if (prefs.getString(KEY_LINK, LINK_TCP) == LINK_BLE) {
-                if (BleLink.missingPermissions(this).isEmpty()) connectBle()
-            } else {
-                connect()
+        // notes sync. It does not ask for permissions unasked. Once per process: another screen
+        // finds the link already there.
+        if (!process.triedBondedGlass) {
+            process.triedBondedGlass = true
+            onCore({ core.snapshot().bondedTo != null }) { bonded ->
+                if (bonded) {
+                    if (prefs.getString(KEY_LINK, LINK_TCP) == LINK_BLE) {
+                        if (BleLink.missingPermissions(this).isEmpty()) connectBle()
+                    } else {
+                        connect()
+                    }
+                }
             }
         }
     }
 
     override fun onDestroy() {
-        link.close()
+        // The link and the draft stay with the process, for the next screen.
+        if (process.screen === this) process.screen = null
+        finishRecording()
+        draft.text = draftText.text.toString()
         stopPlayback()
-        recorder?.stop()
+        viewer?.dismiss()
+        photoLoader.shutdownNow()
         super.onDestroy()
     }
+
+    // ------------------------------ the core, away from the main thread ------------------------------
+
+    /** Runs [call] on the core's thread, then [then] here, if this screen is still up. */
+    private fun <T> onCore(call: () -> T, then: (T) -> Unit = {}) {
+        process.coreCalls.execute {
+            val result = call()
+            main.post { if (!isDestroyed) then(result) }
+        }
+    }
+
+    /** Runs [call] on the core's thread and shows why it failed, if it did. */
+    private fun tryOnCore(call: () -> Unit) {
+        onCore({
+            try {
+                call()
+                null
+            } catch (e: org.openmyglass.corebindings.CoreFailure) {
+                e.message
+            }
+        }) { say(it) }
+    }
+
+    /** Loads on the core's thread and draws here. Asking while it loads loads once more after. */
+    private inner class Refresher<T>(val load: () -> T, val draw: (T) -> Unit) {
+        private var loading = false
+        private var again = false
+
+        fun run() {
+            if (loading) {
+                again = true
+                return
+            }
+            loading = true
+            onCore(load) {
+                loading = false
+                draw(it)
+                if (again) {
+                    again = false
+                    run()
+                }
+            }
+        }
+    }
+
+    private val statusRefresher = Refresher({ core.snapshot() }, ::drawStatus)
+    private val notesRefresher = Refresher({ core.notes() }, ::drawNotes)
+
+    /** What the core last said, for deciding things on this thread. */
+    private var known: CoreSnapshot? = null
+    private var knownSettings: GlassSettings? = null
 
     // ------------------------------ the link ------------------------------
 
@@ -170,12 +209,14 @@ class MainActivity : Activity() {
         refreshStatus()
     }
 
-    /** What is going on while no link is up, set while a BLE link is wanted. */
-    private var linkNote: String? = null
+    private var linkNote: String?
+        get() = process.linkNote
+        set(value) {
+            process.linkNote = value
+        }
 
     /** The link in use is over Bluetooth. Wanting one, or having had one, does not count. */
-    private fun overBluetooth(s: CoreSnapshot = core.snapshot()) =
-        s.phase == LinkPhase.RUNNING && link.running is BleLink
+    private fun overBluetooth(s: CoreSnapshot) = s.phase == LinkPhase.RUNNING && link.running is BleLink
 
     /** Finds the Glass by its service: no address to type. Asks for the permissions first. */
     private fun connectBle() {
@@ -187,9 +228,11 @@ class MainActivity : Activity() {
         prefs.edit().putString(KEY_LINK, LINK_BLE).apply()
         linkNote = "Looking for the Glass over Bluetooth"
         lastProblem = null
-        val known = prefs.getString(KEY_BLE_ADDRESS, null)
-            .takeIf { core.snapshot().bondedTo != null }
-        link.connect { cancelled -> BleLink.open(applicationContext, known, cancelled) }
+        link.connect { cancelled ->
+            val address = prefs.getString(KEY_BLE_ADDRESS, null)
+                .takeIf { core.snapshot().bondedTo != null }
+            BleLink.open(applicationContext, address, cancelled)
+        }
         refreshStatus()
     }
 
@@ -202,11 +245,19 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun onEvents(events: List<CoreEvent>, bleAddress: String?) {
+    override fun onLinkFailed(why: String) {
+        lastProblem = why
+        refreshStatus()
+    }
+
+    override fun onCoreEvents(events: List<CoreEvent>, bleAddress: String?) {
         var notes = false
         for (e in events) {
             when (e) {
-                is CoreEvent.SettingsChanged -> showSettings(e.settings)
+                is CoreEvent.SettingsChanged -> {
+                    knownSettings = e.settings
+                    showSettings(e.settings)
+                }
                 is CoreEvent.NotesChanged -> notes = true
                 is CoreEvent.NoteSynced -> {
                     notes = true
@@ -225,11 +276,11 @@ class MainActivity : Activity() {
                     say("A note is waiting: ${e.reason}")
                 }
                 is CoreEvent.NoteRefused -> say("A note was refused: ${e.reason}")
-                is CoreEvent.NoteSpeechReady -> if (speechWanted) {
-                    speechWanted = false
+                is CoreEvent.NoteSpeechReady -> if (speechWanted == e.requestId) {
+                    speechWanted = null
                     startPlayer(e.path, "Reading the note")
                 }
-                is CoreEvent.NoteSpeechFailed -> if (speechWanted) {
+                is CoreEvent.NoteSpeechFailed -> if (speechWanted == e.requestId) {
                     stopPlayback()
                     say("Cannot read it aloud: ${e.reason}")
                 }
@@ -237,20 +288,27 @@ class MainActivity : Activity() {
             }
         }
         refreshStatus()
-        // Without a link a change would go nowhere, and the old values may no longer be true.
-        if (core.snapshot().phase != LinkPhase.RUNNING) showSettings(GlassSettings())
         if (notes) refreshNotes()
     }
 
-    private var lastProblem: String? = null
+    private var lastProblem: String?
+        get() = process.lastProblem
+        set(value) {
+            process.lastProblem = value
+        }
 
     private fun refreshAll() {
         refreshStatus()
         refreshNotes()
     }
 
-    private fun refreshStatus() {
-        val s = core.snapshot()
+    private fun refreshStatus() = statusRefresher.run()
+
+    private fun drawStatus(s: CoreSnapshot) {
+        // A new screen has missed the event that carried these.
+        if (known == null) s.glass.settings?.let { showSettings(it) }
+        known = s
+        knownSettings = s.glass.settings
         val g = s.glass
         status.text = buildString {
             append(
@@ -275,6 +333,7 @@ class MainActivity : Activity() {
         }
         // The core keeps the last values after a link ends, and a change would go nowhere then.
         val up = s.phase == LinkPhase.RUNNING
+        if (!up) showSettings(GlassSettings())
         wifi.setShown(g.wifiOn.takeIf { up })
         bluetooth.setShown(g.bluetoothOn.takeIf { up })
         airplane.setShown(g.airplaneMode.takeIf { up })
@@ -307,19 +366,23 @@ class MainActivity : Activity() {
                     refreshStatus()
                 },
                 button("Unpair") {
-                    // If this phone cannot forget the bond, the core tells the Glass nothing and
-                    // the link stays, so both ends still agree.
-                    try {
-                        core.unpair()
-                        prefs.edit().remove(KEY_BLE_ADDRESS).apply()
-                        lastProblem = null
-                        linkNote = null
-                        // The Glass forgets this phone only if the core's last frame reaches it.
-                        link.disconnectAfterFlush()
-                    } catch (e: org.openmyglass.corebindings.CoreFailure) {
-                        lastProblem = "Could not forget the Glass on this phone: ${e.message}"
+                    onCore({
+                        // If this phone cannot forget the bond, the core tells the Glass nothing
+                        // and the link stays, so both ends still agree.
+                        try {
+                            core.unpair()
+                            prefs.edit().remove(KEY_BLE_ADDRESS).apply()
+                            // The Glass forgets this phone only if the core's last frame reaches it.
+                            link.disconnectAfterFlush()
+                            null
+                        } catch (e: org.openmyglass.corebindings.CoreFailure) {
+                            "Could not forget the Glass on this phone: ${e.message}"
+                        }
+                    }) { problem ->
+                        lastProblem = problem
+                        if (problem == null) linkNote = null
+                        refreshStatus()
                     }
-                    refreshStatus()
                 },
             ),
         )
@@ -438,9 +501,11 @@ class MainActivity : Activity() {
 
     /** The core drops a change with no running link, so say so instead. */
     private fun whenRunning(change: () -> Unit) {
-        if (core.snapshot().phase == LinkPhase.RUNNING) {
-            change()
-            link.poke()
+        if (known?.phase == LinkPhase.RUNNING) {
+            onCore({
+                change()
+                link.poke()
+            })
         } else {
             lastProblem = "Not sent: the Glass is not connected"
             refreshStatus()
@@ -462,7 +527,8 @@ class MainActivity : Activity() {
      * Glass itself can then turn it back on: ask first, and on "no" show what the Glass reports.
      */
     private fun confirmIfItDropsTheLink(dropsRadio: Boolean, what: String, undo: String, apply: () -> Unit) {
-        if (!dropsRadio || !overBluetooth()) {
+        val s = known
+        if (!dropsRadio || s == null || !overBluetooth(s)) {
             apply()
             return
         }
@@ -559,8 +625,8 @@ class MainActivity : Activity() {
             contentDescription = label
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(p: AdapterView<*>?, v: View?, position: Int, id: Long) {
-                    val known = core.snapshot().glass.settings ?: return
-                    val current = read(known)
+                    val settings = knownSettings ?: return
+                    val current = read(settings)
                     if (current == position) return
                     // An entry that only describes a state ("Other") goes back to the real value.
                     change(position)?.let { send(it) } ?: current?.let { p?.setSelection(it) }
@@ -580,7 +646,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun lastSettings(): GlassSettings = core.snapshot().glass.settings ?: GlassSettings()
+    private fun lastSettings(): GlassSettings = knownSettings ?: GlassSettings()
 
     // ------------------------------ notes ------------------------------
 
@@ -590,6 +656,7 @@ class MainActivity : Activity() {
             hint = "A new note"
             contentDescription = "note text"
         }
+        draftText.setText(draft.text)
         draftFiles = column().apply { contentDescription = "note attachments" }
         recordButton = button("Record voice") { toggleRecording() }
         saveButton = button("Save note") { saveNote() }
@@ -624,6 +691,7 @@ class MainActivity : Activity() {
             },
         )
         page.addView(notesBox)
+        showDraft()
         return page
     }
 
@@ -647,34 +715,37 @@ class MainActivity : Activity() {
         thread {
             val added = uris.mapNotNull { copyIn(it, kind) }
             main.post {
-                pending.addAll(added)
-                if (added.size == uris.size) say(null)
-                showDraftFiles()
+                draft.files.addAll(added)
+                if (!isDestroyed) {
+                    if (added.size == uris.size) say(null)
+                    showDraft()
+                }
             }
         }
     }
 
     /** The core needs a path, and a picker gives a URI. The copy goes when the note is saved. */
-    private fun copyIn(uri: Uri, kind: NoteAttachmentKind): NewAttachment? = try {
-        val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "file"
-        val target = File.createTempFile("pick", "-" + name.takeLast(40).replace('/', '_'), cacheDir)
-        val source = contentResolver.openInputStream(uri) ?: throw IOException("it is gone")
-        source.use { input ->
-            target.outputStream().use { input.copyTo(it) }
+    private fun copyIn(uri: Uri, kind: NoteAttachmentKind): NewAttachment? {
+        var target: File? = null
+        val problem = try {
+            val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "file"
+            val copy = File.createTempFile("pick", "-" + name.takeLast(40).replace('/', '_'), cacheDir)
+            target = copy
+            val source = contentResolver.openInputStream(uri) ?: throw IOException("it is gone")
+            source.use { input ->
+                copy.outputStream().use { input.copyTo(it) }
+            }
+            return NewAttachment(kind, contentResolver.getType(uri) ?: "application/octet-stream", copy.path, null)
+        } catch (e: IOException) {
+            e
+        } catch (e: RuntimeException) {
+            // What another app's provider throws is that app's problem, not a reason to crash.
+            e
         }
-        NewAttachment(
-            kind,
-            contentResolver.getType(uri) ?: "application/octet-stream",
-            target.path,
-            null,
-        )
-    } catch (e: IOException) {
-        main.post { say("Cannot read that file: ${e.message}") }
-        null
-    } catch (e: SecurityException) {
-        main.post { say("Cannot read that file: ${e.message}") }
-        null
+        target?.delete()
+        main.post { if (!isDestroyed) say("Cannot read that file: ${problem.message}") }
+        return null
     }
 
     private fun toggleRecording() {
@@ -686,7 +757,12 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MIC)
             return
         }
-        val file = File.createTempFile("voice", ".wav", cacheDir)
+        val file = try {
+            File.createTempFile("voice", ".wav", cacheDir)
+        } catch (e: IOException) {
+            say("Cannot record: ${e.message}")
+            return
+        }
         val started = VoiceRecorder(file)
         if (!started.start()) {
             file.delete()
@@ -711,8 +787,8 @@ class MainActivity : Activity() {
             say("The recording failed")
             return
         }
-        pending.add(NewAttachment(NoteAttachmentKind.VOICE, "audio/wav", file.path, length.toUInt()))
-        showDraftFiles()
+        draft.files.add(NewAttachment(NoteAttachmentKind.VOICE, "audio/wav", file.path, length.toUInt()))
+        showDraft()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, results: IntArray) {
@@ -727,55 +803,44 @@ class MainActivity : Activity() {
         if (requestCode == REQUEST_BLUETOOTH) bluetoothAnswered()
     }
 
-    private fun showDraftFiles() {
+    /** The draft as the process holds it. While it saves, nothing that would change it works. */
+    private fun showDraft() {
+        draftText.isEnabled = !draft.saving
+        saveButton.isEnabled = !draft.saving
         draftFiles.removeAllViews()
-        pending.toList().forEach { file ->
+        draft.files.toList().forEach { file ->
             val name = File(file.path).name.let { it.substringAfter('-', it) }
             val label = TextView(this).apply { text = "${file.kind.name.lowercase()}: $name" }
-            draftFiles.addView(
-                row(
-                    label,
-                    button("Remove") {
-                        pending.remove(file)
-                        File(file.path).delete()
-                        showDraftFiles()
-                    },
-                ),
-            )
+            val remove = button("Remove") {
+                draft.files.remove(file)
+                File(file.path).delete()
+                showDraft()
+            }
+            remove.isEnabled = !draft.saving
+            draftFiles.addView(row(label, remove))
         }
     }
 
     private fun saveNote() {
         finishRecording()
-        val text = draftText.text.toString().ifBlank { null }
-        val files = pending.toList()
+        draft.text = draftText.text.toString()
         // With no link the Glass cannot say, and a note in the wrong language transcribes badly.
         val locale = lastSettings().locale ?: noteLocaleForLanguage(Locale.getDefault().language)
-        saveButton.isEnabled = false
-        thread {
-            val problem = try {
-                core.addPhoneNote(text, locale, files)
-                null
-            } catch (e: org.openmyglass.corebindings.CoreFailure) {
-                e.message
-            }
-            main.post {
-                saveButton.isEnabled = true
-                say(problem)
-                if (problem == null) {
-                    files.forEach { File(it.path).delete() }
-                    pending.removeAll(files)
-                    draftText.setText("")
-                    showDraftFiles()
-                    refreshNotes()
-                }
-            }
-        }
+        process.saveDraft(locale)
+        showDraft()
     }
 
-    private fun refreshNotes() {
+    override fun onDraftChanged(problem: String?) {
+        say(problem)
+        draftText.setText(draft.text)
+        showDraft()
+        refreshNotes()
+    }
+
+    private fun refreshNotes() = notesRefresher.run()
+
+    private fun drawNotes(notes: List<NoteInfo>) {
         notesBox.removeAllViews()
-        val notes = core.notes()
         if (notes.isEmpty()) {
             notesBox.addView(TextView(this).apply { text = "None yet." })
         }
@@ -843,6 +908,7 @@ class MainActivity : Activity() {
         photoLoader.execute {
             val bitmap = thumbnails.get(path) ?: Photos.decode(path, maxSide)
             main.post {
+                if (isDestroyed) return@post
                 if (bitmap == null) {
                     view.setImageResource(android.R.drawable.ic_menu_report_image)
                     view.contentDescription = "a photo that cannot be shown"
@@ -855,8 +921,13 @@ class MainActivity : Activity() {
         return view
     }
 
-    private fun fullScreen(content: View): Dialog =
-        Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen).apply { setContentView(content) }
+    private fun fullScreen(content: View): Dialog {
+        viewer?.dismiss()
+        return Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen).apply {
+            setContentView(content)
+            viewer = this
+        }
+    }
 
     private fun showPhoto(path: String) {
         val view = ImageView(this).apply { contentDescription = "photo, full size" }
@@ -868,6 +939,7 @@ class MainActivity : Activity() {
         photoLoader.execute {
             val bitmap = Photos.decode(path, maxSide)
             main.post {
+                if (isDestroyed) return@post
                 if (bitmap == null) {
                     dialog.dismiss()
                     say("This photo cannot be shown")
@@ -900,13 +972,10 @@ class MainActivity : Activity() {
     }
 
     private fun transcribeAgain(n: NoteInfo) {
-        try {
+        tryOnCore {
             core.retranscribeNote(n.id)
-            say(null)
-        } catch (e: org.openmyglass.corebindings.CoreFailure) {
-            say(e.message)
+            link.poke()
         }
-        link.poke()
         refreshNotes()
     }
 
@@ -922,29 +991,29 @@ class MainActivity : Activity() {
     private fun delete(n: NoteInfo) {
         stopPlayback()
         n.attachments.mapNotNull { it.path }.forEach { thumbnails.remove(it) }
-        thread {
-            val problem = try {
-                core.deleteNote(n.id)
-                null
-            } catch (e: org.openmyglass.corebindings.CoreFailure) {
-                e.message
-            }
-            main.post {
-                say(problem)
-                refreshNotes()
-            }
-        }
+        // Its own events would also say so, but only once the poll comes round.
+        tryOnCore { core.deleteNote(n.id) }
+        refreshNotes()
     }
 
     private fun readAloud(n: NoteInfo) {
         stopPlayback()
-        try {
-            core.speakNote(n.id)
-            speechWanted = true
-            say(null)
-            showNowPlaying("Preparing speech")
-        } catch (e: org.openmyglass.corebindings.CoreFailure) {
-            say(e.message)
+        val request = ++process.lastSpeechRequest
+        speechWanted = request
+        say(null)
+        showNowPlaying("Preparing speech")
+        onCore({
+            try {
+                core.speakNote(n.id, request)
+                null
+            } catch (e: org.openmyglass.corebindings.CoreFailure) {
+                e.message
+            }
+        }) { problem ->
+            if (problem != null && speechWanted == request) {
+                stopPlayback()
+                say(problem)
+            }
         }
     }
 
@@ -984,8 +1053,8 @@ class MainActivity : Activity() {
     private fun stopPlayback() {
         player?.release()
         player = null
-        speechWanted = false
-        core.stopSpeaking()
+        speechWanted = null
+        onCore({ core.stopSpeaking() })
         nowPlaying.visibility = View.GONE
     }
 
@@ -1030,7 +1099,6 @@ class MainActivity : Activity() {
         const val REQUEST_MIC = 3
         const val REQUEST_BLUETOOTH = 4
         const val THUMBNAILS_KEPT = 64
-        val CACHE_PREFIXES = listOf("pick", "voice", "tts")
         val LOCALE_NAMES = mapOf(
             NoteLocale.IT to "Italiano",
             NoteLocale.EN to "English",

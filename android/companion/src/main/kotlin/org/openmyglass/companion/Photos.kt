@@ -13,12 +13,17 @@ object Photos {
         return sample
     }
 
-    /** A photo no bigger than [maxSide], upright as its EXIF says. Null if it cannot be read. */
+    /** A photo no bigger than [maxSide], upright as its EXIF says. Null if it cannot be shown. */
     fun decode(path: String, maxSide: Int): Bitmap? = try {
         ImageDecoder.decodeBitmap(ImageDecoder.createSource(File(path))) { decoder, info, _ ->
             decoder.setTargetSampleSize(sampleSize(info.size.width, info.size.height, maxSide))
         }
     } catch (_: IOException) {
+        null
+    } catch (_: RuntimeException) {
+        // A photo from outside this app can be anything, and none is worth the app.
+        null
+    } catch (_: OutOfMemoryError) {
         null
     }
 }

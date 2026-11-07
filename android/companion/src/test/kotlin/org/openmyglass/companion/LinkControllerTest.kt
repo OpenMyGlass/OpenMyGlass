@@ -387,6 +387,6 @@ class LinkControllerTest {
 
     private companion object {
         val NOTHING_KNOWN = GlassState(null, null, null, null, null, null, null, null, null, null, null)
-        val SNAPSHOT = CoreSnapshot(LinkPhase.DOWN, "Glass", "key", NOTHING_KNOWN)
+        val SNAPSHOT = CoreSnapshot(LinkPhase.DOWN, "Glass", "key", NOTHING_KNOWN, null, 0u)
     }
 }
