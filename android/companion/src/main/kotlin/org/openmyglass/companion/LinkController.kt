@@ -139,11 +139,24 @@ class LinkController(
      * [connect] or [disconnect] meanwhile waits for the flush, for up to [flushLimitMs], since what
      * is queued may be an Unpair the Glass has to see.
      */
+    @Synchronized
     fun disconnectAfterFlush() {
         current?.let { flushing = it to System.nanoTime() + flushLimitMs * 1_000_000 }
         open = null
         wake.release()
         retry.release()
+    }
+
+    /**
+     * [disconnectAfterFlush], only if the link wanted is still the one [connect] returned [request]
+     * for. Checked under the same lock as [connect], so a newer request is never ended by an
+     * older action that was queued. Returns whether it disconnected.
+     */
+    @Synchronized
+    fun disconnectAfterFlush(request: Long): Boolean {
+        if (!wants(request)) return false
+        disconnectAfterFlush()
+        return true
     }
 
     /** Closes the current link, unless it is flushing: then only once its time is up. */

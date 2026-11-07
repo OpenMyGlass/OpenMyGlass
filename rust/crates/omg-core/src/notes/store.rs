@@ -185,7 +185,7 @@ impl NoteStore {
         };
         manifest
             .validate()
-            .map_err(|e| CoreError::InvalidNote(format!("{e:?}")))?;
+            .map_err(|e| CoreError::InvalidNote(e.to_string()))?;
         let record = OutgoingNote {
             format: RECORD_FORMAT,
             seq,

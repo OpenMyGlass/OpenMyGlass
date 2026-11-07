@@ -29,12 +29,12 @@ pub use driver::{
 };
 #[cfg(feature = "async-link")]
 pub use link::{run_companion, CompanionRunOptions, CompanionUpdate};
-pub use receiver::{NoteReceiver, ReceiverEffect, ReceiverEvent};
+pub use receiver::{NoteReceiver, NoteTransfer, ReceiverEffect, ReceiverEvent};
 pub use record::{IncomingNote, OutgoingNote, OutgoingState};
 pub use sender::{DeletePolicy, NoteSender, SenderConfig, SenderEffect, SenderEvent};
 pub use speech::{
-    NoEngine, SpeechError, SpeechToText, SynthesizeRequest, SynthesizedAudio, TextToSpeech,
-    TranscribeRequest,
+    split_for_speech, wav_header, NoEngine, SpeechError, SpeechToText, SynthesizeRequest,
+    SynthesizedAudio, TextToSpeech, TranscribeRequest,
 };
 pub use store::NoteStore;
 

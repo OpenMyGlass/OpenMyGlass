@@ -173,6 +173,23 @@ pub enum ReceiverEffect {
     },
     /// Tell the UI.
     Event(ReceiverEvent),
+    /// Remove the note and its files: the owner asked, through
+    /// [`NoteReceiver::forget`].
+    DeleteLocal {
+        /// The note.
+        note_id: NoteId,
+    },
+}
+
+/// How far the note being pulled has come, for a UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoteTransfer {
+    /// The note.
+    pub note_id: NoteId,
+    /// Bytes held so far, over all its attachments.
+    pub received_bytes: u64,
+    /// Bytes in all its attachments.
+    pub total_bytes: u64,
 }
 
 struct Active {
@@ -247,6 +264,59 @@ impl NoteReceiver {
     /// What the Glass last said is waiting there.
     pub fn peer_status(&self) -> Option<NoteSyncStatus> {
         self.peer_status
+    }
+
+    /// Whether speech-to-text is running for this note.
+    pub fn is_transcribing(&self, id: &NoteId) -> bool {
+        self.running_stt.iter().any(|(note, _)| note == id)
+    }
+
+    /// The note being pulled right now.
+    pub fn transfer(&self) -> Option<NoteTransfer> {
+        let note_id = self.active.as_ref()?.note_id;
+        let note = self.notes.get(&note_id)?;
+        Some(NoteTransfer {
+            note_id,
+            received_bytes: self.progress(&note_id).iter().map(|p| p.next_offset).sum(),
+            total_bytes: note.manifest.attachments.iter().map(|a| a.size).sum(),
+        })
+    }
+
+    /// The owner deleted a note from this side. Only a complete one: the Glass still holds an
+    /// incomplete one and would just offer it again, so `None` refuses. The Glass normally
+    /// deleted its copy on the acknowledgement. If that was lost, it offers the note again and
+    /// the note comes back here, which is the safe way for that to go wrong.
+    pub fn forget(&mut self, note_id: &NoteId) -> Option<Vec<ReceiverEffect>> {
+        if !self.notes.get(note_id)?.complete {
+            return None;
+        }
+        self.notes.remove(note_id);
+        Some(vec![ReceiverEffect::DeleteLocal { note_id: *note_id }])
+    }
+
+    /// Run speech-to-text again on a held recording that has no text: the engine failed, or
+    /// there was none until now. The result goes where the first one would have.
+    pub fn retranscribe(&mut self, note_id: &NoteId) -> Vec<ReceiverEffect> {
+        let mut out = Vec::new();
+        let Some(note) = self.notes.get(note_id) else {
+            return out;
+        };
+        for meta in &note.manifest.attachments {
+            let held = note.attachments.get(&meta.id).is_some_and(|a| a.verified);
+            let has_text = note
+                .transcripts
+                .get(&meta.id)
+                .and_then(|t| t.result.as_ref())
+                .is_some_and(|r| r.error.is_none());
+            if meta.kind == AttachmentKind::VoiceRecording
+                && held
+                && !has_text
+                && self.running_stt.insert((*note_id, meta.id))
+            {
+                out.extend(transcribe_effect(note, meta.id));
+            }
+        }
+        out
     }
 
     /// Nothing left to do on this link: the Glass has nothing on offer, no speech job is
@@ -1192,6 +1262,117 @@ mod tests {
         let e = r.on_frame(chunk(0, 0, &[0; 4]), 1);
         assert_eq!(writes(&e), vec![0]);
         assert_eq!(requests(&e), vec![(0, 8)], "one out, one in");
+    }
+
+    /// Pulls every byte and verifies, with chunks as big as the file.
+    fn complete_one(r: &mut NoteReceiver, m: &NoteManifest, data: &[u8]) {
+        offer(r, m, 0);
+        r.on_frame(chunk(0, 0, data), 1);
+        r.on_attachment_hashed(NOTE, 0, sha256(data), 2);
+        assert!(r.note(&NOTE).unwrap().complete);
+    }
+
+    #[test]
+    fn a_transfer_reports_what_is_here_until_it_ends() {
+        let mut r = receiver(profile(4, 1, None));
+        let m = manifest(&[
+            (AttachmentKind::Photo, &[0; 4]),
+            (AttachmentKind::Photo, &[0; 8]),
+        ]);
+        assert_eq!(r.transfer(), None);
+        offer(&mut r, &m, 0);
+        let sizes = |t: NoteTransfer| (t.received_bytes, t.total_bytes);
+        assert_eq!(r.transfer().map(sizes), Some((0, 12)));
+        r.on_frame(chunk(0, 0, &[0; 4]), 1);
+        assert_eq!(r.transfer().map(sizes), Some((4, 12)));
+        r.on_attachment_hashed(NOTE, 0, sha256(&[0; 4]), 2);
+        assert_eq!(
+            r.transfer().map(sizes),
+            Some((4, 12)),
+            "the next file starts"
+        );
+        r.on_frame(chunk(1, 0, &[0; 4]), 3);
+        assert_eq!(r.transfer().map(sizes), Some((8, 12)));
+        r.on_frame(chunk(1, 4, &[0; 4]), 4);
+        r.on_attachment_hashed(NOTE, 1, sha256(&[0; 8]), 5);
+        assert_eq!(r.transfer(), None);
+    }
+
+    #[test]
+    fn only_a_complete_note_can_be_forgotten() {
+        let mut r = receiver(profile(4, 1, None));
+        let data = [7; 4];
+        let m = manifest(&[(AttachmentKind::Photo, &data)]);
+        assert!(r.forget(&NOTE).is_none(), "unknown");
+        offer(&mut r, &m, 0);
+        assert!(r.forget(&NOTE).is_none(), "still arriving");
+        assert!(r.note(&NOTE).is_some());
+
+        r.on_frame(chunk(0, 0, &data), 1);
+        r.on_attachment_hashed(NOTE, 0, sha256(&data), 2);
+        let e = r.forget(&NOTE).unwrap();
+        assert!(matches!(
+            e[..],
+            [ReceiverEffect::DeleteLocal { note_id: NOTE }]
+        ));
+        assert!(r.note(&NOTE).is_none());
+
+        // A lost ack: the Glass offers it again and it is simply a new note, not an error.
+        let e = offer(&mut r, &m, 3);
+        assert!(matches!(status(&e), Some(NoteOfferStatus::Accepted { .. })));
+    }
+
+    #[test]
+    fn a_result_for_a_forgotten_note_is_dropped() {
+        let mut r = receiver(profile(4, 1, None));
+        let data = [7; 4];
+        let m = manifest(&[(AttachmentKind::VoiceRecording, &data)]);
+        complete_one(&mut r, &m, &data);
+        r.on_frame(
+            Frame::NoteTranscriptRequest(NoteTranscriptRequest {
+                note_id: NOTE,
+                attachment_id: 0,
+            }),
+            3,
+        );
+        assert!(r.is_transcribing(&NOTE));
+        r.forget(&NOTE).unwrap();
+        assert!(r.on_transcribed(NOTE, 0, Ok("parole".into())).is_empty());
+        assert!(!r.is_transcribing(&NOTE));
+    }
+
+    #[test]
+    fn a_recording_is_transcribed_again_only_without_text() {
+        let mut r = receiver(profile(4, 1, None));
+        let data = [7; 4];
+        let m = manifest(&[(AttachmentKind::VoiceRecording, &data)]);
+        assert!(r.retranscribe(&NOTE).is_empty(), "unknown");
+        offer(&mut r, &m, 0);
+        assert!(r.retranscribe(&NOTE).is_empty(), "the audio is not here");
+        r.on_frame(chunk(0, 0, &data), 1);
+        r.on_attachment_hashed(NOTE, 0, sha256(&data), 2);
+
+        // The Glass never asked, say: asking from here works too, once.
+        let transcribes = |e: &[ReceiverEffect]| {
+            e.iter()
+                .filter(|e| matches!(e, ReceiverEffect::Transcribe { .. }))
+                .count()
+        };
+        assert_eq!(transcribes(&r.retranscribe(&NOTE)), 1);
+        assert_eq!(transcribes(&r.retranscribe(&NOTE)), 0, "already running");
+
+        // No engine, and then one. The Glass hears the new result, unacknowledged.
+        r.on_transcribed(NOTE, 0, Err(SpeechError::Unavailable));
+        assert_eq!(transcribes(&r.retranscribe(&NOTE)), 1);
+        let e = r.on_transcribed(NOTE, 0, Ok("parole".into()));
+        assert!(e.iter().any(|e| matches!(
+            e,
+            ReceiverEffect::Send(Frame::NoteTranscript(t)) if t.text == "parole"
+        )));
+        let held = &r.note(&NOTE).unwrap().transcripts[&0];
+        assert_eq!(held.result.as_ref().unwrap().text, "parole");
+        assert!(!held.acked);
+        assert!(r.retranscribe(&NOTE).is_empty(), "it has text now");
     }
 
     #[test]

@@ -27,7 +27,7 @@ NoteTranscriptAck              ->
 NoteSyncStatus{pending...}     ->        (when the link comes up and on any change)
 ```
 
-TTS is pulled the same way: `NoteTtsRequest` → `NoteTtsReady` → `NoteTtsChunkRequest` / `NoteTtsChunk` → `NoteTtsRelease`. It is not queued: without a link there is no speech, and the Glass has no engine to fall back on.
+TTS is pulled the same way: `NoteTtsRequest` → `NoteTtsReady` → `NoteTtsChunkRequest` / `NoteTtsChunk` → `NoteTtsRelease`. It is not queued: without a link there is no speech, and the Glass has no engine to fall back on. The phone can also read a note aloud to its owner by itself, with no link and no frames: see `companion-mobile.md`.
 
 The live `Dictation*` frames are untouched. They remain a scaffold for reply dictation, a separate flow.
 
@@ -43,6 +43,7 @@ The live `Dictation*` frames are untouched. They remain a scaffold for reply dic
 | Duplicate offer | Changes nothing. A completed note gets its acknowledgements again and no bytes move. |
 | Same id, different manifest | `Rejected{ManifestConflict}`. Nothing is overwritten. |
 | Lost acknowledgement | The Glass repeats its offer on a timer and on the next link. |
+| The owner deletes a note on the phone | Only once it is all here. If the Glass never got the acknowledgement, it offers the note again and the note returns. |
 
 **Nothing on the Glass is deleted until verified.** The one path to a delete requires a verified ack for every attachment whose digest matches the Glass's own manifest, plus a `NoteAck` matching the manifest digest. The companion sends those only after the file is synced, renamed and recorded. Anything else is ignored. Once that holds, the default is to delete the Glass's copy (`DeletePolicy`).
 

@@ -6,41 +6,67 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 
 /** Records the microphone to a 16 kHz mono WAV file, the format of a Glass recording. */
 class VoiceRecorder(private val file: File) {
     @Volatile private var running = false
+
+    @Volatile private var failed = false
     private var thread: Thread? = null
     private var startedAt = 0L
 
-    /** The caller holds RECORD_AUDIO. */
+    /** The caller holds RECORD_AUDIO. False if the microphone cannot be had. */
     @SuppressLint("MissingPermission")
-    fun start() {
+    fun start(): Boolean {
         val minBuffer = AudioRecord.getMinBufferSize(RATE, CHANNEL, ENCODING)
+        if (minBuffer <= 0) return false
         val record = AudioRecord(MediaRecorder.AudioSource.MIC, RATE, CHANNEL, ENCODING, minBuffer * 4)
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            record.release()
+            return false
+        }
         running = true
         startedAt = System.currentTimeMillis()
         thread = Thread {
-            FileOutputStream(file).use { out ->
-                out.write(Wav.placeholder())
-                val buffer = ByteArray(minBuffer)
-                record.startRecording()
-                while (running) {
-                    val n = record.read(buffer, 0, buffer.size)
-                    if (n > 0) out.write(buffer, 0, n)
+            try {
+                FileOutputStream(file).use { out ->
+                    out.write(Wav.placeholder())
+                    val buffer = ByteArray(minBuffer)
+                    record.startRecording()
+                    var heard = false
+                    while (running) {
+                        val n = record.read(buffer, 0, buffer.size)
+                        // Below zero is an error that stays: the microphone was taken away.
+                        if (n < 0) {
+                            failed = true
+                            break
+                        }
+                        if (n > 0) {
+                            out.write(buffer, 0, n)
+                            heard = true
+                        }
+                    }
+                    if (!heard) failed = true
                 }
+                if (!failed) Wav.finish(file, RATE)
+            } catch (_: IOException) {
+                // Most likely a full disk.
+                failed = true
+            } finally {
                 record.stop()
                 record.release()
             }
-            Wav.finish(file, RATE)
         }.apply { start() }
+        return true
     }
 
-    /** Stops and returns the length in milliseconds. */
-    fun stop(): Int {
+    /** Stops and returns the length in milliseconds, or null if the recording failed. */
+    fun stop(): Int? {
         running = false
         thread?.join()
-        return (System.currentTimeMillis() - startedAt).toInt()
+        thread = null
+        return if (failed) null else (System.currentTimeMillis() - startedAt).toInt()
     }
 
     private companion object {

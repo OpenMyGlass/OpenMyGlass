@@ -266,6 +266,16 @@ impl NoteSender {
         out
     }
 
+    /// The owner deleted a note from this queue. `None` refuses: it is unknown, or it is being
+    /// sent right now.
+    pub fn forget(&mut self, note_id: &NoteId) -> Option<Vec<SenderEffect>> {
+        if self.active.as_ref().is_some_and(|a| a.note_id == *note_id) {
+            return None;
+        }
+        self.notes.remove(note_id)?;
+        Some(vec![SenderEffect::DeleteLocal { note_id: *note_id }])
+    }
+
     /// A record in the queue.
     pub fn note(&self, id: &NoteId) -> Option<&OutgoingNote> {
         self.notes.get(id).map(|e| &e.record)
@@ -989,6 +999,21 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, SenderEffect::DeleteLocal { .. }))
             .count()
+    }
+
+    #[test]
+    fn a_note_can_be_forgotten_unless_it_is_being_sent() {
+        let sizes = [(AttachmentKind::Photo, 10)];
+        let mut s = sender(
+            DeletePolicy::default(),
+            vec![record(1, 0, &sizes), record(2, 1, &sizes)],
+        );
+        assert!(s.forget(&NoteId([9; 16])).is_none(), "unknown");
+        s.link_up(LinkProfile::fast(), 0);
+        assert!(s.forget(&NoteId([1; 16])).is_none(), "on offer");
+        assert_eq!(deletes(&s.forget(&NoteId([2; 16])).unwrap()), 1);
+        assert!(s.note(&NoteId([2; 16])).is_none());
+        assert!(s.note(&NoteId([1; 16])).is_some());
     }
 
     fn ack(note: u8, att: u16, sha: u8) -> Frame {
