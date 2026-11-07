@@ -54,6 +54,7 @@ permissively licensed and compatible with GPL-3.0. Exact versions are pinned in
 | [base64](https://github.com/marshallpierce/rust-base64) | MIT OR Apache-2.0 | Key/nonce/bootstrap encoding |
 | [sha2](https://github.com/RustCrypto/hashes) | MIT OR Apache-2.0 | SHA-256 for note sync and app packages (already linked through ed25519-dalek) |
 | [semver](https://github.com/dtolnay/semver) | MIT OR Apache-2.0 | App versions in repository manifests |
+| [libc](https://github.com/rust-lang/libc) | MIT OR Apache-2.0 | File locks for the Applications stores (Unix only) |
 | [qrcode](https://github.com/kennytm/qrcode-rust) | MIT OR Apache-2.0 | Wi-Fi bootstrap QR rendering |
 | [clap](https://github.com/clap-rs/clap) | MIT OR Apache-2.0 | CLI argument parsing |
 | [tracing](https://github.com/tokio-rs/tracing) / tracing-subscriber | MIT | Logging |

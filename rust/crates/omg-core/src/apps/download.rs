@@ -10,9 +10,9 @@
 //! A platform that cannot block a thread on a stream can drive [`DownloadVerifier`] itself and
 //! get the same guarantees: it is the whole check, without the loop.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ use semver::Version;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::fsutil::{create_exclusive, random_part, sync_parent, FileLock};
 use super::manifest::{
     release_statement, to_hex, Manifest, ManifestError, Sha256Digest, MAX_MANIFEST_BYTES,
     MAX_PACKAGE_BYTES,
@@ -133,8 +134,9 @@ pub enum DownloadError {
     /// A redirect pointed somewhere that is not allowed.
     #[error("refused redirect: {0}")]
     BadRedirect(UrlError),
-    /// A manifest redirected to another origin. It would be shown under a host it did not come
-    /// from, so the owner has to add the final address instead.
+    /// A manifest redirected outside its repository: another origin, or on GitHub another
+    /// repository. It would be shown under a label it did not come from, so the owner has to add
+    /// the final address instead.
     #[error("the manifest redirects to another site: add that address instead")]
     CrossOriginManifest,
     /// More than [`MAX_REDIRECTS`] hops.
@@ -165,7 +167,7 @@ fn open(
     fetcher: &dyn Fetcher,
     url: &HttpsUrl,
     control: &FetchControl,
-    same_origin_only: bool,
+    manifest_of: Option<&RepositorySource>,
 ) -> Result<Box<dyn Read + Send>, DownloadError> {
     let mut current = url.clone();
     for _ in 0..=MAX_REDIRECTS {
@@ -177,7 +179,7 @@ fn open(
                 current = current
                     .redirect(&location)
                     .map_err(DownloadError::BadRedirect)?;
-                if same_origin_only && current.origin() != url.origin() {
+                if manifest_of.is_some_and(|source| !source.covers(&current)) {
                     return Err(DownloadError::CrossOriginManifest);
                 }
             }
@@ -196,13 +198,13 @@ fn read_retrying(body: &mut dyn Read, buffer: &mut [u8]) -> io::Result<usize> {
 }
 
 /// Reads and checks a repository's manifest. No more than [`MAX_MANIFEST_BYTES`] are ever read,
-/// and only from the origin the repository shows.
+/// and only from where the repository's label says: see [`RepositorySource::covers`].
 pub fn fetch_manifest(
     fetcher: &dyn Fetcher,
     source: &RepositorySource,
     control: &FetchControl,
 ) -> Result<Manifest, DownloadError> {
-    let mut body = open(fetcher, source.manifest_url(), control, true)?;
+    let mut body = open(fetcher, source.manifest_url(), control, Some(source))?;
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 8 * 1024];
     loop {
@@ -359,7 +361,7 @@ fn transfer(
     sink: &mut dyn PackageSink,
     control: &FetchControl,
 ) -> Result<VerifiedPackage, DownloadError> {
-    let mut body = open(fetcher, &ticket.release.url, control, false)?;
+    let mut body = open(fetcher, &ticket.release.url, control, None)?;
     let mut verifier = DownloadVerifier::new(ticket);
     let mut buffer = vec![0u8; READ_CHUNK];
     loop {
@@ -377,18 +379,28 @@ fn transfer(
 }
 
 /// A directory of packages named only by their verified hash, so nothing from a manifest ever
-/// becomes part of a path.
-#[derive(Debug, Clone)]
+/// becomes part of a path. One `PackageStore` per directory at a time: it holds a lock on the
+/// directory for its whole life, so clearing what a crash left cannot touch a running download.
 pub struct PackageStore {
     dir: PathBuf,
+    _lock: FileLock,
 }
 
 impl PackageStore {
-    /// Uses `dir`, private to the app, creating it if needed.
+    /// Uses `dir`, private to the app, creating it if needed. Fails with
+    /// [`io::ErrorKind::WouldBlock`] if another `PackageStore` has it open. Removes the unfinished
+    /// files a crash left, which is safe because no other store can be writing here.
     pub fn open(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
+        let lock = FileLock::acquire(&dir.join(".lock"), false)?;
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|e| e == "part") {
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(Self { dir, _lock: lock })
     }
 
     /// Where a verified package with this hash lives. It exists only after a commit.
@@ -401,9 +413,7 @@ impl PackageStore {
     pub fn begin(&self, sha256: &Sha256Digest) -> io::Result<FileSink> {
         let hash = to_hex(sha256);
         for _ in 0..8 {
-            let mut unique = [0u8; 8];
-            getrandom::getrandom(&mut unique).map_err(|e| io::Error::other(e.to_string()))?;
-            let part = self.dir.join(format!("{hash}.{}.part", to_hex(&unique)));
+            let part = self.dir.join(format!("{hash}.{}.part", random_part()?));
             match create_exclusive(&part) {
                 Ok(file) => {
                     return Ok(FileSink {
@@ -420,17 +430,6 @@ impl PackageStore {
         Err(io::Error::other("no unique temporary name"))
     }
 
-    /// Removes unfinished files left by a crash. Call at startup, before any download.
-    pub fn remove_stale_parts(&self) -> io::Result<()> {
-        for entry in fs::read_dir(&self.dir)? {
-            let path = entry?.path();
-            if path.extension().is_some_and(|e| e == "part") {
-                fs::remove_file(path)?;
-            }
-        }
-        Ok(())
-    }
-
     /// Removes a package, for instance after the Glass confirmed the install.
     pub fn remove(&self, sha256: &Sha256Digest) -> io::Result<()> {
         match fs::remove_file(self.path_of(sha256)) {
@@ -438,17 +437,6 @@ impl PackageStore {
             other => other,
         }
     }
-}
-
-fn create_exclusive(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
 }
 
 /// A [`PackageSink`] on a file of its own: a unique `.part` until commit, which hashes the file
@@ -497,8 +485,10 @@ impl PackageSink for FileSink {
             ));
         }
         file.sync_all()?;
-        self.file = None;
+        // Until the rename succeeds the sink still owns the `.part`, so a failure here leaves
+        // nothing behind once the sink is aborted or dropped.
         fs::rename(&self.part, &self.target)?;
+        self.file = None;
         sync_parent(&self.target)
     }
 
@@ -514,17 +504,4 @@ impl Drop for FileSink {
             self.abort();
         }
     }
-}
-
-#[cfg(unix)]
-pub(super) fn sync_parent(path: &Path) -> io::Result<()> {
-    match path.parent() {
-        Some(parent) => File::open(parent)?.sync_all(),
-        None => Ok(()),
-    }
-}
-
-#[cfg(not(unix))]
-pub(super) fn sync_parent(_path: &Path) -> io::Result<()> {
-    Ok(())
 }

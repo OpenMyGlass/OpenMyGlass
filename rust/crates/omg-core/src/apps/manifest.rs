@@ -151,14 +151,26 @@ pub enum ManifestError {
     BadStateSignature(usize),
 }
 
-/// A checked repository manifest.
+/// A checked repository manifest. Only [`Manifest::parse`] makes one, so every app and release in
+/// it has been verified: nothing outside this module can construct or edit them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     /// The repository's display name. **Not signed**: the host can write anything here, so the UI
     /// shows it as unverified, below the repository's label.
-    pub name: String,
+    pub(super) name: String,
     /// Its apps, in file order.
-    pub apps: Vec<AppEntry>,
+    pub(super) apps: Vec<AppEntry>,
+}
+
+/// What an author signs for one app: see [`Manifest::statements_to_sign`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppToSign {
+    /// The app id.
+    pub id: String,
+    /// One statement per release, in file order, for its `signature`.
+    pub releases: Vec<Vec<u8>>,
+    /// The statement for `state_signature`.
+    pub state: Vec<u8>,
 }
 
 /// One app of a repository, with everything in it verified against `publisher_key`. That only says
@@ -166,31 +178,87 @@ pub struct Manifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppEntry {
     /// Reverse-DNS id, also a safe path component on the Glass.
-    pub id: String,
+    pub(super) id: String,
     /// The manifest URL this was read from and signed for.
-    pub repository: HttpsUrl,
+    pub(super) repository: HttpsUrl,
     /// Display name, signed. Whoever holds the key chooses it, so the UI still shows the
     /// repository's label beside it.
-    pub name: String,
+    pub(super) name: String,
     /// One line of description, signed.
-    pub summary: String,
+    pub(super) summary: String,
     /// Licence, as the author states it, signed.
-    pub license: String,
+    pub(super) license: String,
     /// The author's page, if any, signed.
-    pub homepage: Option<HttpsUrl>,
+    pub(super) homepage: Option<HttpsUrl>,
     /// The ed25519 key that signs this app.
-    pub publisher_key: [u8; 32],
+    pub(super) publisher_key: [u8; 32],
     /// Goes up with every state the author publishes.
-    pub sequence: u64,
+    pub(super) sequence: u64,
     /// Versions the author withdrew, sorted.
-    pub withdrawn: Vec<Version>,
+    pub(super) withdrawn: Vec<Version>,
     /// The signature over [`app_state_statement`].
-    pub state_signature: [u8; 64],
+    pub(super) state_signature: [u8; 64],
     /// Releases, in file order.
-    pub releases: Vec<Release>,
+    pub(super) releases: Vec<Release>,
 }
 
 impl AppEntry {
+    /// Reverse-DNS id, also a safe path component on the Glass.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The manifest URL this was read from and signed for.
+    pub fn repository(&self) -> &HttpsUrl {
+        &self.repository
+    }
+
+    /// Display name, signed. Whoever holds the key chooses it, so the UI still shows the
+    /// repository's label beside it.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// One line of description, signed.
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Licence, as the author states it, signed.
+    pub fn license(&self) -> &str {
+        &self.license
+    }
+
+    /// The author's page, if any, signed.
+    pub fn homepage(&self) -> Option<&HttpsUrl> {
+        self.homepage.as_ref()
+    }
+
+    /// The ed25519 key that signs this app.
+    pub fn publisher_key(&self) -> &[u8; 32] {
+        &self.publisher_key
+    }
+
+    /// Goes up with every state the author publishes.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Versions the author withdrew, sorted.
+    pub fn withdrawn(&self) -> &[Version] {
+        &self.withdrawn
+    }
+
+    /// The signature over [`app_state_statement`].
+    pub fn state_signature(&self) -> &[u8; 64] {
+        &self.state_signature
+    }
+
+    /// Releases, in file order.
+    pub fn releases(&self) -> &[Release] {
+        &self.releases
+    }
+
     /// Whether the author withdrew this version in this state.
     pub fn is_withdrawn(&self, version: &Version) -> bool {
         self.withdrawn.contains(version)
@@ -206,22 +274,65 @@ impl AppEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
     /// The version. Never has build metadata, so equal versions have one meaning.
-    pub version: Version,
+    pub(super) version: Version,
     /// What the package runs on. PROVISIONAL: depends on the SDK decision.
-    pub target: String,
+    pub(super) target: String,
     /// Lowest Glass app API it needs. PROVISIONAL: depends on the SDK.
-    pub min_api: u32,
+    pub(super) min_api: u32,
     /// Where to download the package. **The only unsigned field of an app**, so a package can move
     /// host. A wrong one can make a download fail, not change what is installed.
-    pub url: HttpsUrl,
+    pub(super) url: HttpsUrl,
     /// Exact size of the package.
-    pub size: u64,
+    pub(super) size: u64,
     /// SHA-256 of the package.
-    pub sha256: Sha256Digest,
+    pub(super) sha256: Sha256Digest,
     /// What the app asks for, sorted. Syntax is checked here; see [`super::select`] for meaning.
-    pub permissions: Vec<String>,
+    pub(super) permissions: Vec<String>,
     /// The publisher's signature over [`release_statement`], kept for the Glass to check again.
-    pub signature: [u8; 64],
+    pub(super) signature: [u8; 64],
+}
+
+impl Release {
+    /// The version. Never has build metadata, so equal versions have one meaning.
+    pub fn version(&self) -> &Version {
+        &self.version
+    }
+
+    /// What the package runs on. PROVISIONAL: depends on the SDK decision.
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    /// Lowest Glass app API it needs. PROVISIONAL: depends on the SDK.
+    pub fn min_api(&self) -> u32 {
+        self.min_api
+    }
+
+    /// Where to download the package. **The only unsigned field of an app**, so a package can move
+    /// host. A wrong one can make a download fail, not change what is installed.
+    pub fn url(&self) -> &HttpsUrl {
+        &self.url
+    }
+
+    /// Exact size of the package.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// SHA-256 of the package.
+    pub fn sha256(&self) -> &Sha256Digest {
+        &self.sha256
+    }
+
+    /// What the app asks for, sorted. Syntax is checked here; see [`super::select`] for meaning.
+    pub fn permissions(&self) -> &[String] {
+        &self.permissions
+    }
+
+    /// The publisher's signature over [`release_statement`].
+    pub fn signature(&self) -> &[u8; 64] {
+        &self.signature
+    }
 }
 
 #[derive(Deserialize)]
@@ -270,10 +381,41 @@ struct SchemaOnly {
 }
 
 impl Manifest {
+    /// For the authors' signing tool: checks everything except the signatures, which may be
+    /// placeholders, and returns what has to be signed for each app, in file order. Nothing it
+    /// returns is verified, so it must never be used to install.
+    pub fn statements_to_sign(
+        bytes: &[u8],
+        source: &RepositorySource,
+    ) -> Result<Vec<AppToSign>, ManifestError> {
+        let manifest = Self::parse_inner(bytes, source, false)?;
+        Ok(manifest
+            .apps
+            .iter()
+            .map(|app| AppToSign {
+                id: app.id.clone(),
+                releases: app
+                    .releases
+                    .iter()
+                    .map(|r| release_statement(&app.id, r))
+                    .collect(),
+                state: app_state_statement(app),
+            })
+            .collect())
+    }
+
     /// Parses and checks a manifest read from `source`. An app's state must be signed for that
     /// repository, so a copy of someone's manifest on another site is refused. Never panics,
     /// whatever the input.
     pub fn parse(bytes: &[u8], source: &RepositorySource) -> Result<Self, ManifestError> {
+        Self::parse_inner(bytes, source, true)
+    }
+
+    fn parse_inner(
+        bytes: &[u8],
+        source: &RepositorySource,
+        verify: bool,
+    ) -> Result<Self, ManifestError> {
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(ManifestError::TooLarge);
         }
@@ -299,7 +441,7 @@ impl Manifest {
         let mut seen = HashSet::new();
         let mut apps = Vec::with_capacity(raw.apps.len());
         for (index, app) in raw.apps.into_iter().enumerate() {
-            let app = check_app(index, app, source.manifest_url())?;
+            let app = check_app(index, app, source.manifest_url(), verify)?;
             if !seen.insert(app.id.clone()) {
                 return Err(ManifestError::DuplicateApp(index));
             }
@@ -311,13 +453,29 @@ impl Manifest {
         })
     }
 
+    /// The repository's display name. **Not signed**: the host can write anything here, so the UI
+    /// shows it as unverified, below the repository's label.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Its apps, in file order.
+    pub fn apps(&self) -> &[AppEntry] {
+        &self.apps
+    }
+
     /// The app with this id, if the repository has it.
     pub fn app(&self, id: &str) -> Option<&AppEntry> {
         self.apps.iter().find(|a| a.id == id)
     }
 }
 
-fn check_app(index: usize, raw: RawApp, repository: &HttpsUrl) -> Result<AppEntry, ManifestError> {
+fn check_app(
+    index: usize,
+    raw: RawApp,
+    repository: &HttpsUrl,
+    verify: bool,
+) -> Result<AppEntry, ManifestError> {
     let bad = |field| ManifestError::BadAppField { app: index, field };
     if !good_app_id(&raw.id) {
         return Err(bad("id"));
@@ -384,11 +542,13 @@ fn check_app(index: usize, raw: RawApp, repository: &HttpsUrl) -> Result<AppEntr
         }
         // verify_strict: no malleable signatures, no small-order values.
         let signature = Signature::from_bytes(&release.signature);
-        key.verify_strict(&release_statement(&raw.id, &release), &signature)
-            .map_err(|_| ManifestError::BadSignature {
-                app: index,
-                release: position,
-            })?;
+        if verify {
+            key.verify_strict(&release_statement(&raw.id, &release), &signature)
+                .map_err(|_| ManifestError::BadSignature {
+                    app: index,
+                    release: position,
+                })?;
+        }
         releases.push(release);
     }
     let app = AppEntry {
@@ -404,11 +564,13 @@ fn check_app(index: usize, raw: RawApp, repository: &HttpsUrl) -> Result<AppEntr
         state_signature,
         releases,
     };
-    key.verify_strict(
-        &app_state_statement(&app),
-        &Signature::from_bytes(&app.state_signature),
-    )
-    .map_err(|_| ManifestError::BadStateSignature(index))?;
+    if verify {
+        key.verify_strict(
+            &app_state_statement(&app),
+            &Signature::from_bytes(&app.state_signature),
+        )
+        .map_err(|_| ManifestError::BadStateSignature(index))?;
+    }
     Ok(app)
 }
 

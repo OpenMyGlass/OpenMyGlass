@@ -9,7 +9,7 @@
 use semver::Version;
 
 use super::manifest::{AppEntry, Release, Sha256Digest};
-use super::trust::{TrustProblem, TrustRecord};
+use super::trust::{TrustProblem, TrustRecord, TrustStore};
 
 /// PROVISIONAL, depends on the SDK and on `docs/plans/2026-11-07-companion-applications.md` §7.
 /// A release asking for anything else is not offered: nobody could say what it would be granted.
@@ -248,8 +248,10 @@ pub enum InstallRefusal {
     InstalledWithoutRecord,
 }
 
-/// Permission to download one release: proof that the rules in this module passed. Only
-/// [`plan_install`] makes one, and [`super::fetch_package`] needs one.
+/// Permission to download one release: proof that the rules in this module passed against a
+/// [`TrustStore`]. Only [`plan_install`] makes one, and [`super::fetch_package`] and
+/// [`TrustStore::record_install`] need one. Since an [`AppEntry`] only comes from
+/// [`super::Manifest::parse`], a ticket is always for a verified release.
 #[derive(Debug, Clone)]
 pub struct InstallTicket<'a> {
     pub(super) app: &'a AppEntry,
@@ -282,16 +284,18 @@ impl<'a> InstallTicket<'a> {
     }
 }
 
-/// Decides whether an install or update of `app` may start. `trust` is what the
-/// [`super::TrustStore`] holds for this id, and survives an uninstall, so a reinstall meets the
-/// same key, the same repository, the same version floor and the same withdrawn versions.
+/// Decides whether an install or update of `app` may start. The record comes from `store`, never
+/// from the caller, and survives an uninstall, so a reinstall meets the same key, the same
+/// repository, the same version floor and the same withdrawn versions. The store re-applies the
+/// release rules when the install is recorded, in case its memory moved on meanwhile.
 pub fn plan_install<'a>(
     app: &'a AppEntry,
-    trust: Option<&TrustRecord>,
+    store: &TrustStore,
     installed: Option<&InstalledApp>,
     profile: &GlassProfile,
     options: SelectOptions,
 ) -> Result<InstallTicket<'a>, InstallRefusal> {
+    let trust = store.get(&app.id);
     match (trust, installed) {
         (None, Some(_)) => return Err(InstallRefusal::InstalledWithoutRecord),
         (Some(trust), Some(installed)) => {

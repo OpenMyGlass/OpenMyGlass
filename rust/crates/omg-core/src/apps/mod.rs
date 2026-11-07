@@ -16,6 +16,7 @@
 //! in `docs/plans/2026-11-07-companion-applications.md`.
 
 pub mod download;
+mod fsutil;
 pub mod manifest;
 pub mod select;
 pub mod source;
@@ -27,12 +28,12 @@ pub use download::{
     Fetcher, FileSink, PackageSink, PackageStore, VerifiedPackage,
 };
 pub use manifest::{
-    app_state_statement, release_statement, AppEntry, Manifest, ManifestError, Release,
+    app_state_statement, release_statement, AppEntry, AppToSign, Manifest, ManifestError, Release,
 };
 pub use select::{
     check_update, plan_install, select_release, GlassProfile, InstallRefusal, InstallTicket,
     InstalledApp, SelectOptions, Selection, SkipReason, UpdateStatus, KNOWN_PERMISSIONS,
 };
 pub use source::{RepositorySource, SourceError};
-pub use trust::{TrustError, TrustProblem, TrustRecord, TrustStore};
+pub use trust::{Observed, TrustError, TrustProblem, TrustRecord, TrustStore};
 pub use url::{HttpsUrl, UrlError};

@@ -7,9 +7,13 @@
 //!
 //! Memory is also the only defence against a host serving an older signed state, and only for
 //! what this companion has already seen. A companion that never saw the newer state cannot tell.
+//!
+//! Every change takes an exclusive lock, reads the file again, applies the change to that, writes
+//! a new file and renames it into place, and only then updates what this instance holds. So two
+//! instances on one file do not lose each other's changes, and a failed write changes nothing.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -17,8 +21,9 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::download::{sync_parent, VerifiedPackage};
-use super::manifest::{decode_hex, parse_version, to_hex, AppEntry, Sha256Digest};
+use super::download::VerifiedPackage;
+use super::fsutil::{create_exclusive, random_part, sync_parent, FileLock};
+use super::manifest::{decode_hex, parse_version, to_hex, AppEntry, Release, Sha256Digest};
 use super::select::InstallTicket;
 use super::url::HttpsUrl;
 
@@ -66,12 +71,7 @@ pub struct TrustRecord {
 impl TrustRecord {
     /// Compares `app` with this record. Does not change anything.
     pub fn check(&self, app: &AppEntry) -> Result<(), TrustProblem> {
-        if self.id != app.id || self.repository != app.repository {
-            return Err(TrustProblem::OtherSource);
-        }
-        if self.publisher_key != app.publisher_key {
-            return Err(TrustProblem::PublisherChanged);
-        }
+        self.check_source(app)?;
         if app.sequence < self.sequence {
             return Err(TrustProblem::StateRolledBack);
         }
@@ -90,9 +90,42 @@ impl TrustRecord {
         Ok(())
     }
 
+    fn check_source(&self, app: &AppEntry) -> Result<(), TrustProblem> {
+        if self.id != app.id || self.repository != app.repository {
+            return Err(TrustProblem::OtherSource);
+        }
+        if self.publisher_key != app.publisher_key {
+            return Err(TrustProblem::PublisherChanged);
+        }
+        Ok(())
+    }
+
+    /// The rules for recording one verified release, which do not need `app` to be the newest
+    /// state: memory may have moved on while it downloaded.
+    fn check_release(&self, app: &AppEntry, release: &Release) -> Result<(), TrustError> {
+        self.check_source(app)?;
+        if app.sequence == self.sequence && app.state_digest() != self.state_digest {
+            return Err(TrustProblem::StateForked.into());
+        }
+        if self.withdrawn.contains(&release.version) {
+            return Err(TrustError::Withdrawn);
+        }
+        if let Some((version, sha256)) = &self.highest {
+            if release.version < *version {
+                return Err(TrustError::BelowFloor);
+            }
+            if release.version == *version && release.sha256 != *sha256 {
+                return Err(TrustProblem::ReleaseChanged.into());
+            }
+        }
+        Ok(())
+    }
+
     fn absorb(&mut self, app: &AppEntry) {
-        self.sequence = app.sequence;
-        self.state_digest = app.state_digest();
+        if app.sequence > self.sequence {
+            self.sequence = app.sequence;
+            self.state_digest = app.state_digest();
+        }
         for version in &app.withdrawn {
             if !self.withdrawn.contains(version) {
                 self.withdrawn.push(version.clone());
@@ -102,10 +135,25 @@ impl TrustRecord {
     }
 }
 
-/// Why the memory cannot be used.
+/// What [`TrustStore::observe`] found for one app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Observed {
+    /// Nothing is remembered about this id here.
+    Unknown,
+    /// Known, and this state was already seen.
+    Unchanged,
+    /// Known, and a newer state is now remembered.
+    Updated,
+    /// Known, and the manifest disagrees with the record. For [`TrustProblem::OtherSource`] this
+    /// is usually another repository listing the same id, which is not news; the rest are
+    /// warnings for the UI.
+    Mismatch(TrustProblem),
+}
+
+/// Why the memory cannot be used, or an install cannot be recorded.
 #[derive(Debug, Error)]
 pub enum TrustError {
-    /// The file could not be read or written.
+    /// The file could not be read or written. Nothing was changed.
     #[error("i/o: {0}")]
     Io(#[from] io::Error),
     /// The file exists and is damaged. It is never treated as empty: that would drop every pin.
@@ -117,9 +165,15 @@ pub enum TrustError {
     /// The package is not the one the ticket is for.
     #[error("the package does not match the install ticket")]
     PackageMismatch,
+    /// The release was withdrawn after the install was planned.
+    #[error("the release was withdrawn")]
+    Withdrawn,
+    /// A higher version was installed after the install was planned.
+    #[error("a higher version is already installed")]
+    BelowFloor,
 }
 
-/// The records, in one JSON file written atomically.
+/// The records, in one JSON file, with a lock file beside it.
 #[derive(Debug)]
 pub struct TrustStore {
     path: PathBuf,
@@ -127,38 +181,53 @@ pub struct TrustStore {
 }
 
 impl TrustStore {
-    /// Reads `path`, private to the app. A missing file is an empty memory, a damaged one an error.
+    /// Reads `path`, which should be in the app's private storage. A missing file is an empty
+    /// memory, a damaged one an error.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, TrustError> {
         let path = path.into();
-        let records = match fs::read(&path) {
-            Ok(bytes) => decode(&bytes).ok_or(TrustError::Corrupt)?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(e) => return Err(e.into()),
-        };
+        let records = read_records(&path)?;
         Ok(Self { path, records })
     }
 
-    /// What is remembered about this id. Pass it to [`super::plan_install`].
+    /// What this instance last read about this id. [`super::plan_install`] uses it, and
+    /// [`record_install`](Self::record_install) checks again against the file.
     pub fn get(&self, id: &str) -> Option<&TrustRecord> {
         self.records.get(id)
     }
 
-    /// Takes in a freshly read app, so its newest state and withdrawals are remembered even if
-    /// nothing is installed from it. Call for every known app after every manifest read. An
-    /// unknown id is ignored: an app is only remembered once the owner installs it.
-    pub fn observe(&mut self, app: &AppEntry) -> Result<(), TrustError> {
-        let Some(record) = self.records.get_mut(&app.id) else {
-            return Ok(());
-        };
-        record.check(app)?;
-        if record.sequence != app.sequence {
-            record.absorb(app);
-            self.save()?;
-        }
+    /// Reads the file again, for changes made by another instance.
+    pub fn reload(&mut self) -> Result<(), TrustError> {
+        self.records = read_records(&self.path)?;
         Ok(())
     }
 
-    /// Remembers a finished install, durably. Call before telling the owner it is done.
+    /// Takes in a freshly read app, so its newest state and withdrawals are remembered even if
+    /// nothing is installed from it. Call for every app after every manifest read. Only I/O is an
+    /// error: what the app says is reported, so one odd app does not stop a refresh.
+    pub fn observe(&mut self, app: &AppEntry) -> Result<Observed, TrustError> {
+        let mut observed = Observed::Unknown;
+        self.change(|records| {
+            let Some(record) = records.get_mut(&app.id) else {
+                return Ok(false);
+            };
+            if let Err(problem) = record.check(app) {
+                observed = Observed::Mismatch(problem);
+                return Ok(false);
+            }
+            if app.sequence == record.sequence {
+                observed = Observed::Unchanged;
+                return Ok(false);
+            }
+            record.absorb(app);
+            observed = Observed::Updated;
+            Ok(true)
+        })?;
+        Ok(observed)
+    }
+
+    /// Remembers a finished install, durably. Call before telling the owner it is done. Checks
+    /// the release again against the file as it is now: the key, the repository, the hash, the
+    /// withdrawals and the floor. It does not need the ticket's state to be the newest one.
     pub fn record_install(
         &mut self,
         ticket: &InstallTicket<'_>,
@@ -168,18 +237,19 @@ impl TrustStore {
         if package.app_id() != app.id
             || *package.version() != release.version
             || *package.sha256() != release.sha256
+            || package.publisher_key() != &app.publisher_key
         {
             return Err(TrustError::PackageMismatch);
         }
-        match self.records.get_mut(&app.id) {
-            Some(record) => {
-                record.check(app)?;
-                record.absorb(app);
-            }
-            None => {
-                self.records.insert(
-                    app.id.clone(),
-                    TrustRecord {
+        self.change(|records| {
+            let record = match records.get_mut(&app.id) {
+                Some(record) => {
+                    record.check_release(app, release)?;
+                    record.absorb(app);
+                    record
+                }
+                None => {
+                    let record = TrustRecord {
                         id: app.id.clone(),
                         publisher_key: app.publisher_key,
                         repository: app.repository.clone(),
@@ -187,11 +257,11 @@ impl TrustStore {
                         state_digest: app.state_digest(),
                         withdrawn: app.withdrawn.clone(),
                         highest: None,
-                    },
-                );
-            }
-        }
-        if let Some(record) = self.records.get_mut(&app.id) {
+                    };
+                    record.check_release(app, release)?;
+                    records.entry(app.id.clone()).or_insert(record)
+                }
+            };
             let higher = record
                 .highest
                 .as_ref()
@@ -199,8 +269,8 @@ impl TrustStore {
             if higher {
                 record.highest = Some((release.version.clone(), release.sha256));
             }
-        }
-        self.save()
+            Ok(true)
+        })
     }
 
     /// Drops everything about this id. The next install of it is a first use, under any key, from
@@ -208,29 +278,78 @@ impl TrustStore {
     /// an author's lost key or moved repository is handled, and it is also what an attacker
     /// would ask for.
     pub fn forget(&mut self, id: &str) -> Result<(), TrustError> {
-        if self.records.remove(id).is_some() {
-            self.save()?;
-        }
-        Ok(())
+        self.change(|records| Ok(records.remove(id).is_some()))
     }
 
-    fn save(&self) -> Result<(), TrustError> {
-        let bytes = encode(&self.records);
-        let temporary = temporary_path(&self.path);
-        let mut file = File::create(&temporary)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, &self.path)?;
-        sync_parent(&self.path)?;
+    /// Under the lock: reads the file, applies `edit` to that, and writes it if `edit` says it
+    /// changed something. This instance's view is updated only after a successful write.
+    fn change(
+        &mut self,
+        edit: impl FnOnce(&mut BTreeMap<String, TrustRecord>) -> Result<bool, TrustError>,
+    ) -> Result<(), TrustError> {
+        let _lock = FileLock::acquire(&sibling(&self.path, ".lock"), true)?;
+        let mut records = read_records(&self.path)?;
+        if edit(&mut records)? {
+            write_records(&self.path, &records)?;
+        }
+        self.records = records;
         Ok(())
     }
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
-    name.push(".tmp");
+    name.push(suffix);
     PathBuf::from(name)
+}
+
+fn read_records(path: &Path) -> Result<BTreeMap<String, TrustRecord>, TrustError> {
+    match fs::read(path) {
+        Ok(bytes) => decode(&bytes).ok_or(TrustError::Corrupt),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// A new file with a random name, created exclusively and readable only by this user, then
+/// renamed over the old one. Called under the lock, so leftovers of a crashed write are removed
+/// first. On POSIX the rename replaces the file in one step; the fsyncs make it durable, as far
+/// as the filesystem honours them.
+fn write_records(path: &Path, records: &BTreeMap<String, TrustRecord>) -> Result<(), TrustError> {
+    remove_leftovers(path)?;
+    let temporary = sibling(path, &format!(".{}.tmp", random_part()?));
+    let result = (|| -> io::Result<()> {
+        let mut file = create_exclusive(&temporary)?;
+        file.write_all(&encode(records))?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        sync_parent(path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    Ok(result?)
+}
+
+fn remove_leftovers(path: &Path) -> io::Result<()> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Ok(());
+    };
+    let prefix = format!("{}.", name.to_string_lossy());
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if file_name.starts_with(&prefix) && file_name.ends_with(".tmp") {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]

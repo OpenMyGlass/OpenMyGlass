@@ -113,7 +113,12 @@ The whole file is accepted or refused. A half-understood manifest is never used.
 | Hashes, keys, signatures | Lowercase hex of exact length |
 | Errors | Name a position and a field, never text from the file |
 
-The text rule is an allowlist because a denylist of invisible characters cannot be complete: a review found four more that passed one (U+2800, U+1D173, U+1BCA0, U+13430). It matches the project's four languages and the Glass's font. It refuses Cyrillic, Greek, Hebrew, Arabic and CJK names, which is decision D11. Lookalikes inside Latin remain possible (`rn` and `m`), so text is never the proof of who something is from: the UI shows the repository's label and the key fingerprint.
+The text rule is an allowlist because a denylist of invisible characters cannot be complete: a review found four more that passed one (U+2800, U+1D173, U+1BCA0, U+13430). It matches the project's four languages and the Glass's font. It refuses Cyrillic, Greek, Hebrew, Arabic and CJK names, which is decision D11. Lookalikes inside the allowed range remain possible, for the UI to handle, since text is never the proof of who something is from:
+
+- dotless `ı` for `i`, long `ſ` for `s`, `ĸ` for `k`, micro `µ` for Greek mu, `Ð` and `Đ` for `D`, and pairs such as `rn` and `m`, `l` and `I`
+- names written to look like a source: an app named "github.com/openmyglass/tools" or "Official OpenMyGlass"
+
+So the UI shows the repository's label and the key fingerprint in its own style, apart from anything the author wrote, never inside the same line.
 
 There are deliberately no icons, screenshots, HTML or Markdown in the format. Each would add an image or rich-text parser fed with untrusted bytes. If screenshots are wanted later they should be files with a hash and limits, like packages.
 
@@ -143,7 +148,10 @@ The UI shows `RepositorySource::label()`: `github.com/owner/repo`, or the origin
 
 GitHub is read as a plain file, not through its API. The API is rate limited per address without a token, and this way GitHub and a personal site share one code path.
 
-A manifest may redirect only within its origin. Otherwise an open redirect on a trusted host would show someone else's manifest under that host's name, and an attacker's own key can sign for any repository URL. `apex` to `www` counts as another origin, so the owner adds the final address. On a site shared between users, a same-origin redirect can still reach another user's manifest. The label would then be wrong, and signatures do not help when the other user signs for that URL. So a shared host is one trust domain.
+A manifest may redirect only within its repository (`RepositorySource::covers`). Otherwise an open redirect on a trusted host would show someone else's manifest under that host's name, and an attacker's own key can sign for any repository URL.
+
+- **GitHub:** every repository shares `raw.githubusercontent.com`, so the same origin would let `/alice/tool/...` redirect to `/mallory/x/...`. The rule is the same owner and repository instead, compared without case.
+- **A site:** the same origin. `apex` to `www` counts as another origin, so the owner adds the final address. On a site shared between users, a same-origin redirect can still reach another user's manifest. The label would then be wrong, and signatures do not help when the other user signs for that URL. So **a shared host is one trust domain**, and the UI should show the full manifest URL for a site.
 
 Flow, once the UI exists **[design]**:
 
@@ -155,7 +163,9 @@ Flow, once the UI exists **[design]**:
 
 `select_release` ranks: the highest version not withdrawn, not below the installed floor, that runs on this Glass (`target`, `min_api`) and asks only for known permissions. Pre-releases only if the owner opted in. File order means nothing, and it reports what it skipped and why.
 
-**`plan_install` is the only way to start an install.** `fetch_package` and `DownloadVerifier` need the `InstallTicket` it returns, so the key pin, the same-id rule, the floor and rollback checks cannot be skipped on the install path. The compiler enforces that for code using this API. It does not stop a frontend from writing its own download, and the Glass's own checks are for that (section 10). The ticket also says whether this is a first use and which permissions need the owner's yes, but showing those is the UI's job and nothing in the core can force it.
+**In the core's API, `plan_install` is the only way to start an install.** It reads the record from the `TrustStore` itself, so a caller cannot leave the memory out. `fetch_package`, `DownloadVerifier` and `TrustStore::record_install` need the `InstallTicket` it returns. `AppEntry` and `Release` have private fields and only `Manifest::parse` makes them, so a ticket is always for a verified release. `record_install` checks the release again against the file under the lock: key, repository, hash, withdrawals and floor. A ticket planned against a stale or empty store therefore cannot record a forged key or go under the floor.
+
+That is a guarantee about code that uses this API. A frontend can still write its own HTTP download and send any bytes to the Glass, which is why the Glass's own checks (section 10) are the real backstop. The ticket also says whether this is a first use and which permissions need the owner's yes, but showing those is the UI's job and nothing in the core can force it.
 
 `check_update` compares an installed app with the manifest:
 
@@ -186,7 +196,11 @@ A signature proves "same author as last time", **not** "good author". A hostile 
 
 ### What is remembered
 
-`TrustStore` keeps one record per app id in a file, written atomically: the pinned key, the repository, the highest `sequence` seen and its digest, every version seen withdrawn, and the highest version installed with its hash. **Uninstalling does not touch it.** So a reinstall meets the same key and the same floor. A missing file is an empty memory, and a damaged one is an error, never treated as empty, because that would drop every pin. The file is on the phone and only as safe as the app's private storage.
+`TrustStore` keeps one record per app id in a file: the pinned key, the repository, the highest `sequence` seen and its digest, every version seen withdrawn, and the highest version installed with its hash. **Uninstalling does not touch it.** So a reinstall meets the same key and the same floor. A missing file is an empty memory, and a damaged one is an error, never treated as empty, because that would drop every pin.
+
+Every change takes an exclusive `flock` on a lock file beside it (opened without following a symbolic link), reads the file again, applies the change to what it read, writes a new file with a random name, created with `O_EXCL` and mode 0600, fsyncs it, renames it over the old one and fsyncs the directory. Only then does the instance update its own view. So two instances on one file keep each other's changes, a failed write changes nothing in memory or on disk, and a planted link is refused. On POSIX the rename replaces the file in one step; durability is as good as the filesystem's fsync. Without `flock` (non-Unix builds) there is no lock, and only one instance may use a file.
+
+Where the file lives is the frontend's choice. It should be in the app's private storage, and the core cannot check that. Anything running as the app, or with root on the phone, can rewrite it, and then the pins mean nothing.
 
 `forget` is the only way out: the next install of that id is a first use, under any key, from any repository. It is how an author's lost key or moved repository is handled, and it is also what an attacker would ask a victim to do, so the UI must say so.
 
@@ -219,7 +233,7 @@ The core has no network. `Fetcher` is injected, and `HttpsUrl` is the only type 
 
 - Redirects come back to the core, and each hop passes the URL rules before any request. Limit: 5.
 - `DownloadVerifier` counts and hashes each chunk. The transfer stops at the first byte over the declared size, and that chunk is not stored.
-- `PackageStore` gives each download its own `<sha256>.<random>.part`, opened with `O_EXCL`, mode 0600, so concurrent downloads of one hash cannot touch each other's bytes. On success it hashes **the file itself**, fsyncs and renames to `<sha256>.omgapp`. Any failure removes the part. `remove_stale_parts` clears what a crash left, at startup. **File names come only from the hash**, so nothing from a manifest reaches a path.
+- `PackageStore` gives each download its own `<sha256>.<random>.part`, opened with `O_EXCL`, mode 0600, so concurrent downloads of one hash cannot touch each other's bytes. On success it hashes **the file itself**, fsyncs and renames to `<sha256>.omgapp`. Any failure removes the part. `PackageStore::open` takes a lock on the directory for the store's whole life and clears what a crash left. A second store on the same directory fails with `WouldBlock`, so nothing can clear the part of a running download. A failed rename leaves the part owned by the sink, which removes it. **File names come only from the hash**, so nothing from a manifest reaches a path.
 - `FetchControl` carries a total deadline and a cancel switch, checked before each request and each read: 60 seconds for a manifest, and for a package 60 seconds plus the size at 16 KiB/s. That also acts as a minimum rate. The core cannot interrupt a `read` blocked inside the fetcher.
 
 `Fetcher` contract, **enforced only by review**: platform certificate validation with no way off, no automatic redirects, no cookies, credentials or `Referer`, connect and read timeouts within `FetchControl::remaining` and at most 30 seconds per read, stop on `is_cancelled`, and refuse a name resolving to a private address where the platform allows it.
@@ -277,7 +291,7 @@ The first SDK should not hand out a surface: apps send card descriptions (text, 
 |---|---|---|---|
 | T1 | Malformed manifest: huge, deep, wrong types, parser differentials | Size check before parsing, typed parser with depth limit, no unknown or duplicate keys, 20,000-mutation test | **[built]** |
 | T2 | **Hostile app with a valid key** | Only the sandbox and the owner's consent. Signing does nothing here | **The main risk.** Sections 7 and D2 |
-| T3 | Stolen repository, account or site, without the key | Pinned key survives an uninstall; nothing edited verifies; the install path enforces it | First install is still trust, and `forget` clears the pin. **[built]**, warnings in the UI not built |
+| T3 | Stolen repository, account or site, without the key | Pinned key survives an uninstall; nothing edited verifies; the core's install API checks the record when planning and again when recording | First install is still trust, and `forget` clears the pin. **[built]**, warnings in the UI not built |
 | T4 | Tampered package at a CDN or mirror | Size, hash, signature. Bytes unusable until verified | **[built]** |
 | T5 | Rollback, un-withdrawing, freezing | Signed state; `StateRolledBack`; remembered withdrawals; floor | Only for states already seen: section 6 has the table of what is not detected. **[built]** |
 | T6 | Spoofing: name, id, odd characters, reserved prefix | Allowlisted text, signed; the UI shows the label; `org.openmyglass` refused; same id elsewhere blocked | Lookalike Latin names and a similar GitHub owner name are still possible. **[built]**, UI not built |

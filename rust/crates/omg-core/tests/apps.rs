@@ -57,73 +57,31 @@ fn release_json(version: &str, package: &[u8]) -> Value {
     })
 }
 
-fn hex32(s: &str) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for (i, slot) in out.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
-    }
-    out
-}
-
-fn parsed_release(release: &Value) -> Release {
-    let mut permissions: Vec<String> = release["permissions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p.as_str().unwrap().to_owned())
-        .collect();
-    permissions.sort();
-    Release {
-        version: Version::parse(release["version"].as_str().unwrap()).unwrap(),
-        target: release["target"].as_str().unwrap().to_owned(),
-        min_api: release["min_api"].as_u64().unwrap() as u32,
-        url: HttpsUrl::parse(release["url"].as_str().unwrap()).unwrap(),
-        size: release["size"].as_u64().unwrap(),
-        sha256: hex32(release["sha256"].as_str().unwrap()),
-        permissions,
-        signature: [0; 64],
-    }
-}
-
-/// Signs an app as JSON the way the tool for authors will: every release, then the state.
+/// Signs an app as JSON the way the tool for authors will: placeholders, then the statements
+/// the core gives back for signing.
 fn sign_app(app: &mut Value, signer: &SigningKey, repository: &HttpsUrl) {
-    let id = app["id"].as_str().unwrap().to_owned();
     app["publisher_key"] = json!(to_hex(signer.verifying_key().as_bytes()));
+    app["state_signature"] = json!("00".repeat(64));
     for release in app["releases"].as_array_mut().unwrap() {
-        let statement = release_statement(&id, &parsed_release(release));
-        release["signature"] = json!(to_hex(&signer.sign(&statement).to_bytes()));
+        release["signature"] = json!("00".repeat(64));
     }
-    let mut withdrawn: Vec<Version> = app["withdrawn"]
-        .as_array()
-        .map(|list| {
-            list.iter()
-                .map(|v| Version::parse(v.as_str().unwrap()).unwrap())
-                .collect()
-        })
-        .unwrap_or_default();
-    withdrawn.sort();
-    let entry = AppEntry {
-        id,
-        repository: repository.clone(),
-        name: app["name"].as_str().unwrap().to_owned(),
-        summary: app["summary"].as_str().unwrap().to_owned(),
-        license: app["license"].as_str().unwrap().to_owned(),
-        homepage: app["homepage"]
-            .as_str()
-            .map(|h| HttpsUrl::parse(h).unwrap()),
-        publisher_key: *signer.verifying_key().as_bytes(),
-        sequence: app["sequence"].as_u64().unwrap(),
-        withdrawn,
-        state_signature: [0; 64],
-        releases: app["releases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(parsed_release)
-            .collect(),
+    let wrapped = json!({"schema": 1, "name": "x", "apps": [app.clone()]});
+    let source = RepositorySource::from_manifest_url(repository).unwrap();
+    // A structurally broken app cannot be signed; it keeps the placeholders, and the parse in the
+    // test reports the structural error, which comes before any signature check.
+    let Ok(to_sign) = Manifest::statements_to_sign(wrapped.to_string().as_bytes(), &source) else {
+        return;
     };
-    let signature = signer.sign(&app_state_statement(&entry));
-    app["state_signature"] = json!(to_hex(&signature.to_bytes()));
+    let to_sign = &to_sign[0];
+    for (release, statement) in app["releases"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(&to_sign.releases)
+    {
+        release["signature"] = json!(to_hex(&signer.sign(statement).to_bytes()));
+    }
+    app["state_signature"] = json!(to_hex(&signer.sign(&to_sign.state).to_bytes()));
 }
 
 fn unsigned_app(id: &str, sequence: u64, releases: Vec<Value>) -> Value {
@@ -164,6 +122,12 @@ fn parse_bytes(bytes: &[u8]) -> Result<Manifest, ManifestError> {
     Manifest::parse(bytes, &source())
 }
 
+fn empty_store() -> (tempfile::TempDir, TrustStore) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TrustStore::open(dir.path().join("trust.json")).unwrap();
+    (dir, store)
+}
+
 fn profile() -> GlassProfile {
     GlassProfile {
         api_level: 1,
@@ -176,12 +140,12 @@ fn profile() -> GlassProfile {
 #[test]
 fn a_good_manifest_parses() {
     let manifest = parse(&one_release()).unwrap();
-    assert_eq!(manifest.name, "Example apps");
+    assert_eq!(manifest.name(), "Example apps");
     let app = manifest.app(APP).unwrap();
-    assert_eq!(app.releases[0].version, Version::new(1, 0, 0));
-    assert_eq!(app.releases[0].size, 7);
-    assert_eq!(app.publisher_key, *key().verifying_key().as_bytes());
-    assert_eq!(app.repository, repository());
+    assert_eq!(*app.releases()[0].version(), Version::new(1, 0, 0));
+    assert_eq!(app.releases()[0].size(), 7);
+    assert_eq!(*app.publisher_key(), *key().verifying_key().as_bytes());
+    assert_eq!(*app.repository(), repository());
     assert!(manifest.app("com.example.other").is_none());
 }
 
@@ -194,9 +158,9 @@ fn the_format_in_the_design_doc_stays_valid_up_to_the_signatures() {
     // The example's key and signatures are placeholders on the page: put real ones in.
     sign_app(&mut example["apps"][0], &key(), &repository());
     let manifest = parse(&example).unwrap();
-    assert_eq!(manifest.apps.len(), 1);
-    assert_eq!(manifest.apps[0].releases.len(), 2);
-    assert!(manifest.apps[0].is_withdrawn(&Version::new(1, 0, 0)));
+    assert_eq!(manifest.apps().len(), 1);
+    assert_eq!(manifest.apps()[0].releases().len(), 2);
+    assert!(manifest.apps()[0].is_withdrawn(&Version::new(1, 0, 0)));
 }
 
 #[test]
@@ -374,12 +338,14 @@ fn refuses_duplicates_and_reserved_ids() {
         parse(&manifest_json(vec![app.clone(), app])),
         Err(ManifestError::DuplicateApp(1))
     );
-    // The same version with two hashes, both validly signed.
-    let twice = app_json(
-        APP,
-        &key(),
-        vec![release_json("1.0.0", b"a"), release_json("1.0.0", b"b")],
-    );
+    // The same version with two hashes, both validly signed: each signed alone, then combined.
+    let first = app_json(APP, &key(), vec![release_json("1.0.0", b"a")]);
+    let second = app_json(APP, &key(), vec![release_json("1.0.0", b"b")]);
+    let mut twice = first.clone();
+    twice["releases"]
+        .as_array_mut()
+        .unwrap()
+        .push(second["releases"][0].clone());
     assert_eq!(
         parse(&manifest_json(vec![twice])),
         Err(ManifestError::DuplicateVersion { app: 0, release: 1 })
@@ -576,12 +542,12 @@ fn only_the_url_and_the_repository_name_are_unsigned() {
     // A package can move to a mirror without the key: the hash still has to match.
     let moved = with_release_field("url", json!("https://mirror.example.net/t.omgapp"));
     assert_eq!(
-        parse(&moved).unwrap().apps[0].releases[0].url.host(),
+        parse(&moved).unwrap().apps()[0].releases()[0].url().host(),
         "mirror.example.net"
     );
     let mut name = one_release();
     name["name"] = json!("Official OpenMyGlass apps");
-    assert_eq!(parse(&name).unwrap().name, "Official OpenMyGlass apps");
+    assert_eq!(parse(&name).unwrap().name(), "Official OpenMyGlass apps");
 }
 
 fn with_bad_and_fix() -> Value {
@@ -602,7 +568,7 @@ fn with_bad_and_fix() -> Value {
 #[test]
 fn without_the_key_a_withdrawal_cannot_be_cleared_and_a_fix_cannot_be_dropped() {
     let honest = parse(&manifest_json(vec![with_bad_and_fix()])).unwrap();
-    assert!(honest.apps[0].is_withdrawn(&Version::new(1, 1, 0)));
+    assert!(honest.apps()[0].is_withdrawn(&Version::new(1, 1, 0)));
 
     let mut cleared = with_bad_and_fix();
     cleared.as_object_mut().unwrap().remove("withdrawn");
@@ -641,9 +607,54 @@ fn permission_order_does_not_matter() {
     release["permissions"] = json!(["location", "camera"]);
     let manifest = manifest_json(vec![app_json(APP, &key(), vec![release])]);
     assert_eq!(
-        parse(&manifest).unwrap().apps[0].releases[0].permissions,
+        parse(&manifest).unwrap().apps()[0].releases()[0].permissions(),
         ["camera", "location"]
     );
+}
+
+/// Everything signed in a manifest: all of it but the repository's name and the release URLs.
+fn signed_view(manifest: &Manifest) -> String {
+    let apps: Vec<String> = manifest
+        .apps()
+        .iter()
+        .map(|a| {
+            let releases: Vec<String> = a
+                .releases()
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{:?}",
+                        (
+                            r.version(),
+                            r.target(),
+                            r.min_api(),
+                            r.size(),
+                            r.sha256(),
+                            r.permissions(),
+                            r.signature()
+                        )
+                    )
+                })
+                .collect();
+            format!(
+                "{:?}",
+                (
+                    a.id(),
+                    a.repository(),
+                    a.name(),
+                    a.summary(),
+                    a.license(),
+                    a.homepage(),
+                    a.publisher_key(),
+                    a.sequence(),
+                    a.withdrawn(),
+                    a.state_signature(),
+                    releases
+                )
+            )
+        })
+        .collect();
+    apps.join("\n")
 }
 
 #[test]
@@ -680,18 +691,10 @@ fn no_mutation_of_a_good_file_panics_or_changes_anything_signed() {
                 _ => bytes.insert(at, b"{}[]\",:0"[next() % 8]),
             }
         }
-        if let Ok(mut parsed) = parse_bytes(&bytes) {
+        if let Ok(parsed) = parse_bytes(&bytes) {
             passed += 1;
             // Whatever survives may differ only in what is not signed.
-            for (got, want) in parsed.apps[0]
-                .releases
-                .iter_mut()
-                .zip(&original.apps[0].releases)
-            {
-                got.url = want.url.clone();
-            }
-            parsed.name = original.name.clone();
-            assert_eq!(parsed, original);
+            assert_eq!(signed_view(&parsed), signed_view(&original));
         }
     }
     assert!(passed < 20_000, "the mutations must actually break files");
@@ -707,8 +710,8 @@ fn app_with(versions: &[&str]) -> AppEntry {
 fn app_of(releases: Vec<Value>) -> AppEntry {
     parse(&manifest_json(vec![app_json(APP, &key(), releases)]))
         .unwrap()
-        .apps
-        .remove(0)
+        .apps()[0]
+        .clone()
 }
 
 /// An app in a chosen state.
@@ -721,13 +724,13 @@ fn app_state(
     let mut app = unsigned_app(APP, sequence, releases);
     app["withdrawn"] = json!(withdrawn);
     sign_app(&mut app, signer, &repository());
-    parse(&manifest_json(vec![app])).unwrap().apps.remove(0)
+    parse(&manifest_json(vec![app])).unwrap().apps()[0].clone()
 }
 
 fn best(app: &AppEntry, options: SelectOptions) -> Option<String> {
     select_release(app, None, &profile(), options)
         .best
-        .map(|r| r.version.to_string())
+        .map(|r| r.version().to_string())
 }
 
 const STABLE: SelectOptions = SelectOptions {
@@ -748,7 +751,7 @@ fn highest_version_wins_whatever_the_file_order() {
 fn prereleases_only_on_request_and_in_semver_order() {
     let app = app_with(&["1.0.0", "1.1.0-beta.2", "1.1.0-beta.10"]);
     let selection = select_release(&app, None, &profile(), STABLE);
-    assert_eq!(selection.best.unwrap().version, Version::new(1, 0, 0));
+    assert_eq!(*selection.best.unwrap().version(), Version::new(1, 0, 0));
     assert_eq!(selection.skipped.len(), 2);
     assert_eq!(selection.skipped[0].1, SkipReason::Prerelease);
     assert_eq!(best(&app, WITH_PRE).as_deref(), Some("1.1.0-beta.10"));
@@ -795,7 +798,7 @@ fn withdrawn_releases_are_not_offered() {
 fn installed_from(app: &AppEntry) -> (tempfile::TempDir, TrustStore, InstalledApp) {
     let dir = tempfile::tempdir().unwrap();
     let mut store = TrustStore::open(dir.path().join("trust.json")).unwrap();
-    let ticket = plan_install(app, None, None, &profile(), WITH_PRE).unwrap();
+    let ticket = plan_install(app, &empty_store().1, None, &profile(), WITH_PRE).unwrap();
     assert!(ticket.first_use());
     let package = verified(&ticket);
     store.record_install(&ticket, &package).unwrap();
@@ -805,10 +808,10 @@ fn installed_from(app: &AppEntry) -> (tempfile::TempDir, TrustStore, InstalledAp
 
 fn installed_of(ticket: &InstallTicket<'_>) -> InstalledApp {
     InstalledApp {
-        id: ticket.app().id.clone(),
-        version: ticket.release().version.clone(),
-        sha256: ticket.release().sha256,
-        permissions: ticket.release().permissions.clone(),
+        id: ticket.app().id().to_owned(),
+        version: ticket.release().version().clone(),
+        sha256: *ticket.release().sha256(),
+        permissions: ticket.release().permissions().to_vec(),
     }
 }
 
@@ -816,7 +819,7 @@ fn installed_of(ticket: &InstallTicket<'_>) -> InstalledApp {
 fn verified(ticket: &InstallTicket<'_>) -> VerifiedPackage {
     let bytes = PACKAGES
         .iter()
-        .find(|p| sha(p) == ticket.release().sha256)
+        .find(|p| sha(p) == *ticket.release().sha256())
         .expect("the test package is listed");
     let mut verifier = DownloadVerifier::new(ticket);
     verifier.push(bytes).unwrap();
@@ -848,11 +851,11 @@ fn an_update_is_offered_and_new_permissions_are_called_out() {
     else {
         panic!("{status:?}");
     };
-    assert_eq!(release.version, Version::new(1, 1, 0));
+    assert_eq!(*release.version(), Version::new(1, 1, 0));
     assert_eq!(added_permissions, ["location"]);
     assert!(!installed_withdrawn);
 
-    let ticket = plan_install(&app, store.get(APP), Some(&installed), &profile(), STABLE).unwrap();
+    let ticket = plan_install(&app, &store, Some(&installed), &profile(), STABLE).unwrap();
     assert!(!ticket.first_use());
     assert_eq!(ticket.permissions_to_confirm(), ["location"]);
 }
@@ -862,7 +865,7 @@ fn a_first_install_confirms_every_permission() {
     let app = app_with_release("1.0.0", |r| {
         r["permissions"] = json!(["location", "camera"])
     });
-    let ticket = plan_install(&app, None, None, &profile(), STABLE).unwrap();
+    let ticket = plan_install(&app, &empty_store().1, None, &profile(), STABLE).unwrap();
     assert!(ticket.first_use());
     assert_eq!(ticket.permissions_to_confirm(), ["camera", "location"]);
 }
@@ -896,7 +899,7 @@ fn never_a_downgrade_from_a_lower_stable_version() {
         "{status:?}"
     );
     assert_eq!(
-        plan_install(&later, store.get(APP), Some(&installed), &profile(), STABLE).unwrap_err(),
+        plan_install(&later, &store, Some(&installed), &profile(), STABLE).unwrap_err(),
         InstallRefusal::NothingToOffer
     );
     // A real stable release above the beta is an update.
@@ -936,7 +939,7 @@ fn a_new_key_blocks_both_the_update_check_and_the_install() {
         UpdateStatus::Blocked(TrustProblem::PublisherChanged)
     );
     assert_eq!(
-        plan_install(&thief, store.get(APP), Some(&installed), &profile(), STABLE).unwrap_err(),
+        plan_install(&thief, &store, Some(&installed), &profile(), STABLE).unwrap_err(),
         InstallRefusal::Untrusted(TrustProblem::PublisherChanged)
     );
 }
@@ -951,9 +954,12 @@ fn the_same_id_from_a_rival_in_another_repository_is_blocked() {
     sign_app(&mut app, &other_key(), rival_site.manifest_url());
     let rival = Manifest::parse(manifest_json(vec![app]).to_string().as_bytes(), &rival_site)
         .unwrap()
-        .apps
-        .remove(0);
-    assert_eq!(rival.publisher_key, *other_key().verifying_key().as_bytes());
+        .apps()[0]
+        .clone();
+    assert_eq!(
+        *rival.publisher_key(),
+        *other_key().verifying_key().as_bytes()
+    );
     assert_eq!(
         check_update(
             &installed,
@@ -965,7 +971,7 @@ fn the_same_id_from_a_rival_in_another_repository_is_blocked() {
         UpdateStatus::Blocked(TrustProblem::OtherSource)
     );
     assert_eq!(
-        plan_install(&rival, store.get(APP), None, &profile(), STABLE).unwrap_err(),
+        plan_install(&rival, &store, None, &profile(), STABLE).unwrap_err(),
         InstallRefusal::Untrusted(TrustProblem::OtherSource)
     );
 }
@@ -1044,19 +1050,12 @@ fn a_remembered_state_stops_an_older_one() {
         UpdateStatus::Blocked(TrustProblem::StateRolledBack)
     );
     assert_eq!(
-        plan_install(
-            &replay,
-            store.get(APP),
-            Some(&installed),
-            &profile(),
-            STABLE
-        )
-        .unwrap_err(),
+        plan_install(&replay, &store, Some(&installed), &profile(), STABLE).unwrap_err(),
         InstallRefusal::Untrusted(TrustProblem::StateRolledBack)
     );
     assert!(matches!(
         store.observe(&replay),
-        Err(TrustError::Problem(TrustProblem::StateRolledBack))
+        Ok(Observed::Mismatch(TrustProblem::StateRolledBack))
     ));
 }
 
@@ -1077,10 +1076,10 @@ fn what_a_static_manifest_cannot_prevent() {
     let UpdateStatus::UpdateAvailable { release, .. } = status else {
         panic!("{status:?}");
     };
-    assert_eq!(release.version.to_string(), "1.1.0");
+    assert_eq!(release.version().to_string(), "1.1.0");
     // A fresh install too: the first install trusts what it is shown.
-    let ticket = plan_install(&bad_state, None, None, &profile(), STABLE).unwrap();
-    assert_eq!(ticket.release().version.to_string(), "1.1.0");
+    let ticket = plan_install(&bad_state, &empty_store().1, None, &profile(), STABLE).unwrap();
+    assert_eq!(ticket.release().version().to_string(), "1.1.0");
 }
 
 #[test]
@@ -1107,7 +1106,7 @@ fn a_withdrawal_once_seen_stays_even_if_a_later_state_omits_it() {
         "{status:?}"
     );
     assert_eq!(
-        plan_install(&later, store.get(APP), Some(&installed), &profile(), STABLE).unwrap_err(),
+        plan_install(&later, &store, Some(&installed), &profile(), STABLE).unwrap_err(),
         InstallRefusal::NothingToOffer
     );
 }
@@ -1144,7 +1143,7 @@ fn up_to_date_says_about_withdrawals_and_blocked_releases() {
 #[test]
 fn two_states_with_one_number_are_refused() {
     let first = app_state(&key(), 5, &[], vec![release_json("1.0.0", b"old")]);
-    let (_dir, store, installed) = installed_from(&first);
+    let (_dir, mut store, installed) = installed_from(&first);
     let fork = app_state(
         &key(),
         5,
@@ -1164,6 +1163,230 @@ fn two_states_with_one_number_are_refused() {
         ),
         UpdateStatus::Blocked(TrustProblem::StateForked)
     );
+    assert_eq!(
+        plan_install(&fork, &store, Some(&installed), &profile(), STABLE).unwrap_err(),
+        InstallRefusal::Untrusted(TrustProblem::StateForked)
+    );
+    assert_eq!(
+        store.observe(&fork).unwrap(),
+        Observed::Mismatch(TrustProblem::StateForked)
+    );
+    // Recording the forked release with a ticket planned elsewhere is refused too.
+    let (_other, elsewhere) = empty_store();
+    let ticket = plan_install(&fork, &elsewhere, None, &profile(), STABLE).unwrap();
+    assert!(matches!(
+        store.record_install(&ticket, &verified(&ticket)),
+        Err(TrustError::Problem(TrustProblem::StateForked))
+    ));
+}
+
+#[test]
+fn a_ticket_planned_without_the_memory_cannot_be_recorded_against_it() {
+    // The attack from the review: plan against an empty memory to skip the floor and the
+    // withdrawals, then record into the real one.
+    let first = app_state(
+        &key(),
+        2,
+        &["1.5.0"],
+        vec![release_json("1.5.0", b"bad"), release_json("2.0.0", b"new")],
+    );
+    let (_dir, mut store, _installed) = installed_from(&first);
+    assert_eq!(
+        store.get(APP).unwrap().highest.as_ref().unwrap().0,
+        Version::new(2, 0, 0)
+    );
+
+    let withdrawn = app_state(&key(), 3, &[], vec![release_json("1.5.0", b"bad")]);
+    assert_eq!(
+        plan_install(&withdrawn, &store, None, &profile(), STABLE).unwrap_err(),
+        InstallRefusal::NothingToOffer
+    );
+    let (_other, empty) = empty_store();
+    let ticket = plan_install(&withdrawn, &empty, None, &profile(), STABLE).unwrap();
+    assert!(ticket.first_use());
+    assert!(matches!(
+        store.record_install(&ticket, &verified(&ticket)),
+        Err(TrustError::Withdrawn)
+    ));
+
+    let older = app_state(&key(), 3, &[], vec![release_json("1.0.0", b"old")]);
+    let ticket = plan_install(&older, &empty, None, &profile(), STABLE).unwrap();
+    assert!(matches!(
+        store.record_install(&ticket, &verified(&ticket)),
+        Err(TrustError::BelowFloor)
+    ));
+
+    let thief = app_state(&other_key(), 9, &[], vec![release_json("9.0.0", b"evil")]);
+    let ticket = plan_install(&thief, &empty, None, &profile(), STABLE).unwrap();
+    assert!(matches!(
+        store.record_install(&ticket, &verified(&ticket)),
+        Err(TrustError::Problem(TrustProblem::PublisherChanged))
+    ));
+    // None of that changed the record.
+    let record = store.get(APP).unwrap();
+    assert_eq!(record.publisher_key, *key().verifying_key().as_bytes());
+    assert_eq!(record.highest.as_ref().unwrap().0, Version::new(2, 0, 0));
+}
+
+#[test]
+fn a_newer_state_seen_during_a_download_does_not_void_it_but_a_withdrawal_does() {
+    let first = app_state(&key(), 1, &[], vec![release_json("1.0.0", b"old")]);
+    let (_dir, mut store, installed) = installed_from(&first);
+    let two = app_state(
+        &key(),
+        2,
+        &[],
+        vec![release_json("1.0.0", b"old"), release_json("1.1.0", b"new")],
+    );
+    let ticket = plan_install(&two, &store, Some(&installed), &profile(), STABLE).unwrap();
+    // While it downloads, a refresh sees state 3, which only adds a release.
+    let three = app_state(
+        &key(),
+        3,
+        &[],
+        vec![
+            release_json("1.0.0", b"old"),
+            release_json("1.1.0", b"new"),
+            release_json("1.2.0-beta.1", b"x"),
+        ],
+    );
+    assert_eq!(store.observe(&three).unwrap(), Observed::Updated);
+    store.record_install(&ticket, &verified(&ticket)).unwrap();
+    assert_eq!(store.get(APP).unwrap().sequence, 3);
+    assert_eq!(
+        store.get(APP).unwrap().highest.as_ref().unwrap().0,
+        Version::new(1, 1, 0)
+    );
+
+    // The same, but a later state withdraws the release being downloaded.
+    let five = app_state(
+        &key(),
+        5,
+        &[],
+        vec![release_json("1.1.0", b"new"), release_json("1.3.0", b"fix")],
+    );
+    let ticket = plan_install(&five, &store, None, &profile(), STABLE).unwrap();
+    assert_eq!(ticket.release().version().to_string(), "1.3.0");
+    let six = app_state(
+        &key(),
+        6,
+        &["1.3.0"],
+        vec![release_json("1.1.0", b"new"), release_json("1.3.0", b"fix")],
+    );
+    assert_eq!(store.observe(&six).unwrap(), Observed::Updated);
+    assert!(matches!(
+        store.record_install(&ticket, &verified(&ticket)),
+        Err(TrustError::Withdrawn)
+    ));
+}
+
+#[test]
+fn another_repository_listing_the_same_id_does_not_stop_a_refresh() {
+    let (_dir, mut store, _installed) =
+        installed_from(&app_of(vec![release_json("1.0.0", b"old")]));
+    let rival_site =
+        RepositorySource::parse("https://elsewhere.example.net/omg-apps.json").unwrap();
+    let mut rival = unsigned_app(APP, 50, vec![release_json("9.0.0", b"other")]);
+    sign_app(&mut rival, &other_key(), rival_site.manifest_url());
+    let mut unrelated = unsigned_app("com.example.other", 1, vec![release_json("1.0.0", b"x")]);
+    sign_app(&mut unrelated, &other_key(), rival_site.manifest_url());
+    let manifest = Manifest::parse(
+        manifest_json(vec![rival, unrelated]).to_string().as_bytes(),
+        &rival_site,
+    )
+    .unwrap();
+    let results: Vec<Observed> = manifest
+        .apps()
+        .iter()
+        .map(|app| store.observe(app).unwrap())
+        .collect();
+    assert_eq!(
+        results,
+        [
+            Observed::Mismatch(TrustProblem::OtherSource),
+            Observed::Unknown
+        ]
+    );
+}
+
+#[test]
+fn two_store_instances_on_one_file_keep_each_others_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.json");
+    let mut a = TrustStore::open(&path).unwrap();
+    let mut b = TrustStore::open(&path).unwrap();
+    let mut c = TrustStore::open(&path).unwrap();
+
+    let tally = app_of(vec![release_json("1.0.0", b"old")]);
+    let ticket = plan_install(&tally, &a, None, &profile(), STABLE).unwrap();
+    a.record_install(&ticket, &verified(&ticket)).unwrap();
+
+    // b has not seen it, records another app, and must not erase the first.
+    let mut other = unsigned_app("com.example.other", 1, vec![release_json("1.0.0", b"x")]);
+    sign_app(&mut other, &key(), &repository());
+    let other = parse(&manifest_json(vec![other])).unwrap().apps()[0].clone();
+    let ticket = plan_install(&other, &b, None, &profile(), STABLE).unwrap();
+    b.record_install(&ticket, &verified(&ticket)).unwrap();
+    assert!(b.get(APP).is_some(), "b read the file again under the lock");
+
+    // c's view is still empty, so it plans the thief's app as a first use. Recording it, under
+    // the lock and against the file, is refused.
+    let thief = app_state(&other_key(), 9, &[], vec![release_json("9.0.0", b"evil")]);
+    let ticket = plan_install(&thief, &c, None, &profile(), STABLE).unwrap();
+    assert!(ticket.first_use());
+    assert!(matches!(
+        c.record_install(&ticket, &verified(&ticket)),
+        Err(TrustError::Problem(TrustProblem::PublisherChanged))
+    ));
+
+    let reopened = TrustStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.get(APP).unwrap().publisher_key,
+        *key().verifying_key().as_bytes()
+    );
+    assert!(reopened.get("com.example.other").is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_write_changes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.json");
+    let mut store = TrustStore::open(&path).unwrap();
+    let tally = app_of(vec![release_json("1.0.0", b"old")]);
+    let ticket = plan_install(&tally, &store, None, &profile(), STABLE).unwrap();
+    store.record_install(&ticket, &verified(&ticket)).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    // The directory becomes read-only: the new file cannot be created.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = store.forget(APP);
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    if result.is_ok() {
+        // Running as root: permissions do not stop it, so there is nothing to check here.
+        return;
+    }
+    assert!(
+        store.get(APP).is_some(),
+        "memory is unchanged after a failed write"
+    );
+    assert!(TrustStore::open(&path).unwrap().get(APP).is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_planted_link_is_not_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.json");
+    let target = dir.path().join("elsewhere");
+    std::os::unix::fs::symlink(&target, dir.path().join("trust.json.lock")).unwrap();
+    let mut store = TrustStore::open(&path).unwrap();
+    assert!(matches!(store.forget(APP), Err(TrustError::Io(_))));
+    assert!(!target.exists());
 }
 
 #[test]
@@ -1179,7 +1402,7 @@ fn uninstalling_forgets_nothing_and_the_memory_survives_a_restart() {
             &["1.5.0"],
             vec![release_json("1.5.0", b"bad"), release_json("2.0.0", b"new")],
         );
-        let ticket = plan_install(&first, None, None, &profile(), STABLE).unwrap();
+        let ticket = plan_install(&first, &empty_store().1, None, &profile(), STABLE).unwrap();
         store.record_install(&ticket, &verified(&ticket)).unwrap();
     }
     // The app is uninstalled: nothing about the store changes. The companion restarts.
@@ -1191,13 +1414,13 @@ fn uninstalling_forgets_nothing_and_the_memory_survives_a_restart() {
     // A thief's key is refused on the reinstall, with no installed app to compare with.
     let thief = app_state(&other_key(), 9, &[], vec![release_json("9.0.0", b"evil")]);
     assert_eq!(
-        plan_install(&thief, store.get(APP), None, &profile(), STABLE).unwrap_err(),
+        plan_install(&thief, &store, None, &profile(), STABLE).unwrap_err(),
         InstallRefusal::Untrusted(TrustProblem::PublisherChanged)
     );
     // A real but older release is under the floor, even in a higher genuine state.
     let older = app_state(&key(), 3, &[], vec![release_json("1.0.0", b"old")]);
     assert_eq!(
-        plan_install(&older, store.get(APP), None, &profile(), STABLE).unwrap_err(),
+        plan_install(&older, &store, None, &profile(), STABLE).unwrap_err(),
         InstallRefusal::NothingToOffer
     );
     assert_eq!(
@@ -1206,12 +1429,12 @@ fn uninstalling_forgets_nothing_and_the_memory_survives_a_restart() {
     );
     // The same version may come back, without being a first use.
     let same = app_state(&key(), 3, &[], vec![release_json("2.0.0", b"new")]);
-    let ticket = plan_install(&same, store.get(APP), None, &profile(), STABLE).unwrap();
+    let ticket = plan_install(&same, &store, None, &profile(), STABLE).unwrap();
     assert!(!ticket.first_use());
     // The same version with other bytes may not.
     let other_bytes = app_state(&key(), 3, &[], vec![release_json("2.0.0", b"evil")]);
     assert_eq!(
-        plan_install(&other_bytes, store.get(APP), None, &profile(), STABLE).unwrap_err(),
+        plan_install(&other_bytes, &store, None, &profile(), STABLE).unwrap_err(),
         InstallRefusal::Untrusted(TrustProblem::ReleaseChanged)
     );
 
@@ -1219,7 +1442,7 @@ fn uninstalling_forgets_nothing_and_the_memory_survives_a_restart() {
     store.forget(APP).unwrap();
     let store = TrustStore::open(&path).unwrap();
     assert!(store.get(APP).is_none());
-    let ticket = plan_install(&thief, store.get(APP), None, &profile(), STABLE).unwrap();
+    let ticket = plan_install(&thief, &store, None, &profile(), STABLE).unwrap();
     assert!(ticket.first_use());
 }
 
@@ -1248,7 +1471,7 @@ fn an_installed_app_with_no_record_is_refused() {
         permissions: vec![],
     };
     assert_eq!(
-        plan_install(&app, None, Some(&installed), &profile(), STABLE).unwrap_err(),
+        plan_install(&app, &empty_store().1, Some(&installed), &profile(), STABLE).unwrap_err(),
         InstallRefusal::InstalledWithoutRecord
     );
 }
@@ -1367,7 +1590,7 @@ fn package_app() -> AppEntry {
 }
 
 fn ticket_for(app: &AppEntry) -> InstallTicket<'_> {
-    plan_install(app, None, None, &profile(), STABLE).unwrap()
+    plan_install(app, &empty_store().1, None, &profile(), STABLE).unwrap()
 }
 
 fn long_enough() -> FetchControl {
@@ -1378,6 +1601,7 @@ fn files(dir: &std::path::Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name != ".lock")
         .collect();
     names.sort();
     names
@@ -1392,7 +1616,7 @@ fn download_with(
     let store = PackageStore::open(dir.path()).unwrap();
     let app = package_app();
     let ticket = ticket_for(&app);
-    let mut sink = store.begin(&ticket.release().sha256).unwrap();
+    let mut sink = store.begin(ticket.release().sha256()).unwrap();
     let result = fetch_package(fetcher, &ticket, &mut sink, control);
     drop(sink);
     (result, files(dir.path()))
@@ -1409,7 +1633,7 @@ fn a_good_download_lands_under_its_hash_with_what_the_glass_needs() {
     let app = package_app();
     let ticket = ticket_for(&app);
     let fetcher = TableFetcher::default().with(PACKAGE_URL, Canned::Body(PACKAGE.to_vec()));
-    let mut sink = store.begin(&ticket.release().sha256).unwrap();
+    let mut sink = store.begin(ticket.release().sha256()).unwrap();
     let package = fetch_package(&fetcher, &ticket, &mut sink, &long_enough()).unwrap();
     drop(sink);
     assert_eq!(package.app_id(), APP);
@@ -1533,24 +1757,55 @@ fn concurrent_downloads_of_one_hash_cannot_corrupt_each_other() {
     let store = PackageStore::open(dir.path()).unwrap();
     let app = package_app();
     let ticket = ticket_for(&app);
+    let hash = *ticket.release().sha256();
     let fetcher = TableFetcher::default().with(PACKAGE_URL, Canned::Body(PACKAGE.to_vec()));
+    let hostile_bytes = vec![b'X'; PACKAGE.len()];
 
-    // A hostile stream started first, a good one second. The good one finishes, and then the
-    // hostile one keeps writing and fails.
-    let mut hostile = store.begin(&ticket.release().sha256).unwrap();
-    let mut good = store.begin(&ticket.release().sha256).unwrap();
-    let package = fetch_package(&fetcher, &ticket, &mut good, &long_enough()).unwrap();
-    hostile.write(&vec![b'X'; 4096]).unwrap();
-    assert_eq!(
-        std::fs::read(store.path_of(package.sha256())).unwrap(),
-        PACKAGE
+    for _ in 0..50 {
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            // A hostile stream for the same hash writes the wrong bytes and tries to commit them,
+            // at the same moment as a good download commits.
+            let hostile = scope.spawn(|| {
+                let mut sink = store.begin(&hash).unwrap();
+                sink.write(&hostile_bytes).unwrap();
+                barrier.wait();
+                sink.commit()
+            });
+            let good = scope.spawn(|| {
+                let mut sink = store.begin(&hash).unwrap();
+                barrier.wait();
+                fetch_package(&fetcher, &ticket, &mut sink, &long_enough())
+            });
+            assert_eq!(
+                hostile.join().unwrap().unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            good.join().unwrap().unwrap();
+        });
+        assert_eq!(std::fs::read(store.path_of(&hash)).unwrap(), PACKAGE);
+        assert_eq!(files(dir.path()).len(), 1, "{:?}", files(dir.path()));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_rename_leaves_no_part_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PackageStore::open(dir.path()).unwrap();
+    let hash = sha(PACKAGE);
+    // Something that is not a file sits where the package would go.
+    std::fs::create_dir(store.path_of(&hash)).unwrap();
+    std::fs::write(store.path_of(&hash).join("x"), b"x").unwrap();
+    let mut sink = store.begin(&hash).unwrap();
+    sink.write(PACKAGE).unwrap();
+    assert!(sink.commit().is_err());
+    drop(sink);
+    assert!(
+        !files(dir.path()).iter().any(|f| f.ends_with(".part")),
+        "{:?}",
+        files(dir.path())
     );
-    hostile.abort();
-    assert_eq!(
-        std::fs::read(store.path_of(package.sha256())).unwrap(),
-        PACKAGE
-    );
-    assert_eq!(files(dir.path()).len(), 1);
 }
 
 #[test]
@@ -1578,20 +1833,26 @@ fn commit_checks_the_file_itself() {
 }
 
 #[test]
-fn parts_left_by_a_crash_are_cleared_on_request() {
+fn parts_left_by_a_crash_are_cleared_only_when_no_download_can_run() {
     let dir = tempfile::tempdir().unwrap();
-    let store = PackageStore::open(dir.path()).unwrap();
     let hash = sha(PACKAGE);
     let crashed = dir
         .path()
         .join(format!("{}.0011223344556677.part", to_hex(&hash)));
     std::fs::write(&crashed, vec![b'!'; 1000]).unwrap();
-    let mut done = store.begin(&hash).unwrap();
-    done.write(PACKAGE).unwrap();
-    done.commit().unwrap();
-    store.remove_stale_parts().unwrap();
+    let store = PackageStore::open(dir.path()).unwrap();
     assert!(!crashed.exists());
-    assert_eq!(std::fs::read(store.path_of(&hash)).unwrap(), PACKAGE);
+
+    // While a store is open, nobody else can open the directory, so nobody can clear its parts.
+    let running = store.begin(&hash).unwrap();
+    assert_eq!(
+        PackageStore::open(dir.path()).err().map(|e| e.kind()),
+        Some(io::ErrorKind::WouldBlock)
+    );
+    assert_eq!(files(dir.path()).len(), 1);
+    drop(running);
+    drop(store);
+    assert!(PackageStore::open(dir.path()).is_ok());
 }
 
 #[test]
@@ -1751,10 +2012,10 @@ fn add_a_github_repository_install_then_update_then_survive_a_takeover() {
         .with(GITHUB_ASSET_REDIRECT, Canned::Body(v1.to_vec()));
     let manifest = fetch_manifest(&fetcher, &source, &FetchControl::for_manifest()).unwrap();
     let app = manifest.app(APP).unwrap();
-    let ticket = plan_install(app, trust.get(APP), None, &profile(), STABLE).unwrap();
+    let ticket = plan_install(app, &trust, None, &profile(), STABLE).unwrap();
     assert!(ticket.first_use());
-    let mut sink = packages.begin(&ticket.release().sha256).unwrap();
-    let control = FetchControl::for_package(ticket.release().size);
+    let mut sink = packages.begin(ticket.release().sha256()).unwrap();
+    let control = FetchControl::for_package(ticket.release().size());
     let package = fetch_package(&fetcher, &ticket, &mut sink, &control).unwrap();
     assert_eq!(fetcher.asked().last().unwrap(), GITHUB_ASSET_REDIRECT);
     trust.record_install(&ticket, &package).unwrap();
@@ -1775,8 +2036,8 @@ fn add_a_github_repository_install_then_update_then_survive_a_takeover() {
     let manifest = fetch_manifest(&fetcher, &source, &FetchControl::for_manifest()).unwrap();
     let app = manifest.app(APP).unwrap();
     trust.observe(app).unwrap();
-    let ticket = plan_install(app, trust.get(APP), Some(&installed), &profile(), STABLE).unwrap();
-    let mut sink = packages.begin(&ticket.release().sha256).unwrap();
+    let ticket = plan_install(app, &trust, Some(&installed), &profile(), STABLE).unwrap();
+    let mut sink = packages.begin(ticket.release().sha256()).unwrap();
     let updated = fetch_package(&fetcher, &ticket, &mut sink, &long_enough()).unwrap();
     assert_eq!(*updated.version(), Version::new(1, 1, 0));
     assert_eq!(
@@ -1795,7 +2056,7 @@ fn add_a_github_repository_install_then_update_then_survive_a_takeover() {
     let stolen = manifest.app(APP).unwrap();
     assert!(matches!(
         trust.observe(stolen),
-        Err(TrustError::Problem(TrustProblem::PublisherChanged))
+        Ok(Observed::Mismatch(TrustProblem::PublisherChanged))
     ));
     assert_eq!(
         check_update(
@@ -1808,7 +2069,7 @@ fn add_a_github_repository_install_then_update_then_survive_a_takeover() {
         UpdateStatus::Blocked(TrustProblem::PublisherChanged)
     );
     assert_eq!(
-        plan_install(stolen, trust.get(APP), Some(&installed), &profile(), STABLE).unwrap_err(),
+        plan_install(stolen, &trust, Some(&installed), &profile(), STABLE).unwrap_err(),
         InstallRefusal::Untrusted(TrustProblem::PublisherChanged)
     );
 }

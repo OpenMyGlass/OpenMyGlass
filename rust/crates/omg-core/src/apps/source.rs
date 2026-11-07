@@ -85,6 +85,21 @@ impl RepositorySource {
         }
     }
 
+    /// Whether `url` is still this repository, for a manifest redirect. For a site: the same
+    /// origin, so a site shared between users is one trust domain. For GitHub, where every
+    /// repository shares one host: the same owner and repository.
+    pub fn covers(&self, url: &HttpsUrl) -> bool {
+        match &self.github {
+            Some((owner, repo)) => {
+                let prefix = format!("/{owner}/{repo}/");
+                url.origin() == GITHUB_RAW_HOST
+                    && url.target().len() > prefix.len()
+                    && url.target()[..prefix.len()].eq_ignore_ascii_case(&prefix)
+            }
+            None => url.origin() == self.manifest_url.origin(),
+        }
+    }
+
     /// Rebuilds a source from a manifest URL kept by the companion.
     pub fn from_manifest_url(manifest_url: &HttpsUrl) -> Result<Self, SourceError> {
         Self::parse(manifest_url.as_str())
@@ -201,6 +216,25 @@ mod tests {
         assert_eq!(source.label(), "example.org:8443/~me/glass/omg-apps.json");
         let again = RepositorySource::from_manifest_url(source.manifest_url()).unwrap();
         assert_eq!(again, source);
+    }
+
+    #[test]
+    fn a_github_repository_covers_only_itself() {
+        let source = RepositorySource::parse("https://github.com/alice/tool").unwrap();
+        let url = |u: &str| HttpsUrl::parse(u).unwrap();
+        assert!(source.covers(&url(
+            "https://raw.githubusercontent.com/Alice/Tool/main/omg-apps.json"
+        )));
+        assert!(!source.covers(&url(
+            "https://raw.githubusercontent.com/mallory/x/HEAD/omg-apps.json"
+        )));
+        assert!(!source.covers(&url(
+            "https://raw.githubusercontent.com/alice/toolbox/HEAD/omg-apps.json"
+        )));
+        assert!(!source.covers(&url("https://github.com/alice/tool/raw/HEAD/omg-apps.json")));
+        let site = RepositorySource::parse("https://example.org/a/").unwrap();
+        assert!(site.covers(&url("https://example.org/b/omg-apps.json")));
+        assert!(!site.covers(&url("https://example.org:8443/a/omg-apps.json")));
     }
 
     #[test]
