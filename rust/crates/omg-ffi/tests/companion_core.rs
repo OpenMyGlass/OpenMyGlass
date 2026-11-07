@@ -433,6 +433,8 @@ struct TestEngines {
     block_tts: AtomicBool,
     tts_blocked: AtomicBool,
     cancels: AtomicU32,
+    /// While set, a blocked synthesis stays blocked even once cancelled.
+    hold_tts: AtomicBool,
 }
 
 impl TestEngines {
@@ -472,7 +474,7 @@ impl TextToSpeechEngine for TestEngines {
         if self.block_tts.swap(false, Ordering::SeqCst) {
             self.tts_blocked.store(true, Ordering::SeqCst);
             let start = Instant::now();
-            while self.cancels.load(Ordering::SeqCst) == 0 {
+            while self.cancels.load(Ordering::SeqCst) == 0 || self.hold_tts.load(Ordering::SeqCst) {
                 assert!(start.elapsed() < Duration::from_secs(10), "never cancelled");
                 thread::sleep(Duration::from_millis(1));
             }
@@ -800,15 +802,18 @@ fn requests_replaced_while_waiting_never_reach_the_engine() {
         .add_phone_note(Some("testo".into()), NoteLocale::It, Vec::new())
         .unwrap();
     engines.block_tts.store(true, Ordering::SeqCst);
+    engines.hold_tts.store(true, Ordering::SeqCst);
     phone.speak_note(id.clone(), 1).unwrap();
     let start = Instant::now();
     while !engines.tts_blocked.load(Ordering::SeqCst) {
         assert!(start.elapsed() < Duration::from_secs(10), "never started");
         thread::sleep(Duration::from_millis(1));
     }
+    // All of them wait behind the first, which only then ends.
     for request in 2..=20 {
         phone.speak_note(id.clone(), request).unwrap();
     }
+    engines.hold_tts.store(false, Ordering::SeqCst);
     poll_until(&phone, |e| ready_path(e, 20).is_some());
     assert_eq!(engines.said.lock().unwrap().len(), 1);
 }
