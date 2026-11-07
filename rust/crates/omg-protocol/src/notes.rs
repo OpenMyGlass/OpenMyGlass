@@ -142,27 +142,37 @@ pub struct NoteManifest {
 }
 
 /// Why a manifest is not acceptable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ManifestError {
     /// No text and no attachments.
+    #[error("the note is empty")]
     Empty,
     /// The text is over [`MAX_NOTE_TEXT_BYTES`].
+    #[error("the text is too long")]
     TextTooLong,
     /// Two attachments share an id.
+    #[error("two attachments have the id {0}")]
     DuplicateAttachmentId(AttachmentId),
     /// More than one voice recording.
+    #[error("a note can have only one voice recording")]
     TooManyVoiceRecordings,
     /// More than [`MAX_PHOTOS_PER_NOTE`] photos.
+    #[error("a note can have at most {MAX_PHOTOS_PER_NOTE} photos")]
     TooManyPhotos,
     /// More than one video.
+    #[error("a note can have only one video")]
     TooManyVideos,
     /// Photos and a video on one note, while [`ALLOW_PHOTOS_WITH_VIDEO`] is off.
+    #[error("a note cannot have both photos and a video")]
     PhotosAndVideo,
     /// An attachment is empty or over its kind's limit.
+    #[error("attachment {0} is empty or too big")]
     BadAttachmentSize(AttachmentId),
     /// A MIME type is empty, too long or not printable ASCII.
+    #[error("attachment {0} has an unusable type")]
     BadMime(AttachmentId),
     /// The attachments add up to more than [`MAX_NOTE_TOTAL_BYTES`].
+    #[error("the attachments are too big together")]
     TotalTooLarge,
 }
 

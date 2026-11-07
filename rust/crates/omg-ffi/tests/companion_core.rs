@@ -63,8 +63,17 @@ struct App {
 
 impl App {
     fn connect(core: Arc<CompanionCore>, addr: &str, allow_pairing: bool) -> App {
+        App::connect_with(core, addr, allow_pairing, link_profile_fast())
+    }
+
+    fn connect_with(
+        core: Arc<CompanionCore>,
+        addr: &str,
+        allow_pairing: bool,
+        profile: LinkProfile,
+    ) -> App {
         let socket = TcpStream::connect(addr).unwrap();
-        core.link_up(link_profile_fast(), allow_pairing);
+        core.link_up(profile, allow_pairing);
         let events = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let reader = {
@@ -402,6 +411,385 @@ fn a_note_taken_on_the_phone_is_stored_and_transcribed_with_no_link() {
         phone.add_phone_note(None, NoteLocale::En, Vec::new()),
         Err(CoreFailure::InvalidNote(_))
     ));
+}
+
+/// Engines a test can switch on and hold back.
+#[derive(Default)]
+struct TestEngines {
+    /// Absent: "no engine".
+    words: Mutex<Option<String>>,
+    /// While held, a transcription waits.
+    hold: Mutex<()>,
+    said: Mutex<Vec<String>>,
+}
+
+impl TestEngines {
+    fn with_words(words: &str) -> Arc<TestEngines> {
+        let engines = Arc::new(TestEngines::default());
+        *engines.words.lock().unwrap() = Some(words.into());
+        engines
+    }
+}
+
+impl SpeechToTextEngine for TestEngines {
+    fn transcribe(&self, _: String, _: String, _: NoteLocale) -> Result<String, SpeechFailure> {
+        drop(self.hold.lock().unwrap());
+        self.words
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(SpeechFailure::Unavailable)
+    }
+}
+
+impl TextToSpeechEngine for TestEngines {
+    fn synthesize(&self, text: String, _: NoteLocale) -> Result<SpeechAudio, SpeechFailure> {
+        if self.words.lock().unwrap().is_none() {
+            return Err(SpeechFailure::Unavailable);
+        }
+        self.said.lock().unwrap().push(text);
+        Ok(SpeechAudio {
+            sample_rate: 8000,
+            pcm: vec![9, 9],
+        })
+    }
+}
+
+fn test_core(dir: &Path, engines: &Arc<TestEngines>) -> Arc<CompanionCore> {
+    CompanionCore::new(
+        dir.to_string_lossy().into_owned(),
+        "test phone".into(),
+        "0".into(),
+        engines.clone(),
+        engines.clone(),
+    )
+    .unwrap()
+}
+
+fn add_voice_note(phone: &CompanionCore, dir: &Path, text: Option<&str>) -> String {
+    let voice = dir.join("voice-source.wav");
+    std::fs::write(&voice, b"audio").unwrap();
+    phone
+        .add_phone_note(
+            text.map(Into::into),
+            NoteLocale::It,
+            vec![NewAttachment {
+                kind: NoteAttachmentKind::Voice,
+                mime: "audio/wav".into(),
+                path: voice.to_string_lossy().into_owned(),
+                duration_ms: None,
+            }],
+        )
+        .unwrap()
+}
+
+/// Polls as an app with no link does, until `done`. Returns the events seen.
+fn poll_until(phone: &CompanionCore, mut done: impl FnMut(&[CoreEvent]) -> bool) -> Vec<CoreEvent> {
+    let start = Instant::now();
+    let mut seen = Vec::new();
+    loop {
+        seen.extend(phone.poll());
+        if done(&seen) {
+            return seen;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "timed out: {seen:?}"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn polling_alone_delivers_a_transcript_with_no_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("parole");
+    let phone = test_core(tmp.path(), &engines);
+    let held = engines.hold.lock().unwrap();
+    add_voice_note(&phone, tmp.path(), None);
+    assert!(phone.notes()[0].transcribing);
+    assert!(!phone.notes()[0].speakable, "nothing to read yet");
+    assert_eq!(phone.notes()[0].waiting, None);
+    drop(held);
+    poll_until(&phone, |_| phone.notes()[0].transcript.is_some());
+    let note = phone.notes().remove(0);
+    assert_eq!(note.transcript.as_deref(), Some("parole"));
+    assert!(!note.transcribing);
+    assert!(note.speakable);
+}
+
+#[test]
+fn polling_leaves_what_the_pump_must_write_alone() {
+    let (addr, _rt) = sim_glass(None, false);
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = Arc::new(FakeEngines::default());
+    let phone = core(tmp.path(), &engines);
+    phone.link_up(link_profile_fast(), true);
+    assert!(phone.poll().is_empty());
+    assert!(!phone.pump().outgoing.is_empty(), "the handshake went out");
+    phone.link_down();
+    // And the handshake really works after a poll: the rest is the ordinary path.
+    let app = App::connect(phone.clone(), &addr, true);
+    phone.poll();
+    app.close();
+}
+
+#[test]
+fn a_transcription_cut_short_by_the_app_stopping_runs_again_on_the_next_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stuck = TestEngines::with_words("mai");
+    let held = stuck.hold.lock().unwrap();
+    let phone = test_core(tmp.path(), &stuck);
+    add_voice_note(&phone, tmp.path(), None);
+    drop(phone); // The process would be gone. Here the thread just waits on `hold`.
+
+    let engines = TestEngines::with_words("dopo");
+    let phone = test_core(tmp.path(), &engines);
+    assert!(phone.notes()[0].transcribing);
+    poll_until(&phone, |_| phone.notes()[0].transcript.is_some());
+    assert_eq!(phone.notes()[0].transcript.as_deref(), Some("dopo"));
+    drop(held);
+}
+
+#[test]
+fn no_engine_is_reported_and_asking_again_works_once_there_is_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = Arc::new(TestEngines::default());
+    let phone = test_core(tmp.path(), &engines);
+    let id = add_voice_note(&phone, tmp.path(), None);
+    poll_until(&phone, |_| phone.notes()[0].transcript_error.is_some());
+
+    // A failure is not retried behind the owner's back on every start.
+    drop(phone);
+    let phone = test_core(tmp.path(), &engines);
+    assert!(!phone.notes()[0].transcribing);
+
+    *engines.words.lock().unwrap() = Some("adesso".into());
+    phone.retranscribe_note(id.clone()).unwrap();
+    assert!(phone.notes()[0].transcribing);
+    poll_until(&phone, |_| phone.notes()[0].transcript.is_some());
+    let note = phone.notes().remove(0);
+    assert_eq!(note.transcript.as_deref(), Some("adesso"));
+    assert_eq!(note.transcript_error, None);
+
+    assert!(matches!(
+        phone.retranscribe_note("zz".into()),
+        Err(CoreFailure::InvalidNote(_))
+    ));
+}
+
+#[test]
+fn a_note_is_read_aloud_with_no_link_and_only_the_latest_request_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("sentito");
+    let phone = test_core(tmp.path(), &engines);
+    let id = add_voice_note(&phone, tmp.path(), Some("scritto"));
+    poll_until(&phone, |_| phone.notes()[0].transcript.is_some());
+
+    phone.speak_note(id.clone()).unwrap();
+    let ready = |events: &[CoreEvent]| {
+        events.iter().find_map(|e| match e {
+            CoreEvent::NoteSpeechReady { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+    };
+    let events = poll_until(&phone, |e| ready(e).is_some());
+    let first = ready(&events).unwrap();
+    assert_eq!(*engines.said.lock().unwrap(), ["scritto\nsentito"]);
+    let wav = std::fs::read(&first).unwrap();
+    assert_eq!(&wav[..4], b"RIFF");
+    assert_eq!(&wav[44..], [9, 9]);
+
+    // The next request replaces the audio, and stopping removes it.
+    phone.speak_note(id.clone()).unwrap();
+    assert!(!Path::new(&first).exists());
+    let events = poll_until(&phone, |e| ready(e).is_some());
+    let second = ready(&events).unwrap();
+    assert_ne!(first, second);
+    phone.stop_speaking();
+    assert!(!Path::new(&second).exists());
+
+    // Stopped while it runs: nothing is announced, and nothing stays on disk.
+    phone.speak_note(id.clone()).unwrap();
+    phone.stop_speaking();
+    let speech_dir = tmp.path().join("speech");
+    let start = Instant::now();
+    while engines.said.lock().unwrap().len() < 3 {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        thread::sleep(Duration::from_millis(2));
+    }
+    thread::sleep(Duration::from_millis(50));
+    assert!(ready(&phone.poll()).is_none());
+    assert_eq!(std::fs::read_dir(&speech_dir).unwrap().count(), 0);
+
+    // No engine: the reason reaches the owner.
+    *engines.words.lock().unwrap() = None;
+    phone.speak_note(id).unwrap();
+    let events = poll_until(&phone, |e| {
+        e.iter()
+            .any(|e| matches!(e, CoreEvent::NoteSpeechFailed { .. }))
+    });
+    assert!(events.iter().any(|e| matches!(
+        e,
+        CoreEvent::NoteSpeechFailed { reason, .. } if reason.contains("no text-to-speech")
+    )));
+}
+
+#[test]
+fn long_text_reaches_the_engine_in_pieces_and_comes_back_as_one_audio() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("x");
+    let phone = test_core(tmp.path(), &engines);
+    let long = "Una frase che si ripete. ".repeat(1000);
+    let id = phone
+        .add_phone_note(Some(long.clone()), NoteLocale::It, Vec::new())
+        .unwrap();
+    phone.speak_note(id).unwrap();
+    let events = poll_until(&phone, |e| {
+        e.iter()
+            .any(|e| matches!(e, CoreEvent::NoteSpeechReady { .. }))
+    });
+    let said = engines.said.lock().unwrap().clone();
+    assert!(said.len() > 1);
+    assert!(said.iter().all(|p| p.len() <= 3000));
+    assert_eq!(said.join(" "), long.trim());
+    let path = events
+        .iter()
+        .find_map(|e| match e {
+            CoreEvent::NoteSpeechReady { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(std::fs::read(path).unwrap().len(), 44 + 2 * said.len());
+}
+
+#[test]
+fn a_note_with_nothing_to_read_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("x");
+    let phone = test_core(tmp.path(), &engines);
+    let photo = tmp.path().join("p.jpg");
+    std::fs::write(&photo, b"photo").unwrap();
+    let id = phone
+        .add_phone_note(
+            None,
+            NoteLocale::It,
+            vec![NewAttachment {
+                kind: NoteAttachmentKind::Photo,
+                mime: "image/jpeg".into(),
+                path: photo.to_string_lossy().into_owned(),
+                duration_ms: None,
+            }],
+        )
+        .unwrap();
+    assert!(!phone.notes()[0].speakable);
+    assert!(matches!(
+        phone.speak_note(id),
+        Err(CoreFailure::InvalidNote(_))
+    ));
+}
+
+#[test]
+fn a_phone_note_is_deleted_with_its_files_and_stays_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engines = TestEngines::with_words("x");
+    let phone = test_core(tmp.path(), &engines);
+    let keep = phone
+        .add_phone_note(Some("resta".into()), NoteLocale::It, Vec::new())
+        .unwrap();
+    let id = add_voice_note(&phone, tmp.path(), Some("via"));
+    let path = phone
+        .notes()
+        .into_iter()
+        .find(|n| n.id == id)
+        .unwrap()
+        .attachments[0]
+        .path
+        .clone()
+        .unwrap();
+    assert!(Path::new(&path).exists());
+
+    phone.delete_note(id.clone()).unwrap();
+    assert!(!Path::new(&path).exists());
+    assert_eq!(phone.notes().len(), 1);
+    assert!(matches!(
+        phone.delete_note(id),
+        Err(CoreFailure::InvalidNote(_))
+    ));
+    drop(phone);
+    let phone = test_core(tmp.path(), &engines);
+    let notes = phone.notes();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].id, keep);
+}
+
+#[test]
+fn a_note_too_big_for_the_link_says_what_it_waits_for_and_cannot_be_deleted_yet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let glass_dir = tmp.path().join("glass");
+    let photo = tmp.path().join("p.jpg");
+    std::fs::write(&photo, vec![2u8; 300_000]).unwrap();
+    let mut queue = GlassNotes::open(&glass_dir, SenderConfig::default()).unwrap();
+    queue
+        .add_note(
+            &NoteDraft {
+                created_at_ms: 1,
+                locale: Locale::It,
+                text: Some("grande".into()),
+                attachments: vec![AttachmentSource {
+                    kind: AttachmentKind::Photo,
+                    mime: "image/jpeg".into(),
+                    path: photo,
+                    duration_ms: None,
+                }],
+            },
+            1,
+        )
+        .unwrap();
+    drop(queue);
+
+    let (addr, _rt) = sim_glass(Some(&glass_dir), false);
+    let engines = Arc::new(FakeEngines::default());
+    let phone = core(&tmp.path().join("phone"), &engines);
+
+    // Over a slow link: the first app connection pairs, with the fast profile swapped out.
+    let app = App::connect_with(phone.clone(), &addr, true, link_profile_constrained());
+    app.wait_for("the deferral", |e| {
+        e.iter()
+            .any(|e| matches!(e, CoreEvent::NoteDeferred { .. }))
+    });
+    let note = phone.notes().remove(0);
+    assert!(!note.complete);
+    assert!(!note.deletable);
+    assert!(note.speakable, "its text is already here");
+    assert!(note.waiting.as_deref().unwrap().contains("faster link"));
+    assert!(matches!(
+        phone.delete_note(note.id.clone()),
+        Err(CoreFailure::InvalidNote(_))
+    ));
+    app.close();
+
+    // Over a fast one it arrives, and then it can go.
+    let app = App::connect(phone.clone(), &addr, false);
+    app.wait_for("the sync", |e| {
+        e.iter().any(|e| matches!(e, CoreEvent::NoteSynced { .. }))
+    });
+    let note = phone.notes().remove(0);
+    assert!(note.complete);
+    assert_eq!(note.waiting, None);
+    assert!(note.deletable);
+    phone.delete_note(note.id).unwrap();
+    assert!(phone.notes().is_empty());
+    app.close();
+
+    assert!(phone.snapshot().receiving.is_none());
+}
+
+#[test]
+fn languages_map_to_the_supported_ones() {
+    assert_eq!(note_locale_for_language("it".into()), NoteLocale::It);
+    assert_eq!(note_locale_for_language("FR".into()), NoteLocale::Fr);
+    assert_eq!(note_locale_for_language("de".into()), NoteLocale::En);
 }
 
 #[test]

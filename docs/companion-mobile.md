@@ -30,23 +30,28 @@ Not solved by this layer: "sync on its own" on iOS depends on Core Bluetooth bac
 
 ## Using it
 
-Two threads per link:
+Two threads per link, and one more while the app is open:
 
 ```text
 reader:  loop { n = socket.read(buf); core.on_bytes(buf[..n]); wake(pump) }
 pump:    loop { wait(wake, at most 250 ms); o = core.pump();
                 socket.write(o.outgoing); show(o.events); if o.close_link { break } }
 then:    socket.close(); core.link_down()
+poller:  loop { sleep(500 ms); show(core.poll()) }
 ```
 
-A blocked write never stops reading, which matters on small Bluetooth buffers, where two peers could otherwise each wait for the other to read. Bytes leave in the order the core produced them, whichever thread called it.
+A blocked write never stops reading, which matters on small Bluetooth buffers, where two peers could otherwise each wait for the other to read. Bytes leave in the order the core produced them, whichever thread called it. `poll()` exists because nothing pumps with no link, yet a transcript or a note read aloud can finish then. It leaves what `pump()` must write alone, so it needs no coordination with the link's threads.
 
 For a UI: `snapshot()` is the link and what the Glass last reported, `notes()` is the list, and `CoreEvent`s say when to read them again.
 
 - **Settings:** `change_settings` sends only the fields set. The Glass clamps values and answers with the full mirror as `SettingsChanged`. Radios have `set_radio` and `set_airplane_mode`. A field the Glass does not report stays `None`, and the UI hides it: today that is `brightness`, which glassd does not have.
 - **Pairing:** `link_up(profile, allow_pairing)`. Set `allow_pairing` only when the owner asked to pair.
 - **Notes from the Glass** arrive by themselves. Attachment paths are set once a file is verified.
-- **Notes on the phone** (`add_phone_note`) are stored on the phone only. The protocol syncs in one direction, from Glass to phone.
+- **Notes on the phone** (`add_phone_note`) are stored on the phone only. The protocol syncs in one direction, from Glass to phone. A transcription cut short by the app stopping runs again on the next start.
+- **A note's state:** `NoteInfo` says whether it is `transcribing`, what it is `waiting` for, and whether it is `deletable` or `speakable`. `snapshot().receiving` is the note being pulled, and `CoreEvent::NoteProgress` says when to read it, about once a second.
+- **Reading a note aloud** (`speak_note`) needs no link. The core picks the text, its own and then what was heard, runs the engine on its own thread and writes a WAV file. The app gets `NoteSpeechReady{path}` or `NoteSpeechFailed{reason}` and only plays the file.
+- **Asking for a transcript again** (`retranscribe_note`) is for a recording with no text, for instance once there is an engine. Failures are not retried by themselves.
+- **Deleting** (`delete_note`) removes a note and its files from this phone. A note from the Glass must be all here: the Glass would offer an incomplete one again. If the Glass never got the acknowledgement of a note deleted here, it offers it again and the note comes back, which is the safe way for that to go wrong.
 
 ## The BLE link
 
@@ -89,7 +94,7 @@ Not built yet. The classes are ready for it: `BleLink` and `LinkController` take
 
 ## The Android app (`android/companion`)
 
-A first app, with no design work yet: every screen is built in code, the text is English only, and all logic is in the core. `./gradlew :android:companion:assembleDebug` builds the core for `arm64-v8a` and generates the bindings, so it needs `cargo` and `rustup target add aarch64-linux-android`. Other ABIs are one line in `RustAbi`.
+A first app, with no design work yet: every screen is built in code, the text is English only, and all logic is in the core. For notes it records a voice note, attaches photos and a video, shows photos full size and plays recordings and video in the app, reads notes aloud, transcribes again and deletes. None of this has run on a phone yet. `./gradlew :android:companion:assembleDebug` builds the core for `arm64-v8a` and generates the bindings, so it needs `cargo` and `rustup target add aarch64-linux-android`. Other ABIs are one line in `RustAbi`.
 
 To try it without a Glass, run a host glassd with its hardware back ends off (`--display log --glasshub none --radio off --power off` and so on), then `adb reverse tcp:7700 tcp:<port>`, and Connect to the default `127.0.0.1:7700`. `crates/glass-api/examples/note-add.rs` in glass-services adds notes to it.
 
@@ -98,8 +103,10 @@ Known limits:
 - RFCOMM is not there. It would be one more `ByteLink`, on Android only.
 - The link lives as long as the app's process: there is no foreground service, so nothing syncs while Android has stopped the app. See the BLE section below.
 - Speech uses the platform's engines, and a phone may have none. On the test phone (crDroid, no Google apps) neither exists, so notes say there is no transcript, and `AndroidTts` and `AndroidStt` have never produced anything. The fix is to bundle engines. Vosk is already used in `android/app`.
-- Notes cannot be deleted from the app, and a note cannot be sent to the Glass.
+- A note cannot be sent to the Glass, and a note that has not finished arriving cannot be discarded from here.
+- A draft lives only as long as the app's process.
+- The note list builds every note up front, so a very long list will be slow.
 
 ## Speech
 
-`SpeechToTextEngine` and `TextToSpeechEngine` are implemented by each app and always run on the companion. Files do not cross the boundary: an engine gets a path and returns text, or returns PCM. An engine that has no answer returns `Unavailable`, which reaches the Glass as the reason there is no text.
+`SpeechToTextEngine` and `TextToSpeechEngine` are implemented by each app and always run on the companion. Files do not cross the boundary: an engine gets a path and returns text, or returns PCM. An engine that has no answer returns `Unavailable`, which reaches the Glass as the reason there is no text. Text over 3000 bytes goes to the TTS engine in pieces, cut after a sentence or a word, because Android takes 4000 characters at most. The app gets one audio.

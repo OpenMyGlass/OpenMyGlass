@@ -161,6 +161,14 @@ impl GlassNotes {
         self.apply(effects, now)
     }
 
+    /// See [`NoteSender::forget`]. False if refused.
+    pub fn forget(&mut self, id: &NoteId, now: u64) -> Result<bool, CoreError> {
+        match self.machine.forget(id) {
+            Some(effects) => self.apply(effects, now).map(|_| true),
+            None => Ok(false),
+        }
+    }
+
     /// See [`NoteSender::retry_blocked`].
     pub fn retry_blocked(&mut self, id: &NoteId, now: u64) -> Result<Vec<Frame>, CoreError> {
         let effects = self.machine.retry_blocked(id, now);
@@ -399,6 +407,21 @@ impl CompanionNotes {
         self.machine.set_free_bytes(free_bytes);
     }
 
+    /// See [`NoteReceiver::forget`]. False if refused.
+    pub fn forget(&mut self, id: &NoteId, now: u64) -> Result<bool, CoreError> {
+        match self.machine.forget(id) {
+            Some(effects) => self.apply(effects, now).map(|_| true),
+            None => Ok(false),
+        }
+    }
+
+    /// See [`NoteReceiver::retranscribe`]. The work arrives through
+    /// [`take_speech_jobs`](CompanionNotes::take_speech_jobs).
+    pub fn retranscribe(&mut self, id: &NoteId, now: u64) -> Result<Vec<Frame>, CoreError> {
+        let effects = self.machine.retranscribe(id);
+        self.apply(effects, now)
+    }
+
     /// Speech jobs to run since the last call. Run them away from the link and pass each
     /// result to [`complete_speech`](CompanionNotes::complete_speech).
     pub fn take_speech_jobs(&mut self) -> Vec<SpeechJob> {
@@ -475,6 +498,10 @@ impl CompanionNotes {
                 }
                 ReceiverEffect::Persist(record) => {
                     self.store.save(record.as_ref())?;
+                    continue;
+                }
+                ReceiverEffect::DeleteLocal { note_id } => {
+                    self.store.delete_note(&note_id)?;
                     continue;
                 }
                 ReceiverEffect::TruncatePartial {

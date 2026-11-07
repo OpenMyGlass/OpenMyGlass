@@ -3,15 +3,17 @@ package org.openmyglass.companion
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
+import android.graphics.Bitmap
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.util.LruCache
 import android.view.Gravity
 import android.view.View
 import android.view.WindowInsetsController
@@ -25,11 +27,13 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.MediaController
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
+import android.widget.VideoView
 import org.openmyglass.corebindings.CompanionCore
 import org.openmyglass.corebindings.CoreEvent
 import org.openmyglass.corebindings.CoreSnapshot
@@ -42,10 +46,14 @@ import org.openmyglass.corebindings.NoteAttachmentKind
 import org.openmyglass.corebindings.NoteInfo
 import org.openmyglass.corebindings.NoteLocale
 import org.openmyglass.corebindings.NoteOrigin
+import org.openmyglass.corebindings.noteLocaleForLanguage
 import org.openmyglass.corebindings.timeZoneNames
 import java.io.File
+import java.io.IOException
 import java.text.DateFormat
 import java.util.Date
+import java.util.Locale
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 /**
@@ -63,8 +71,12 @@ class MainActivity : Activity() {
     private lateinit var settingsBox: LinearLayout
     private lateinit var notesBox: LinearLayout
     private lateinit var draftText: EditText
-    private lateinit var draftFiles: TextView
+    private lateinit var draftFiles: LinearLayout
     private lateinit var recordButton: Button
+    private lateinit var saveButton: Button
+    private lateinit var notesMessage: TextView
+    private lateinit var nowPlaying: View
+    private lateinit var nowPlayingLabel: TextView
     private lateinit var glassPage: View
     private lateinit var notesPage: View
 
@@ -73,6 +85,11 @@ class MainActivity : Activity() {
     private var recording: File? = null
     private var player: MediaPlayer? = null
 
+    /** Set from asking the core to read a note until the audio arrives or the owner stops it. */
+    private var speechWanted = false
+    private val thumbnails = LruCache<String, Bitmap>(THUMBNAILS_KEPT)
+    private val photoLoader = Executors.newSingleThreadExecutor()
+
     private val rows = mutableMapOf<String, (GlassSettings) -> Unit>()
 
     /** While set, a widget changing is us showing the Glass's value, not the owner's wish. */
@@ -80,6 +97,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // A draft is not kept across runs, so its copies are left over from a run that ended.
+        cacheDir.listFiles()?.filter { f -> CACHE_PREFIXES.any { f.name.startsWith(it) } }?.forEach { it.delete() }
         val engineContext = applicationContext
         core = CompanionCore(
             File(filesDir, "companion").path,
@@ -128,8 +147,9 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        link.disconnect()
-        player?.release()
+        link.close()
+        stopPlayback()
+        recorder?.stop()
         super.onDestroy()
     }
 
@@ -187,7 +207,11 @@ class MainActivity : Activity() {
         for (e in events) {
             when (e) {
                 is CoreEvent.SettingsChanged -> showSettings(e.settings)
-                is CoreEvent.NotesChanged, is CoreEvent.NoteSynced -> notes = true
+                is CoreEvent.NotesChanged -> notes = true
+                is CoreEvent.NoteSynced -> {
+                    notes = true
+                    say(null)
+                }
                 is CoreEvent.LinkClosed -> e.reason?.let { lastProblem = it }
                 is CoreEvent.LinkRunning -> {
                     lastProblem = null
@@ -196,8 +220,19 @@ class MainActivity : Activity() {
                         prefs.edit().putString(KEY_BLE_ADDRESS, it).apply()
                     }
                 }
-                is CoreEvent.NoteDeferred -> lastProblem = "Note waiting: ${e.reason}"
-                is CoreEvent.NoteRefused -> lastProblem = "Note refused: ${e.reason}"
+                is CoreEvent.NoteDeferred -> {
+                    notes = true
+                    say("A note is waiting: ${e.reason}")
+                }
+                is CoreEvent.NoteRefused -> say("A note was refused: ${e.reason}")
+                is CoreEvent.NoteSpeechReady -> if (speechWanted) {
+                    speechWanted = false
+                    startPlayer(e.path, "Reading the note")
+                }
+                is CoreEvent.NoteSpeechFailed -> if (speechWanted) {
+                    stopPlayback()
+                    say("Cannot read it aloud: ${e.reason}")
+                }
                 else -> Unit
             }
         }
@@ -230,7 +265,12 @@ class MainActivity : Activity() {
             s.bondedTo?.let { append("\nPaired with $it") }
             g.battery_line()?.let { append("\n$it") }
             g.softwareVersion?.let { append("\n$it") }
-            g.pendingNotes?.let { append("\nNotes waiting on the Glass: $it") }
+            g.pendingNotes?.let { count ->
+                append("\nNotes waiting on the Glass: $count")
+                g.pendingBytes?.takeIf { it > 0u }?.let { append(", ${megabytes(it)}") }
+            }
+            s.receiving?.let { append("\nReceiving a note: ${megabytes(it.receivedBytes)} of ${megabytes(it.totalBytes)}") }
+            if (s.notesSetAside > 0u) append("\nNotes that could not be read and were set aside: ${s.notesSetAside}")
             lastProblem?.let { append("\n$it") }
         }
         // The core keeps the last values after a link ends, and a change would go nowhere then.
@@ -550,8 +590,15 @@ class MainActivity : Activity() {
             hint = "A new note"
             contentDescription = "note text"
         }
-        draftFiles = TextView(this).apply { contentDescription = "note attachments" }
+        draftFiles = column().apply { contentDescription = "note attachments" }
         recordButton = button("Record voice") { toggleRecording() }
+        saveButton = button("Save note") { saveNote() }
+        notesMessage = TextView(this).apply {
+            contentDescription = "notes message"
+            visibility = View.GONE
+        }
+        nowPlayingLabel = TextView(this)
+        nowPlaying = row(nowPlayingLabel, button("Stop") { stopPlayback() }).apply { visibility = View.GONE }
         notesBox = column()
         page.addView(draftText)
         page.addView(
@@ -566,7 +613,9 @@ class MainActivity : Activity() {
             ),
         )
         page.addView(draftFiles)
-        page.addView(button("Save note") { saveNote() })
+        page.addView(saveButton)
+        page.addView(notesMessage)
+        page.addView(nowPlaying)
         page.addView(
             TextView(this).apply {
                 text = "Notes"
@@ -594,10 +643,12 @@ class MainActivity : Activity() {
         val uris = data.clipData?.let { clip -> (0 until clip.itemCount).map { clip.getItemAt(it).uri } }
             ?: listOfNotNull(data.data)
         val kind = if (requestCode == REQUEST_VIDEO) NoteAttachmentKind.VIDEO else NoteAttachmentKind.PHOTO
+        say("Copying")
         thread {
             val added = uris.mapNotNull { copyIn(it, kind) }
             main.post {
                 pending.addAll(added)
+                if (added.size == uris.size) say(null)
                 showDraftFiles()
             }
         }
@@ -608,7 +659,8 @@ class MainActivity : Activity() {
         val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
             ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "file"
         val target = File.createTempFile("pick", "-" + name.takeLast(40).replace('/', '_'), cacheDir)
-        contentResolver.openInputStream(uri)!!.use { input ->
+        val source = contentResolver.openInputStream(uri) ?: throw IOException("it is gone")
+        source.use { input ->
             target.outputStream().use { input.copyTo(it) }
         }
         NewAttachment(
@@ -617,21 +669,17 @@ class MainActivity : Activity() {
             target.path,
             null,
         )
-    } catch (e: java.io.IOException) {
-        main.post { lastProblem = "Cannot read that file: ${e.message}"; refreshStatus() }
+    } catch (e: IOException) {
+        main.post { say("Cannot read that file: ${e.message}") }
+        null
+    } catch (e: SecurityException) {
+        main.post { say("Cannot read that file: ${e.message}") }
         null
     }
 
     private fun toggleRecording() {
-        val running = recorder
-        if (running != null) {
-            val length = running.stop()
-            recorder = null
-            recordButton.text = "Record voice"
-            pending.add(
-                NewAttachment(NoteAttachmentKind.VOICE, "audio/wav", recording!!.path, length.toUInt()),
-            )
-            showDraftFiles()
+        if (recorder != null) {
+            finishRecording()
             return
         }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -639,27 +687,71 @@ class MainActivity : Activity() {
             return
         }
         val file = File.createTempFile("voice", ".wav", cacheDir)
+        val started = VoiceRecorder(file)
+        if (!started.start()) {
+            file.delete()
+            say("The microphone is not available")
+            return
+        }
         recording = file
-        recorder = VoiceRecorder(file).also { it.start() }
+        recorder = started
         recordButton.text = "Stop"
+    }
+
+    /** Puts what was recorded in the draft, if a recording is running. */
+    private fun finishRecording() {
+        val running = recorder ?: return
+        val file = recording ?: return
+        val length = running.stop()
+        recorder = null
+        recording = null
+        recordButton.text = "Record voice"
+        if (length == null) {
+            file.delete()
+            say("The recording failed")
+            return
+        }
+        pending.add(NewAttachment(NoteAttachmentKind.VOICE, "audio/wav", file.path, length.toUInt()))
+        showDraftFiles()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, results: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, results)
-        if (requestCode == REQUEST_MIC && results.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            toggleRecording()
+        if (requestCode == REQUEST_MIC) {
+            if (results.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                toggleRecording()
+            } else {
+                say("Recording a voice note needs the microphone permission")
+            }
         }
         if (requestCode == REQUEST_BLUETOOTH) bluetoothAnswered()
     }
 
     private fun showDraftFiles() {
-        draftFiles.text = pending.joinToString("\n") { "${it.kind.name.lowercase()}: ${File(it.path).name}" }
+        draftFiles.removeAllViews()
+        pending.toList().forEach { file ->
+            val name = File(file.path).name.let { it.substringAfter('-', it) }
+            val label = TextView(this).apply { text = "${file.kind.name.lowercase()}: $name" }
+            draftFiles.addView(
+                row(
+                    label,
+                    button("Remove") {
+                        pending.remove(file)
+                        File(file.path).delete()
+                        showDraftFiles()
+                    },
+                ),
+            )
+        }
     }
 
     private fun saveNote() {
+        finishRecording()
         val text = draftText.text.toString().ifBlank { null }
         val files = pending.toList()
-        val locale = lastSettings().locale ?: NoteLocale.EN
+        // With no link the Glass cannot say, and a note in the wrong language transcribes badly.
+        val locale = lastSettings().locale ?: noteLocaleForLanguage(Locale.getDefault().language)
+        saveButton.isEnabled = false
         thread {
             val problem = try {
                 core.addPhoneNote(text, locale, files)
@@ -668,15 +760,14 @@ class MainActivity : Activity() {
                 e.message
             }
             main.post {
+                saveButton.isEnabled = true
+                say(problem)
                 if (problem == null) {
                     files.forEach { File(it.path).delete() }
-                    pending.clear()
+                    pending.removeAll(files)
                     draftText.setText("")
                     showDraftFiles()
                     refreshNotes()
-                } else {
-                    lastProblem = problem
-                    refreshStatus()
                 }
             }
         }
@@ -695,46 +786,216 @@ class MainActivity : Activity() {
         val box = column().apply { setPadding(0, dp(8), 0, dp(8)); contentDescription = "note ${n.id}" }
         val date = DateFormat.getDateTimeInstance().format(Date(n.createdAtMs.toLong()))
         val from = if (n.origin == NoteOrigin.GLASS) "from the Glass" else "on this phone"
-        val state = if (n.complete) "" else ", still arriving"
-        box.addView(TextView(this).apply { text = "$date, $from$state"; textSize = 12f })
-        n.text?.let { text -> box.addView(TextView(this).apply { this.text = text }) }
-        n.transcript?.let { text -> box.addView(TextView(this).apply { this.text = "Heard: $text" }) }
+        val state = if (n.complete || n.waiting != null) "" else ", still arriving"
+        box.addView(small("$date, $from$state"))
+        n.waiting?.let { box.addView(small("Waiting: $it")) }
+        n.text?.let { box.addView(selectable(it)) }
+        n.transcript?.let { heard ->
+            box.addView(if (heard.isBlank()) small("Nothing was heard in the recording.") else selectable("Heard: $heard"))
+        }
+        if (n.transcribing) box.addView(small("Transcribing the recording"))
         n.transcriptError?.let { why ->
-            box.addView(TextView(this).apply { text = "No transcript: $why"; textSize = 12f })
+            box.addView(small("No transcript: $why"))
+            if (!n.transcribing) box.addView(button("Transcribe again") { transcribeAgain(n) })
         }
         n.attachments.forEach { box.addView(attachmentView(it)) }
+        val actions = mutableListOf<View>()
+        if (n.speakable) actions.add(button("Read aloud") { readAloud(n) })
+        if (n.deletable) actions.add(button("Delete") { confirmDelete(n) })
+        if (actions.isNotEmpty()) box.addView(row(*actions.toTypedArray()))
         return box
+    }
+
+    private fun small(text: String) = TextView(this).apply {
+        this.text = text
+        textSize = 12f
+    }
+
+    private fun selectable(text: String) = TextView(this).apply {
+        this.text = text
+        setTextIsSelectable(true)
     }
 
     private fun attachmentView(a: NoteAttachmentInfo): View {
         val path = a.path
-        val mb = "%.1f MB".format(a.size.toLong() / 1_000_000.0)
-        if (a.kind == NoteAttachmentKind.PHOTO && path != null) {
-            val options = BitmapFactory.Options().apply { inSampleSize = 8 }
-            BitmapFactory.decodeFile(path, options)?.let { bitmap ->
-                return ImageView(this).apply {
-                    setImageBitmap(bitmap)
-                    adjustViewBounds = true
-                    maxHeight = dp(160)
-                    contentDescription = "photo"
+        val size = megabytes(a.size)
+        if (path == null) return small("${a.kind.name.lowercase()}, $size, not here yet")
+        return when (a.kind) {
+            NoteAttachmentKind.PHOTO -> thumbnail(path)
+            NoteAttachmentKind.VOICE -> button("Play recording, $size") { playRecording(path) }
+            NoteAttachmentKind.VIDEO -> button("Play video, $size") { showVideo(path) }
+        }
+    }
+
+    private fun thumbnail(path: String): View {
+        val view = ImageView(this).apply {
+            adjustViewBounds = true
+            maxHeight = dp(160)
+            contentDescription = "photo"
+            setOnClickListener { showPhoto(path) }
+        }
+        val known = thumbnails.get(path)
+        if (known != null) {
+            view.setImageBitmap(known)
+            return view
+        }
+        val maxSide = dp(320)
+        photoLoader.execute {
+            val bitmap = thumbnails.get(path) ?: Photos.decode(path, maxSide)
+            main.post {
+                if (bitmap == null) {
+                    view.setImageResource(android.R.drawable.ic_menu_report_image)
+                    view.contentDescription = "a photo that cannot be shown"
+                } else {
+                    thumbnails.put(path, bitmap)
+                    view.setImageBitmap(bitmap)
                 }
             }
         }
-        val label = "${a.kind.name.lowercase()}, $mb" + if (path == null) " (arriving)" else ""
-        if (a.kind == NoteAttachmentKind.VOICE && path != null) {
-            return button("Play $label") { play(path) }
-        }
-        return TextView(this).apply { text = label }
+        return view
     }
 
-    private fun play(path: String) {
-        player?.release()
-        player = MediaPlayer().apply {
-            setDataSource(path)
-            prepare()
-            start()
+    private fun fullScreen(content: View): Dialog =
+        Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen).apply { setContentView(content) }
+
+    private fun showPhoto(path: String) {
+        val view = ImageView(this).apply { contentDescription = "photo, full size" }
+        val dialog = fullScreen(view)
+        view.setOnClickListener { dialog.dismiss() }
+        dialog.show()
+        val metrics = resources.displayMetrics
+        val maxSide = maxOf(metrics.widthPixels, metrics.heightPixels)
+        photoLoader.execute {
+            val bitmap = Photos.decode(path, maxSide)
+            main.post {
+                if (bitmap == null) {
+                    dialog.dismiss()
+                    say("This photo cannot be shown")
+                } else {
+                    view.setImageBitmap(bitmap)
+                }
+            }
         }
     }
+
+    private fun showVideo(path: String) {
+        stopPlayback()
+        val video = VideoView(this).apply { contentDescription = "video" }
+        val holder = FrameLayout(this).apply {
+            addView(video, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.CENTER))
+        }
+        val dialog = fullScreen(holder)
+        val controls = MediaController(this)
+        controls.setAnchorView(video)
+        video.setMediaController(controls)
+        video.setOnPreparedListener { video.start() }
+        video.setOnErrorListener { _, _, _ ->
+            dialog.dismiss()
+            say("This phone cannot play this video")
+            true
+        }
+        dialog.setOnDismissListener { video.stopPlayback() }
+        video.setVideoPath(path)
+        dialog.show()
+    }
+
+    private fun transcribeAgain(n: NoteInfo) {
+        try {
+            core.retranscribeNote(n.id)
+            say(null)
+        } catch (e: org.openmyglass.corebindings.CoreFailure) {
+            say(e.message)
+        }
+        link.poke()
+        refreshNotes()
+    }
+
+    private fun confirmDelete(n: NoteInfo) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete this note?")
+            .setMessage("It is removed from this phone, with its attachments.")
+            .setPositiveButton("Delete") { _, _ -> delete(n) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun delete(n: NoteInfo) {
+        stopPlayback()
+        n.attachments.mapNotNull { it.path }.forEach { thumbnails.remove(it) }
+        thread {
+            val problem = try {
+                core.deleteNote(n.id)
+                null
+            } catch (e: org.openmyglass.corebindings.CoreFailure) {
+                e.message
+            }
+            main.post {
+                say(problem)
+                refreshNotes()
+            }
+        }
+    }
+
+    private fun readAloud(n: NoteInfo) {
+        stopPlayback()
+        try {
+            core.speakNote(n.id)
+            speechWanted = true
+            say(null)
+            showNowPlaying("Preparing speech")
+        } catch (e: org.openmyglass.corebindings.CoreFailure) {
+            say(e.message)
+        }
+    }
+
+    private fun playRecording(path: String) {
+        stopPlayback()
+        startPlayer(path, "Playing the recording")
+    }
+
+    private fun startPlayer(path: String, label: String) {
+        player?.release()
+        player = null
+        val next = MediaPlayer()
+        try {
+            next.setDataSource(path)
+            next.setOnCompletionListener { stopPlayback() }
+            next.prepare()
+            next.start()
+            player = next
+            say(null)
+            showNowPlaying(label)
+        } catch (e: IOException) {
+            next.release()
+            stopPlayback()
+            say("Cannot play it: ${e.message}")
+        } catch (e: IllegalStateException) {
+            next.release()
+            stopPlayback()
+            say("Cannot play it: ${e.message}")
+        }
+    }
+
+    private fun showNowPlaying(label: String) {
+        nowPlayingLabel.text = label
+        nowPlaying.visibility = View.VISIBLE
+    }
+
+    private fun stopPlayback() {
+        player?.release()
+        player = null
+        speechWanted = false
+        core.stopSpeaking()
+        nowPlaying.visibility = View.GONE
+    }
+
+    /** A line about notes above the list, or none. */
+    private fun say(message: String?) {
+        notesMessage.text = message.orEmpty()
+        notesMessage.visibility = if (message == null) View.GONE else View.VISIBLE
+    }
+
+    private fun megabytes(bytes: ULong) = "%.2f MB".format(bytes.toLong() / 1_000_000.0)
 
     // ------------------------------ helpers ------------------------------
 
@@ -768,6 +1029,8 @@ class MainActivity : Activity() {
         const val REQUEST_VIDEO = 2
         const val REQUEST_MIC = 3
         const val REQUEST_BLUETOOTH = 4
+        const val THUMBNAILS_KEPT = 64
+        val CACHE_PREFIXES = listOf("pick", "voice", "tts")
         val LOCALE_NAMES = mapOf(
             NoteLocale.IT to "Italiano",
             NoteLocale.EN to "English",
