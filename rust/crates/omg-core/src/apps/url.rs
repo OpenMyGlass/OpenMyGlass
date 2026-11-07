@@ -3,31 +3,48 @@
 //! Every URL here comes from untrusted input: a pasted repository address, a manifest, or a
 //! redirect. The rules are deliberately narrower than the URL standard, so that this parser and
 //! the platform's HTTP stack cannot read the same string differently: HTTPS only, plain ASCII, a
-//! real DNS name, no credentials, no IP addresses, no fragments, no encoded dots or slashes.
+//! real DNS name, no credentials, no IP addresses, no fragments, and a path with no dot segments or
+//! encoded separators. A query is opaque to us beyond well-formed escapes: signed storage URLs
+//! carry encoded slashes and colons there.
 
 use std::fmt;
 
 use thiserror::Error;
 
-/// Longest URL accepted, in bytes.
+/// Longest URL accepted from a pasted address or a manifest, in bytes.
 pub const MAX_URL_LEN: usize = 1024;
+/// Longest URL accepted from a redirect, in bytes. Signed storage URLs are long: a GitHub release
+/// asset redirect measured 924 bytes in November 2026, and nothing promises it stays that short.
+pub const MAX_REDIRECT_URL_LEN: usize = 8192;
 
-/// Names that resolve only inside a network, refused so that a repository cannot make the phone
-/// send requests to the owner's router or NAS. A public name that resolves to a private address
-/// is out of reach here: see the design doc, threat T7.
+/// Common names for things inside a network or for a public name that resolves to a chosen
+/// address. This is a denylist: it makes the casual cases fail and cannot be complete. Any public
+/// name can resolve to a private address, which only the fetcher can see: design doc, threat T7.
 const PRIVATE_SUFFIXES: &[&str] = &[
     "local",
     "localhost",
     "localdomain",
     "internal",
     "intranet",
+    "private",
     "lan",
     "home",
     "corp",
+    "test",
+    "invalid",
+    "ip",
     "home.arpa",
     "in-addr.arpa",
     "ip6.arpa",
+    "fritz.box",
+    "nip.io",
+    "sslip.io",
+    "xip.io",
+    "localtest.me",
+    "lvh.me",
 ];
+
+const HTTPS_DEFAULT_PORT: &str = "443";
 
 /// Why a URL was refused. Carries no part of the URL: the text is untrusted and may reach a screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -51,7 +68,7 @@ pub enum UrlError {
     #[error("URL has an invalid port")]
     BadPort,
     /// No path, dot segments, or a malformed or forbidden percent escape.
-    #[error("URL has an invalid path")]
+    #[error("URL has an invalid path or query")]
     BadPath,
     /// A redirect location that is neither absolute HTTPS nor path-absolute.
     #[error("redirect location is not usable")]
@@ -71,9 +88,14 @@ pub struct HttpsUrl {
 const SCHEME: &str = "https://";
 
 impl HttpsUrl {
-    /// Checks `input` against every rule and returns its canonical form (lowercase host).
+    /// Checks `input` against every rule and returns its canonical form: lowercase host, no
+    /// `:443`.
     pub fn parse(input: &str) -> Result<Self, UrlError> {
-        if input.len() > MAX_URL_LEN {
+        Self::parse_limited(input, MAX_URL_LEN)
+    }
+
+    fn parse_limited(input: &str, max_len: usize) -> Result<Self, UrlError> {
+        if input.len() > max_len {
             return Err(UrlError::TooLong);
         }
         let rest = input.strip_prefix(SCHEME).ok_or(UrlError::NotHttps)?;
@@ -95,6 +117,7 @@ impl HttpsUrl {
         if let Some(port) = port {
             check_port(port)?;
         }
+        let port = port.filter(|port| *port != HTTPS_DEFAULT_PORT);
         check_target(target)?;
 
         let host_end = SCHEME.len() + host.len();
@@ -119,10 +142,15 @@ impl HttpsUrl {
         &self.text
     }
 
-    /// The host, lowercase, without the port. This, and never an app's own name, is what the UI
-    /// shows as the origin of an app.
+    /// The host, lowercase, without the port. To show where something comes from use
+    /// [`origin`](Self::origin) or [`super::RepositorySource::label`]: a port is another server.
     pub fn host(&self) -> &str {
         &self.text[SCHEME.len()..self.host_end]
+    }
+
+    /// The host and any port other than 443.
+    pub fn origin(&self) -> &str {
+        &self.text[SCHEME.len()..self.path_at]
     }
 
     /// The path and the query, starting with `/`.
@@ -133,12 +161,12 @@ impl HttpsUrl {
     /// Resolves the `Location` of a redirect from this URL. The result passes the same rules.
     pub fn redirect(&self, location: &str) -> Result<Self, UrlError> {
         if location.starts_with(SCHEME) {
-            Self::parse(location)
+            Self::parse_limited(location, MAX_REDIRECT_URL_LEN)
         } else if location.starts_with('/') && !location.starts_with("//") {
             let mut joined = String::with_capacity(self.path_at + location.len());
             joined.push_str(&self.text[..self.path_at]);
             joined.push_str(location);
-            Self::parse(&joined)
+            Self::parse_limited(&joined, MAX_REDIRECT_URL_LEN)
         } else {
             Err(UrlError::BadRedirect)
         }
@@ -234,17 +262,39 @@ fn check_port(port: &str) -> Result<(), UrlError> {
     }
 }
 
-/// `target` starts with `/`. Dot segments and escapes that decode to separators are refused, so
-/// no server can normalize the path into something other than what was checked and shown.
+/// `target` starts with `/`. Path rules apply only to the path. They stop the usual ways of making
+/// a server normalize a path into another one (`..`, `..;`, `..%20`, encoded separators, overlong
+/// UTF-8); no list of this kind is a proof, which is fine because a path decides nothing here: the
+/// size, hash and signature do. A query only has to have well-formed escapes.
 fn check_target(target: &str) -> Result<(), UrlError> {
-    let path = target.split('?').next().unwrap_or(target);
-    if path
-        .split('/')
-        .any(|segment| segment == "." || segment == "..")
-    {
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let bad_segment = |segment: &str| {
+        segment == "."
+            || segment.starts_with("..")
+            || segment.starts_with(".;")
+            || segment.starts_with(".%")
+    };
+    if path.split('/').any(bad_segment) {
         return Err(UrlError::BadPath);
     }
-    let bytes = target.as_bytes();
+    for decoded in escapes(path)? {
+        let forbidden = decoded < 0x20
+            || matches!(
+                decoded,
+                0x7f | 0xc0 | 0xc1 | b'.' | b'/' | b'\\' | b'%' | b'?' | b'#' | b';'
+            );
+        if forbidden {
+            return Err(UrlError::BadPath);
+        }
+    }
+    escapes(query)?;
+    Ok(())
+}
+
+/// The bytes the percent escapes of `text` decode to, or an error if one is malformed.
+fn escapes(text: &str) -> Result<Vec<u8>, UrlError> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
@@ -254,16 +304,13 @@ fn check_target(target: &str) -> Result<(), UrlError> {
             ) else {
                 return Err(UrlError::BadPath);
             };
-            let decoded = hi * 16 + lo;
-            if !(0x20..0x7f).contains(&decoded) || matches!(decoded, b'.' | b'/' | b'\\' | b'%') {
-                return Err(UrlError::BadPath);
-            }
+            decoded.push(hi * 16 + lo);
             i += 3;
         } else {
             i += 1;
         }
     }
-    Ok(())
+    Ok(decoded)
 }
 
 fn hex_value(b: u8) -> Option<u8> {
@@ -287,6 +334,31 @@ mod tests {
         assert_eq!(u.target(), "/a/b-1.2.omgapp?x=1");
         assert!(HttpsUrl::parse("https://github.com/o/r/releases/download/app@1.0.0/a").is_ok());
         assert!(HttpsUrl::parse("https://xn--bcher-kva.example/a%20b").is_ok());
+        assert!(HttpsUrl::parse("https://h.example/caf%C3%A9.omgapp").is_ok());
+        assert!(HttpsUrl::parse("https://h.example/.well-known/x").is_ok());
+        assert_eq!(u.origin(), "example.org:8443");
+    }
+
+    #[test]
+    fn the_default_port_has_one_spelling() {
+        let u = HttpsUrl::parse("https://example.org:443/a").unwrap();
+        assert_eq!(u.as_str(), "https://example.org/a");
+        assert_eq!(u.origin(), "example.org");
+    }
+
+    #[test]
+    fn a_query_is_opaque_beyond_well_formed_escapes() {
+        for good in [
+            "https://h.example/a?rsct=application%2Foctet-stream",
+            "https://h.example/a?X-Amz-Credential=AKIA%2F2026%2Fus-east-1",
+            "https://h.example/a?se=2026-11-07T01%3A02%3A20Z&x=%2e%2e%00",
+            "https://h.example/a?path=/b/../c",
+        ] {
+            assert!(HttpsUrl::parse(good).is_ok(), "{good}");
+        }
+        for bad in ["https://h.example/a?x=%zz", "https://h.example/a?x=%2"] {
+            assert_eq!(HttpsUrl::parse(bad), Err(UrlError::BadPath), "{bad}");
+        }
     }
 
     #[test]
@@ -347,6 +419,10 @@ mod tests {
             "https://a.localhost/a",
             "https://NAS.LOCAL/a",
             "https://x.home.arpa/a",
+            "https://fritz.box/a",
+            "https://speedport.ip/a",
+            "https://a.test/a",
+            "https://192.168.1.1.nip.io/a",
             "https://1.1.168.192.in-addr.arpa/a",
         ] {
             assert_eq!(HttpsUrl::parse(bad), Err(UrlError::PrivateHost), "{bad}");
@@ -371,6 +447,12 @@ mod tests {
             "https://example.org/a%0a",
             "https://example.org/a%25",
             "https://example.org/a%zz",
+            "https://example.org/a/..;/b",
+            "https://example.org/..%20/b",
+            "https://example.org/.%2e/b",
+            "https://example.org/%c0%ae/b",
+            "https://example.org/a%3fb",
+            "https://example.org/a%23b",
             "https://example.org/a%2",
         ] {
             assert!(
@@ -390,6 +472,11 @@ mod tests {
         }
         let long = format!("https://example.org/{}", "a".repeat(MAX_URL_LEN));
         assert_eq!(HttpsUrl::parse(&long), Err(UrlError::TooLong));
+        // The same length is fine for a redirect, which has its own larger limit.
+        let from = HttpsUrl::parse("https://example.org/a").unwrap();
+        assert!(from.redirect(&long).is_ok());
+        let longer = format!("https://example.org/{}", "a".repeat(MAX_REDIRECT_URL_LEN));
+        assert_eq!(from.redirect(&longer), Err(UrlError::TooLong));
     }
 
     #[test]

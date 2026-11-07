@@ -4,28 +4,98 @@
 //! stacks; tests implement it with a table. Redirects are returned to the core rather than
 //! followed, so every hop passes the rules in [`super::url`]. Bytes reach a [`PackageSink`] as
 //! they arrive and count for nothing until [`PackageSink::commit`], which only happens after the
-//! size and the hash match.
+//! size and the hash match. A download needs an [`InstallTicket`], so it cannot skip the rules
+//! in [`super::select`].
 //!
 //! A platform that cannot block a thread on a stream can drive [`DownloadVerifier`] itself and
 //! get the same guarantees: it is the whole check, without the loop.
 
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use semver::Version;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::manifest::{to_hex, AppEntry, Manifest, ManifestError, Release, Sha256Digest};
-use super::manifest::{MAX_MANIFEST_BYTES, MAX_PACKAGE_BYTES};
+use super::manifest::{
+    release_statement, to_hex, Manifest, ManifestError, Sha256Digest, MAX_MANIFEST_BYTES,
+    MAX_PACKAGE_BYTES,
+};
+use super::select::InstallTicket;
 use super::source::RepositorySource;
 use super::url::{HttpsUrl, UrlError};
 
 /// Most redirects followed for one request.
 pub const MAX_REDIRECTS: usize = 5;
+/// Total time allowed for reading a manifest.
+pub const MANIFEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Fixed part of the total time allowed for a package.
+pub const PACKAGE_BASE_TIMEOUT: Duration = Duration::from_secs(60);
+/// The slowest average rate accepted for a package on top of the fixed part, in bytes per second.
+pub const PACKAGE_MIN_RATE: u64 = 16 * 1024;
 
 const READ_CHUNK: usize = 64 * 1024;
+
+/// A total deadline and a cancel switch for one download. Clones share the switch, so the UI can
+/// keep one to cancel from another thread.
+///
+/// The core checks both between reads. It cannot interrupt a `read` that is blocked inside the
+/// fetcher, so a fetcher must use [`remaining`](Self::remaining) for its timeouts.
+#[derive(Debug, Clone)]
+pub struct FetchControl {
+    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl FetchControl {
+    /// A control with this total time.
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            deadline: Instant::now() + timeout,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The usual control for a manifest.
+    pub fn for_manifest() -> Self {
+        Self::with_timeout(MANIFEST_TIMEOUT)
+    }
+
+    /// The usual control for a package of this size: a server may not hold the thread for longer
+    /// than the size takes at [`PACKAGE_MIN_RATE`].
+    pub fn for_package(size: u64) -> Self {
+        Self::with_timeout(PACKAGE_BASE_TIMEOUT + Duration::from_secs(size / PACKAGE_MIN_RATE))
+    }
+
+    /// Asks the download to stop.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`cancel`](Self::cancel) was called.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    /// The time left, for a fetcher's connect and read timeouts.
+    pub fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
+    fn check(&self) -> Result<(), DownloadError> {
+        if self.is_cancelled() {
+            Err(DownloadError::Cancelled)
+        } else if self.remaining().is_zero() {
+            Err(DownloadError::DeadlineExceeded)
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// What a fetcher got for one request.
 pub enum FetchResponse {
@@ -42,10 +112,13 @@ pub enum FetchResponse {
 ///
 /// The implementation must: validate certificates as the platform does by default, with no way
 /// to turn that off; not follow redirects; send no cookies, credentials or `Referer`; not use a
-/// cache that can answer for an unverified body; set connect and read timeouts.
+/// cache that can answer for an unverified body; keep its connect and read timeouts within
+/// [`FetchControl::remaining`] and at most 30 seconds per read, and stop on
+/// [`FetchControl::is_cancelled`]; and, where the platform allows it, refuse a name that resolves
+/// to a private or loopback address. The core cannot check any of this.
 pub trait Fetcher {
     /// Starts the request. Only called with a URL that passed [`HttpsUrl::parse`].
-    fn get(&self, url: &HttpsUrl) -> io::Result<FetchResponse>;
+    fn get(&self, url: &HttpsUrl, control: &FetchControl) -> io::Result<FetchResponse>;
 }
 
 /// Why a download failed.
@@ -60,6 +133,10 @@ pub enum DownloadError {
     /// A redirect pointed somewhere that is not allowed.
     #[error("refused redirect: {0}")]
     BadRedirect(UrlError),
+    /// A manifest redirected to another origin. It would be shown under a host it did not come
+    /// from, so the owner has to add the final address instead.
+    #[error("the manifest redirects to another site: add that address instead")]
+    CrossOriginManifest,
     /// More than [`MAX_REDIRECTS`] hops.
     #[error("too many redirects")]
     TooManyRedirects,
@@ -75,19 +152,34 @@ pub enum DownloadError {
     /// The manifest was refused.
     #[error("manifest: {0}")]
     Manifest(#[from] ManifestError),
+    /// The owner cancelled.
+    #[error("cancelled")]
+    Cancelled,
+    /// The total time ran out, which also catches a server sending too slowly.
+    #[error("the download took too long")]
+    DeadlineExceeded,
 }
 
 /// Follows redirects from `url`, each hop checked, up to a body.
-fn open(fetcher: &dyn Fetcher, url: &HttpsUrl) -> Result<Box<dyn Read + Send>, DownloadError> {
+fn open(
+    fetcher: &dyn Fetcher,
+    url: &HttpsUrl,
+    control: &FetchControl,
+    same_origin_only: bool,
+) -> Result<Box<dyn Read + Send>, DownloadError> {
     let mut current = url.clone();
     for _ in 0..=MAX_REDIRECTS {
-        match fetcher.get(&current)? {
+        control.check()?;
+        match fetcher.get(&current, control)? {
             FetchResponse::Body(body) => return Ok(body),
             FetchResponse::Status(status) => return Err(DownloadError::Status(status)),
             FetchResponse::Redirect(location) => {
                 current = current
                     .redirect(&location)
                     .map_err(DownloadError::BadRedirect)?;
+                if same_origin_only && current.origin() != url.origin() {
+                    return Err(DownloadError::CrossOriginManifest);
+                }
             }
         }
     }
@@ -103,15 +195,18 @@ fn read_retrying(body: &mut dyn Read, buffer: &mut [u8]) -> io::Result<usize> {
     }
 }
 
-/// Reads and checks a repository's manifest. No more than [`MAX_MANIFEST_BYTES`] are ever read.
+/// Reads and checks a repository's manifest. No more than [`MAX_MANIFEST_BYTES`] are ever read,
+/// and only from the origin the repository shows.
 pub fn fetch_manifest(
     fetcher: &dyn Fetcher,
     source: &RepositorySource,
+    control: &FetchControl,
 ) -> Result<Manifest, DownloadError> {
-    let mut body = open(fetcher, source.manifest_url())?;
+    let mut body = open(fetcher, source.manifest_url(), control, true)?;
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 8 * 1024];
     loop {
+        control.check()?;
         let n = read_retrying(&mut *body, &mut buffer)?;
         if n == 0 {
             break;
@@ -121,13 +216,12 @@ pub fn fetch_manifest(
         }
         bytes.extend_from_slice(&buffer[..n]);
     }
-    Ok(Manifest::parse(&bytes)?)
+    Ok(Manifest::parse(&bytes, source)?)
 }
 
 /// Checks a stream of bytes against a release's size and hash, chunk by chunk.
 pub struct DownloadVerifier {
-    app_id: String,
-    version: Version,
+    package: VerifiedPackage,
     expected_size: u64,
     expected_sha256: Sha256Digest,
     seen: u64,
@@ -135,11 +229,19 @@ pub struct DownloadVerifier {
 }
 
 impl DownloadVerifier {
-    /// Starts checking against `release` of `app`.
-    pub fn new(app: &AppEntry, release: &Release) -> Self {
+    /// Starts checking against the ticket's release.
+    pub fn new(ticket: &InstallTicket<'_>) -> Self {
+        let (app, release) = (ticket.app, ticket.release);
         Self {
-            app_id: app.id.clone(),
-            version: release.version.clone(),
+            package: VerifiedPackage {
+                app_id: app.id.clone(),
+                version: release.version.clone(),
+                sha256: release.sha256,
+                size: release.size,
+                publisher_key: app.publisher_key,
+                signature: release.signature,
+                statement: release_statement(&app.id, release),
+            },
             // Already limited by the manifest; the second bound keeps this type safe on its own.
             expected_size: release.size.min(MAX_PACKAGE_BYTES),
             expected_sha256: release.sha256,
@@ -171,12 +273,7 @@ impl DownloadVerifier {
         if sha256 != self.expected_sha256 {
             return Err(DownloadError::HashMismatch);
         }
-        Ok(VerifiedPackage {
-            app_id: self.app_id,
-            version: self.version,
-            sha256,
-            size: self.seen,
-        })
+        Ok(self.package)
     }
 }
 
@@ -184,20 +281,24 @@ impl DownloadVerifier {
 pub trait PackageSink {
     /// Takes more bytes. They must not be usable as a package yet.
     fn write(&mut self, chunk: &[u8]) -> io::Result<()>;
-    /// The bytes passed the checks: make them durable and usable as a package.
+    /// The stream passed the checks: confirm what is stored, make it durable and usable.
     fn commit(&mut self) -> io::Result<()>;
     /// The bytes failed: throw them away.
     fn abort(&mut self);
 }
 
-/// Proof that some bytes matched a release's size and hash. Only [`DownloadVerifier::finish`]
-/// makes one, and it says nothing about what the package does: see the design doc.
+/// Proof that a stream of bytes matched a release's size and hash, with what the Glass needs to
+/// check it again. Only [`DownloadVerifier::finish`] makes one. It says nothing about what the
+/// package does: see the design doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedPackage {
     app_id: String,
     version: Version,
     sha256: Sha256Digest,
     size: u64,
+    publisher_key: [u8; 32],
+    signature: [u8; 64],
+    statement: Vec<u8>,
 }
 
 impl VerifiedPackage {
@@ -220,16 +321,32 @@ impl VerifiedPackage {
     pub fn size(&self) -> u64 {
         self.size
     }
+
+    /// The key that signed the release.
+    pub fn publisher_key(&self) -> &[u8; 32] {
+        &self.publisher_key
+    }
+
+    /// The publisher's signature over [`statement`](Self::statement).
+    pub fn signature(&self) -> &[u8; 64] {
+        &self.signature
+    }
+
+    /// The signed bytes, so the Glass can verify the release without the manifest.
+    pub fn statement(&self) -> &[u8] {
+        &self.statement
+    }
 }
 
-/// Downloads a release into `sink`, checking as it goes. On any failure the sink is aborted.
+/// Downloads the ticket's release into `sink`, checking as it goes. On any failure the sink is
+/// aborted.
 pub fn fetch_package(
     fetcher: &dyn Fetcher,
-    app: &AppEntry,
-    release: &Release,
+    ticket: &InstallTicket<'_>,
     sink: &mut dyn PackageSink,
+    control: &FetchControl,
 ) -> Result<VerifiedPackage, DownloadError> {
-    let result = transfer(fetcher, app, release, sink);
+    let result = transfer(fetcher, ticket, sink, control);
     if result.is_err() {
         sink.abort();
     }
@@ -238,14 +355,15 @@ pub fn fetch_package(
 
 fn transfer(
     fetcher: &dyn Fetcher,
-    app: &AppEntry,
-    release: &Release,
+    ticket: &InstallTicket<'_>,
     sink: &mut dyn PackageSink,
+    control: &FetchControl,
 ) -> Result<VerifiedPackage, DownloadError> {
-    let mut body = open(fetcher, &release.url)?;
-    let mut verifier = DownloadVerifier::new(app, release);
+    let mut body = open(fetcher, &ticket.release.url, control, false)?;
+    let mut verifier = DownloadVerifier::new(ticket);
     let mut buffer = vec![0u8; READ_CHUNK];
     loop {
+        control.check()?;
         let n = read_retrying(&mut *body, &mut buffer)?;
         if n == 0 {
             break;
@@ -278,16 +396,39 @@ impl PackageStore {
         self.dir.join(format!("{}.omgapp", to_hex(sha256)))
     }
 
-    /// Starts receiving the package with this hash. One download per hash at a time: a second one
-    /// overwrites the first's unfinished file. A file left by a crash is overwritten the same way.
+    /// Starts receiving the package with this hash, in a new file of its own, so concurrent
+    /// downloads of one hash cannot touch each other's bytes.
     pub fn begin(&self, sha256: &Sha256Digest) -> io::Result<FileSink> {
-        let part = self.dir.join(format!("{}.part", to_hex(sha256)));
-        let file = File::create(&part)?;
-        Ok(FileSink {
-            file: Some(file),
-            part,
-            target: self.path_of(sha256),
-        })
+        let hash = to_hex(sha256);
+        for _ in 0..8 {
+            let mut unique = [0u8; 8];
+            getrandom::getrandom(&mut unique).map_err(|e| io::Error::other(e.to_string()))?;
+            let part = self.dir.join(format!("{hash}.{}.part", to_hex(&unique)));
+            match create_exclusive(&part) {
+                Ok(file) => {
+                    return Ok(FileSink {
+                        file: Some(file),
+                        part,
+                        target: self.path_of(sha256),
+                        expected: *sha256,
+                    })
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::other("no unique temporary name"))
+    }
+
+    /// Removes unfinished files left by a crash. Call at startup, before any download.
+    pub fn remove_stale_parts(&self) -> io::Result<()> {
+        for entry in fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|e| e == "part") {
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(())
     }
 
     /// Removes a package, for instance after the Glass confirmed the install.
@@ -299,12 +440,41 @@ impl PackageStore {
     }
 }
 
-/// A [`PackageSink`] on a file: a `.part` until commit, then an atomic rename. Dropped without a
-/// commit, it removes the `.part`.
+fn create_exclusive(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// A [`PackageSink`] on a file of its own: a unique `.part` until commit, which hashes the file
+/// itself and only then renames it. Dropped without a commit, it removes the `.part`.
 pub struct FileSink {
     file: Option<File>,
     part: PathBuf,
     target: PathBuf,
+    expected: Sha256Digest,
+}
+
+impl FileSink {
+    fn file_matches(file: &mut File, expected: &Sha256Digest) -> io::Result<bool> {
+        file.seek(SeekFrom::Start(0))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; READ_CHUNK];
+        loop {
+            let n = read_retrying(file, &mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        let digest: Sha256Digest = hasher.finalize().into();
+        Ok(digest == *expected)
+    }
 }
 
 impl PackageSink for FileSink {
@@ -318,10 +488,16 @@ impl PackageSink for FileSink {
     fn commit(&mut self) -> io::Result<()> {
         let file = self
             .file
-            .take()
+            .as_mut()
             .ok_or_else(|| io::Error::other("sink is closed"))?;
+        if !Self::file_matches(file, &self.expected)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the stored file does not match its hash",
+            ));
+        }
         file.sync_all()?;
-        drop(file);
+        self.file = None;
         fs::rename(&self.part, &self.target)?;
         sync_parent(&self.target)
     }
@@ -341,7 +517,7 @@ impl Drop for FileSink {
 }
 
 #[cfg(unix)]
-fn sync_parent(path: &Path) -> io::Result<()> {
+pub(super) fn sync_parent(path: &Path) -> io::Result<()> {
     match path.parent() {
         Some(parent) => File::open(parent)?.sync_all(),
         None => Ok(()),
@@ -349,6 +525,6 @@ fn sync_parent(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> io::Result<()> {
+pub(super) fn sync_parent(_path: &Path) -> io::Result<()> {
     Ok(())
 }

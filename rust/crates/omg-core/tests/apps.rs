@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use std::io::{self, Cursor, Read};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use omg_core::apps::manifest::{
     to_hex, MAX_MANIFEST_BYTES, MAX_PACKAGE_BYTES, MAX_RELEASES_PER_APP,
 };
@@ -17,6 +18,11 @@ use sha2::{Digest, Sha256};
 
 const MANIFEST_URL: &str = "https://example.org/glass/omg-apps.json";
 const APP: &str = "com.example.tally";
+
+/// The shape of a real GitHub release asset redirect (November 2026), with invented values: 900+
+/// bytes, encoded slashes, colons and semicolons in the query. A real one is not kept here because
+/// it carries a signature and a token.
+const GITHUB_ASSET_REDIRECT: &str = "https://release-assets.githubusercontent.com/github-production-release-asset/212613049/82d5bc71-7921-4a42-bce0-29b120158ce5?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-11-07T01%3A02%3A20Z&rscd=attachment%3B+filename%3Dtally.omgapp&rsct=application%2Foctet-stream&skoid=00000000-0000-4000-8000-000000000000&sktid=00000000-0000-4000-8000-000000000001&skt=2026-11-07T00%3A01%3A30Z&ske=2026-11-07T01%3A02%3A20Z&sks=b&skv=2018-11-09&sig=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D&jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&response-content-disposition=attachment%3B%20filename%3Dtally.omgapp&response-content-type=application%2Foctet-stream";
 
 fn key() -> SigningKey {
     SigningKey::from_bytes(&[7; 32])
@@ -30,7 +36,15 @@ fn sha(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-/// A release as JSON, unsigned: `app_json` signs it.
+fn source() -> RepositorySource {
+    RepositorySource::parse(MANIFEST_URL).unwrap()
+}
+
+fn repository() -> HttpsUrl {
+    HttpsUrl::parse(MANIFEST_URL).unwrap()
+}
+
+/// A release as JSON, unsigned.
 fn release_json(version: &str, package: &[u8]) -> Value {
     json!({
         "version": version,
@@ -43,20 +57,15 @@ fn release_json(version: &str, package: &[u8]) -> Value {
     })
 }
 
-/// Fills `signature` the way the tool for authors will: statement of the release as parsed.
-fn sign(app_id: &str, signer: &SigningKey, release: &mut Value) {
-    let statement = release_statement(app_id, &parsed_release(release));
-    release["signature"] = json!(to_hex(&signer.sign(&statement).to_bytes()));
+fn hex32(s: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+    }
+    out
 }
 
 fn parsed_release(release: &Value) -> Release {
-    let hex32 = |s: &str| -> [u8; 32] {
-        let mut out = [0u8; 32];
-        for (i, slot) in out.iter_mut().enumerate() {
-            *slot = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
-        }
-        out
-    };
     let mut permissions: Vec<String> = release["permissions"]
         .as_array()
         .unwrap()
@@ -72,23 +81,67 @@ fn parsed_release(release: &Value) -> Release {
         size: release["size"].as_u64().unwrap(),
         sha256: hex32(release["sha256"].as_str().unwrap()),
         permissions,
-        yanked: false,
+        signature: [0; 64],
     }
 }
 
-fn app_json(id: &str, signer: &SigningKey, mut releases: Vec<Value>) -> Value {
-    for release in &mut releases {
-        sign(id, signer, release);
+/// Signs an app as JSON the way the tool for authors will: every release, then the state.
+fn sign_app(app: &mut Value, signer: &SigningKey, repository: &HttpsUrl) {
+    let id = app["id"].as_str().unwrap().to_owned();
+    app["publisher_key"] = json!(to_hex(signer.verifying_key().as_bytes()));
+    for release in app["releases"].as_array_mut().unwrap() {
+        let statement = release_statement(&id, &parsed_release(release));
+        release["signature"] = json!(to_hex(&signer.sign(&statement).to_bytes()));
     }
+    let mut withdrawn: Vec<Version> = app["withdrawn"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|v| Version::parse(v.as_str().unwrap()).unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
+    withdrawn.sort();
+    let entry = AppEntry {
+        id,
+        repository: repository.clone(),
+        name: app["name"].as_str().unwrap().to_owned(),
+        summary: app["summary"].as_str().unwrap().to_owned(),
+        license: app["license"].as_str().unwrap().to_owned(),
+        homepage: app["homepage"]
+            .as_str()
+            .map(|h| HttpsUrl::parse(h).unwrap()),
+        publisher_key: *signer.verifying_key().as_bytes(),
+        sequence: app["sequence"].as_u64().unwrap(),
+        withdrawn,
+        state_signature: [0; 64],
+        releases: app["releases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(parsed_release)
+            .collect(),
+    };
+    let signature = signer.sign(&app_state_statement(&entry));
+    app["state_signature"] = json!(to_hex(&signature.to_bytes()));
+}
+
+fn unsigned_app(id: &str, sequence: u64, releases: Vec<Value>) -> Value {
     json!({
         "id": id,
         "name": "Tally",
         "summary": "Counts things on a card.",
         "license": "Apache-2.0",
         "homepage": "https://example.org/tally",
-        "publisher_key": to_hex(signer.verifying_key().as_bytes()),
+        "sequence": sequence,
         "releases": releases,
     })
+}
+
+fn app_json(id: &str, signer: &SigningKey, releases: Vec<Value>) -> Value {
+    let mut app = unsigned_app(id, 1, releases);
+    sign_app(&mut app, signer, &repository());
+    app
 }
 
 fn manifest_json(apps: Vec<Value>) -> Value {
@@ -104,7 +157,11 @@ fn one_release() -> Value {
 }
 
 fn parse(value: &Value) -> Result<Manifest, ManifestError> {
-    Manifest::parse(value.to_string().as_bytes())
+    Manifest::parse(value.to_string().as_bytes(), &source())
+}
+
+fn parse_bytes(bytes: &[u8]) -> Result<Manifest, ManifestError> {
+    Manifest::parse(bytes, &source())
 }
 
 fn profile() -> GlassProfile {
@@ -124,30 +181,28 @@ fn a_good_manifest_parses() {
     assert_eq!(app.releases[0].version, Version::new(1, 0, 0));
     assert_eq!(app.releases[0].size, 7);
     assert_eq!(app.publisher_key, *key().verifying_key().as_bytes());
+    assert_eq!(app.repository, repository());
     assert!(manifest.app("com.example.other").is_none());
 }
 
 #[test]
-fn the_format_in_the_design_doc_stays_valid_up_to_the_signature() {
+fn the_format_in_the_design_doc_stays_valid_up_to_the_signatures() {
     let doc = include_str!("../../../../docs/plans/2026-11-07-companion-applications.md");
     let start = doc.find("```json\n").expect("the doc has a json example") + 8;
     let end = start + doc[start..].find("```").unwrap();
     let mut example: Value = serde_json::from_str(&doc[start..end]).unwrap();
-    // The example's key and signature are shortened for the page: put real ones in.
-    let id = example["apps"][0]["id"].as_str().unwrap().to_owned();
-    example["apps"][0]["publisher_key"] = json!(to_hex(key().verifying_key().as_bytes()));
-    for release in example["apps"][0]["releases"].as_array_mut().unwrap() {
-        sign(&id, &key(), release);
-    }
+    // The example's key and signatures are placeholders on the page: put real ones in.
+    sign_app(&mut example["apps"][0], &key(), &repository());
     let manifest = parse(&example).unwrap();
     assert_eq!(manifest.apps.len(), 1);
     assert_eq!(manifest.apps[0].releases.len(), 2);
+    assert!(manifest.apps[0].is_withdrawn(&Version::new(1, 0, 0)));
 }
 
 #[test]
 fn refuses_files_over_the_limit_before_parsing() {
     let huge = vec![b' '; MAX_MANIFEST_BYTES + 1];
-    assert_eq!(Manifest::parse(&huge), Err(ManifestError::TooLarge));
+    assert_eq!(parse_bytes(&huge), Err(ManifestError::TooLarge));
 }
 
 #[test]
@@ -163,10 +218,7 @@ fn refuses_what_is_not_a_json_object() {
     ];
     for input in inputs {
         assert!(
-            matches!(
-                Manifest::parse(&input),
-                Err(ManifestError::Malformed { .. })
-            ),
+            matches!(parse_bytes(&input), Err(ManifestError::Malformed { .. })),
             "{input:?}"
         );
     }
@@ -176,9 +228,9 @@ fn refuses_what_is_not_a_json_object() {
 fn deep_nesting_is_an_error_not_a_stack_overflow() {
     let mut deep = String::from("{\"schema\":1,\"x\":");
     deep.push_str(&"[".repeat(200_000));
-    assert!(Manifest::parse(deep.as_bytes()).is_err());
+    assert!(parse_bytes(deep.as_bytes()).is_err());
     let open = "{\"a\":".repeat(90_000);
-    assert!(Manifest::parse(open.as_bytes()).is_err());
+    assert!(parse_bytes(open.as_bytes()).is_err());
 }
 
 #[test]
@@ -204,7 +256,7 @@ fn refuses_duplicate_keys() {
     let schema = good.replacen("\"schema\":1", "\"schema\":1,\"schema\":1", 1);
     assert_ne!(schema, good);
     assert!(matches!(
-        Manifest::parse(schema.as_bytes()),
+        parse_bytes(schema.as_bytes()),
         Err(ManifestError::Malformed { .. })
     ));
     let name = good.replacen(
@@ -214,7 +266,7 @@ fn refuses_duplicate_keys() {
     );
     assert_ne!(name, good);
     assert!(matches!(
-        Manifest::parse(name.as_bytes()),
+        parse_bytes(name.as_bytes()),
         Err(ManifestError::Malformed { .. })
     ));
 }
@@ -237,14 +289,50 @@ fn schema_rules() {
 
 #[test]
 fn errors_never_repeat_text_from_the_file() {
-    let mut value = one_release();
     let nasty = format!("\u{1b}[2J{}", "x".repeat(10_000));
-    value[nasty.as_str()] = json!(1);
-    value["name"] = json!(nasty);
-    let shown = parse(&value).unwrap_err().to_string();
-    assert!(shown.len() < 200, "{shown}");
-    assert!(!shown.contains('\u{1b}'));
-    assert!(!shown.contains("xxx"));
+    let shown = |error: ManifestError| {
+        let text = error.to_string();
+        assert!(text.len() < 200, "{text}");
+        assert!(!text.contains('\u{1b}'), "{text}");
+        assert!(!text.contains("xxx"), "{text}");
+    };
+
+    // Each case reaches a different check, and each is asserted to reach it.
+    let mut unknown_field = one_release();
+    unknown_field[nasty.as_str()] = json!(1);
+    let error = parse(&unknown_field).unwrap_err();
+    assert!(matches!(error, ManifestError::Malformed { .. }));
+    shown(error);
+
+    let mut repository_name = one_release();
+    repository_name["name"] = json!(nasty);
+    let error = parse(&repository_name).unwrap_err();
+    assert_eq!(error, ManifestError::BadField("name"));
+    shown(error);
+
+    let mut app_name = one_release();
+    app_name["apps"][0]["name"] = json!(nasty);
+    let error = parse(&app_name).unwrap_err();
+    assert_eq!(
+        error,
+        ManifestError::BadAppField {
+            app: 0,
+            field: "name"
+        }
+    );
+    shown(error);
+
+    let mut release_url = one_release();
+    release_url["apps"][0]["releases"][0]["url"] = json!(format!("https://example.org/{nasty}"));
+    let error = parse(&release_url).unwrap_err();
+    assert!(matches!(error, ManifestError::BadReleaseUrl { .. }));
+    shown(error);
+
+    let mut version = one_release();
+    version["apps"][0]["releases"][0]["version"] = json!(nasty);
+    let error = parse(&version).unwrap_err();
+    assert!(matches!(error, ManifestError::BadReleaseField { .. }));
+    shown(error);
 }
 
 #[test]
@@ -296,18 +384,24 @@ fn refuses_duplicates_and_reserved_ids() {
         parse(&manifest_json(vec![twice])),
         Err(ManifestError::DuplicateVersion { app: 0, release: 1 })
     );
-    let ours = app_json(
-        "org.openmyglass.settings",
+    for ours in ["org.openmyglass", "org.openmyglass.settings"] {
+        let app = app_json(ours, &key(), vec![release_json("1.0.0", b"x")]);
+        assert_eq!(
+            parse(&manifest_json(vec![app])),
+            Err(ManifestError::ReservedId(0)),
+            "{ours}"
+        );
+    }
+    // A real label that only starts the same is someone else's.
+    let similar = app_json(
+        "org.openmyglassfan.app",
         &key(),
         vec![release_json("1.0.0", b"x")],
     );
-    assert_eq!(
-        parse(&manifest_json(vec![ours])),
-        Err(ManifestError::ReservedId(0))
-    );
+    assert!(parse(&manifest_json(vec![similar])).is_ok());
 }
 
-/// Changes a field of the first release and returns the manifest, with the old signature.
+/// Changes a field of the first release and returns the manifest, with the old signatures.
 fn with_release_field(field: &str, value: Value) -> Value {
     let mut manifest = one_release();
     manifest["apps"][0]["releases"][0][field] = value;
@@ -388,6 +482,9 @@ fn refuses_bad_app_fields() {
         ("id", json!("../../etc/passwd"), "id"),
         ("name", json!(""), "name"),
         ("name", json!("Set\u{202e}tings"), "name"),
+        ("name", json!("\u{2800}"), "name"),
+        ("name", json!("a\u{1D173}b"), "name"),
+        ("name", json!("---"), "name"),
         ("name", json!("x".repeat(65)), "name"),
         ("summary", json!("two\nlines"), "summary"),
         ("summary", json!("x".repeat(281)), "summary"),
@@ -395,6 +492,14 @@ fn refuses_bad_app_fields() {
         ("publisher_key", json!("zz"), "publisher_key"),
         // All zeros is a small-order point: it would verify forged signatures.
         ("publisher_key", json!("00".repeat(32)), "publisher_key"),
+        ("withdrawn", json!(["not a version"]), "withdrawn"),
+        ("withdrawn", json!(["1.0.0", "1.0.0"]), "withdrawn"),
+        (
+            "withdrawn",
+            json!((0..65).map(|i| format!("1.0.{i}")).collect::<Vec<_>>()),
+            "withdrawn",
+        ),
+        ("state_signature", json!("00"), "state_signature"),
     ];
     for (name, value, field) in cases {
         let mut manifest = one_release();
@@ -415,16 +520,10 @@ fn refuses_bad_app_fields() {
             error: UrlError::NotHttps
         })
     );
-    let mut no_homepage = one_release();
-    no_homepage["apps"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("homepage");
-    assert!(parse(&no_homepage).unwrap().apps[0].homepage.is_none());
 }
 
 #[test]
-fn the_signature_covers_everything_that_decides_what_runs() {
+fn the_release_signature_covers_everything_that_decides_what_runs() {
     let bad = Err(ManifestError::BadSignature { app: 0, release: 0 });
     let cases = [
         ("version", json!("1.0.1")),
@@ -453,16 +552,87 @@ fn the_signature_covers_everything_that_decides_what_runs() {
 }
 
 #[test]
-fn hosting_facts_are_not_signed() {
-    // A package can move to a mirror, and an author can withdraw a release, without the key. Both
-    // are safe: the hash still has to match, and yanking only hides.
+fn the_state_signature_covers_what_the_owner_reads_and_what_is_withdrawn() {
+    let bad = Err(ManifestError::BadStateSignature(0));
+    let cases = [
+        ("name", json!("Security fix")),
+        ("summary", json!("Trust me.")),
+        ("license", json!("Public domain")),
+        ("homepage", json!("https://evil.example.net/")),
+        ("homepage", Value::Null),
+        ("sequence", json!(99)),
+        ("withdrawn", json!(["1.0.0"])),
+        ("state_signature", json!("ab".repeat(64))),
+    ];
+    for (field, value) in cases {
+        let mut manifest = one_release();
+        manifest["apps"][0][field] = value.clone();
+        assert_eq!(parse(&manifest), bad, "{field} = {value}");
+    }
+}
+
+#[test]
+fn only_the_url_and_the_repository_name_are_unsigned() {
+    // A package can move to a mirror without the key: the hash still has to match.
     let moved = with_release_field("url", json!("https://mirror.example.net/t.omgapp"));
     assert_eq!(
         parse(&moved).unwrap().apps[0].releases[0].url.host(),
         "mirror.example.net"
     );
-    let yanked = with_release_field("yanked", json!(true));
-    assert!(parse(&yanked).unwrap().apps[0].releases[0].yanked);
+    let mut name = one_release();
+    name["name"] = json!("Official OpenMyGlass apps");
+    assert_eq!(parse(&name).unwrap().name, "Official OpenMyGlass apps");
+}
+
+fn with_bad_and_fix() -> Value {
+    let mut app = unsigned_app(
+        APP,
+        2,
+        vec![
+            release_json("1.0.0", b"old"),
+            release_json("1.1.0", b"bad"),
+            release_json("1.1.1", b"fix"),
+        ],
+    );
+    app["withdrawn"] = json!(["1.1.0"]);
+    sign_app(&mut app, &key(), &repository());
+    app
+}
+
+#[test]
+fn without_the_key_a_withdrawal_cannot_be_cleared_and_a_fix_cannot_be_dropped() {
+    let honest = parse(&manifest_json(vec![with_bad_and_fix()])).unwrap();
+    assert!(honest.apps[0].is_withdrawn(&Version::new(1, 1, 0)));
+
+    let mut cleared = with_bad_and_fix();
+    cleared.as_object_mut().unwrap().remove("withdrawn");
+    assert_eq!(
+        parse(&manifest_json(vec![cleared])),
+        Err(ManifestError::BadStateSignature(0))
+    );
+
+    let mut emptied = with_bad_and_fix();
+    emptied["withdrawn"] = json!([]);
+    assert_eq!(
+        parse(&manifest_json(vec![emptied])),
+        Err(ManifestError::BadStateSignature(0))
+    );
+
+    let mut dropped = with_bad_and_fix();
+    dropped["releases"].as_array_mut().unwrap().remove(2);
+    assert_eq!(
+        parse(&manifest_json(vec![dropped])),
+        Err(ManifestError::BadStateSignature(0))
+    );
+}
+
+#[test]
+fn a_manifest_signed_for_one_repository_is_refused_from_another() {
+    let elsewhere = RepositorySource::parse("https://elsewhere.example.net/omg-apps.json").unwrap();
+    assert_eq!(
+        Manifest::parse(one_release().to_string().as_bytes(), &elsewhere),
+        Err(ManifestError::BadStateSignature(0))
+    );
 }
 
 #[test]
@@ -477,7 +647,7 @@ fn permission_order_does_not_matter() {
 }
 
 #[test]
-fn no_mutation_of_a_good_file_panics() {
+fn no_mutation_of_a_good_file_panics_or_changes_anything_signed() {
     let good = manifest_json(vec![app_json(
         APP,
         &key(),
@@ -496,7 +666,7 @@ fn no_mutation_of_a_good_file_panics() {
         state ^= state << 17;
         state as usize
     };
-    let original = Manifest::parse(&good).unwrap();
+    let original = parse_bytes(&good).unwrap();
     let mut passed = 0;
     for _ in 0..20_000 {
         let mut bytes = good.clone();
@@ -510,37 +680,18 @@ fn no_mutation_of_a_good_file_panics() {
                 _ => bytes.insert(at, b"{}[]\",:0"[next() % 8]),
             }
         }
-        // Whatever survives may differ only in what is not signed: nothing that decides what runs.
-        if let Ok(parsed) = Manifest::parse(&bytes) {
+        if let Ok(mut parsed) = parse_bytes(&bytes) {
             passed += 1;
-            assert_eq!(parsed.apps.len(), 1);
-            assert_eq!(parsed.apps[0].id, APP);
-            assert_eq!(parsed.apps[0].publisher_key, original.apps[0].publisher_key);
+            // Whatever survives may differ only in what is not signed.
             for (got, want) in parsed.apps[0]
                 .releases
-                .iter()
+                .iter_mut()
                 .zip(&original.apps[0].releases)
             {
-                assert_eq!(
-                    (
-                        &got.version,
-                        &got.target,
-                        got.min_api,
-                        got.size,
-                        got.sha256,
-                        &got.permissions
-                    ),
-                    (
-                        &want.version,
-                        &want.target,
-                        want.min_api,
-                        want.size,
-                        want.sha256,
-                        &want.permissions
-                    ),
-                );
+                got.url = want.url.clone();
             }
-            assert_eq!(parsed.apps[0].releases.len(), 2);
+            parsed.name = original.name.clone();
+            assert_eq!(parsed, original);
         }
     }
     assert!(passed < 20_000, "the mutations must actually break files");
@@ -550,14 +701,31 @@ fn no_mutation_of_a_good_file_panics() {
 
 fn app_with(versions: &[&str]) -> AppEntry {
     let releases = versions.iter().map(|v| release_json(v, b"x")).collect();
+    app_of(releases)
+}
+
+fn app_of(releases: Vec<Value>) -> AppEntry {
     parse(&manifest_json(vec![app_json(APP, &key(), releases)]))
         .unwrap()
         .apps
         .remove(0)
 }
 
+/// An app in a chosen state.
+fn app_state(
+    signer: &SigningKey,
+    sequence: u64,
+    withdrawn: &[&str],
+    releases: Vec<Value>,
+) -> AppEntry {
+    let mut app = unsigned_app(APP, sequence, releases);
+    app["withdrawn"] = json!(withdrawn);
+    sign_app(&mut app, signer, &repository());
+    parse(&manifest_json(vec![app])).unwrap().apps.remove(0)
+}
+
 fn best(app: &AppEntry, options: SelectOptions) -> Option<String> {
-    select_release(app, &profile(), options)
+    select_release(app, None, &profile(), options)
         .best
         .map(|r| r.version.to_string())
 }
@@ -579,7 +747,7 @@ fn highest_version_wins_whatever_the_file_order() {
 #[test]
 fn prereleases_only_on_request_and_in_semver_order() {
     let app = app_with(&["1.0.0", "1.1.0-beta.2", "1.1.0-beta.10"]);
-    let selection = select_release(&app, &profile(), STABLE);
+    let selection = select_release(&app, None, &profile(), STABLE);
     assert_eq!(selection.best.unwrap().version, Version::new(1, 0, 0));
     assert_eq!(selection.skipped.len(), 2);
     assert_eq!(selection.skipped[0].1, SkipReason::Prerelease);
@@ -592,16 +760,13 @@ fn prereleases_only_on_request_and_in_semver_order() {
 fn app_with_release(version: &str, change: impl Fn(&mut Value)) -> AppEntry {
     let mut release = release_json(version, b"x");
     change(&mut release);
-    parse(&manifest_json(vec![app_json(APP, &key(), vec![release])]))
-        .unwrap()
-        .apps
-        .remove(0)
+    app_of(vec![release])
 }
 
 #[test]
 fn skips_what_this_glass_cannot_run_and_says_why() {
     let reason = |app: &AppEntry| {
-        let selection = select_release(app, &profile(), STABLE);
+        let selection = select_release(app, None, &profile(), STABLE);
         assert!(selection.best.is_none());
         selection.skipped[0].1.clone()
     };
@@ -613,52 +778,64 @@ fn skips_what_this_glass_cannot_run_and_says_why() {
     assert_eq!(reason(&permission), SkipReason::UnknownPermission);
 }
 
-fn yank_first(manifest: &mut Value) {
-    manifest["apps"][0]["releases"][0]["yanked"] = json!(true);
-}
-
 #[test]
-fn yanked_releases_are_not_offered() {
-    let mut manifest = manifest_json(vec![app_json(
-        APP,
+fn withdrawn_releases_are_not_offered() {
+    let app = app_state(
         &key(),
+        1,
+        &["2.0.0"],
         vec![release_json("2.0.0", b"x"), release_json("1.0.0", b"y")],
-    )]);
-    yank_first(&mut manifest);
-    let app = parse(&manifest).unwrap().apps.remove(0);
+    );
     assert_eq!(best(&app, STABLE).as_deref(), Some("1.0.0"));
 }
 
-fn repository() -> HttpsUrl {
-    HttpsUrl::parse(MANIFEST_URL).unwrap()
+// ------------------------------- trust and updates -------------------------------
+
+/// A store that has installed `app`'s selected release, and what is on the Glass after it.
+fn installed_from(app: &AppEntry) -> (tempfile::TempDir, TrustStore, InstalledApp) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = TrustStore::open(dir.path().join("trust.json")).unwrap();
+    let ticket = plan_install(app, None, None, &profile(), WITH_PRE).unwrap();
+    assert!(ticket.first_use());
+    let package = verified(&ticket);
+    store.record_install(&ticket, &package).unwrap();
+    let installed = installed_of(&ticket);
+    (dir, store, installed)
 }
 
-fn installed(version: &str, package: &[u8], permissions: &[&str]) -> InstalledApp {
+fn installed_of(ticket: &InstallTicket<'_>) -> InstalledApp {
     InstalledApp {
-        id: APP.to_owned(),
-        version: Version::parse(version).unwrap(),
-        repository: repository(),
-        publisher_key: *key().verifying_key().as_bytes(),
-        sha256: sha(package),
-        permissions: permissions.iter().map(|p| p.to_string()).collect(),
+        id: ticket.app().id.clone(),
+        version: ticket.release().version.clone(),
+        sha256: ticket.release().sha256,
+        permissions: ticket.release().permissions.clone(),
     }
 }
 
-fn app_of(releases: Vec<Value>) -> AppEntry {
-    parse(&manifest_json(vec![app_json(APP, &key(), releases)]))
-        .unwrap()
-        .apps
-        .remove(0)
+/// A real verification of the small test packages, which are all listed here.
+fn verified(ticket: &InstallTicket<'_>) -> VerifiedPackage {
+    let bytes = PACKAGES
+        .iter()
+        .find(|p| sha(p) == ticket.release().sha256)
+        .expect("the test package is listed");
+    let mut verifier = DownloadVerifier::new(ticket);
+    verifier.push(bytes).unwrap();
+    verifier.finish().unwrap()
 }
+
+const PACKAGES: &[&[u8]] = &[b"old", b"new", b"bad", b"fix", b"x", b"evil", b"other"];
 
 #[test]
 fn an_update_is_offered_and_new_permissions_are_called_out() {
+    let old = app_of(vec![release_json("1.0.0", b"old")]);
+    let (_dir, store, mut installed) = installed_from(&old);
+    installed.permissions = vec!["camera".into()];
     let mut next = release_json("1.1.0", b"new");
     next["permissions"] = json!(["camera", "location"]);
-    let app = app_of(vec![release_json("1.0.0", b"old"), next]);
+    let app = app_state(&key(), 2, &[], vec![release_json("1.0.0", b"old"), next]);
     let status = check_update(
-        &installed("1.0.0", b"old", &["camera"]),
-        &repository(),
+        &installed,
+        store.get(APP).unwrap(),
         &app,
         &profile(),
         STABLE,
@@ -666,39 +843,77 @@ fn an_update_is_offered_and_new_permissions_are_called_out() {
     let UpdateStatus::UpdateAvailable {
         release,
         added_permissions,
-        installed_yanked,
+        installed_withdrawn,
     } = status
     else {
         panic!("{status:?}");
     };
     assert_eq!(release.version, Version::new(1, 1, 0));
     assert_eq!(added_permissions, ["location"]);
-    assert!(!installed_yanked);
+    assert!(!installed_withdrawn);
+
+    let ticket = plan_install(&app, store.get(APP), Some(&installed), &profile(), STABLE).unwrap();
+    assert!(!ticket.first_use());
+    assert_eq!(ticket.permissions_to_confirm(), ["location"]);
 }
 
 #[test]
-fn never_a_downgrade() {
-    // A host serving an old copy of the manifest, and an owner ahead of the stable line.
-    for (running, available) in [("2.0.0", "1.0.0"), ("1.1.0-beta.1", "1.0.0")] {
-        let app = app_of(vec![release_json(available, b"old")]);
-        let status = check_update(
-            &installed(running, b"new", &[]),
-            &repository(),
-            &app,
-            &profile(),
-            STABLE,
-        );
-        assert!(
-            matches!(status, UpdateStatus::UpToDate { .. }),
-            "{running}: {status:?}"
-        );
-    }
-    let app = app_of(vec![release_json("1.1.0", b"stable")]);
+fn a_first_install_confirms_every_permission() {
+    let app = app_with_release("1.0.0", |r| {
+        r["permissions"] = json!(["location", "camera"])
+    });
+    let ticket = plan_install(&app, None, None, &profile(), STABLE).unwrap();
+    assert!(ticket.first_use());
+    assert_eq!(ticket.permissions_to_confirm(), ["camera", "location"]);
+}
+
+#[test]
+fn never_a_downgrade_from_a_lower_stable_version() {
+    let installed_on = app_of(vec![
+        release_json("1.0.0", b"old"),
+        release_json("1.1.0-beta.1", b"new"),
+    ]);
+    let (_dir, store, installed) = installed_from(&installed_on);
+    assert_eq!(installed.version.to_string(), "1.1.0-beta.1");
+    let later = app_state(
+        &key(),
+        2,
+        &[],
+        vec![
+            release_json("1.0.0", b"old"),
+            release_json("1.1.0-beta.1", b"new"),
+        ],
+    );
+    let status = check_update(
+        &installed,
+        store.get(APP).unwrap(),
+        &later,
+        &profile(),
+        STABLE,
+    );
+    assert!(
+        matches!(status, UpdateStatus::UpToDate { .. }),
+        "{status:?}"
+    );
+    assert_eq!(
+        plan_install(&later, store.get(APP), Some(&installed), &profile(), STABLE).unwrap_err(),
+        InstallRefusal::NothingToOffer
+    );
+    // A real stable release above the beta is an update.
+    let released = app_state(
+        &key(),
+        3,
+        &[],
+        vec![
+            release_json("1.1.0-beta.1", b"new"),
+            release_json("1.1.0", b"fix"),
+        ],
+    );
     assert!(matches!(
         check_update(
-            &installed("1.1.0-beta.1", b"beta", &[]),
-            &repository(),
-            &app,
+            &installed,
+            store.get(APP).unwrap(),
+            &released,
             &profile(),
             STABLE
         ),
@@ -707,73 +922,211 @@ fn never_a_downgrade() {
 }
 
 #[test]
-fn a_new_key_blocks_updates() {
-    let manifest = manifest_json(vec![app_json(
-        APP,
-        &other_key(),
-        vec![release_json("9.0.0", b"evil")],
-    )]);
-    let app = parse(&manifest).unwrap().apps.remove(0);
+fn a_new_key_blocks_both_the_update_check_and_the_install() {
+    let (_dir, store, installed) = installed_from(&app_of(vec![release_json("1.0.0", b"old")]));
+    let thief = app_state(&other_key(), 9, &[], vec![release_json("9.0.0", b"evil")]);
     assert_eq!(
         check_update(
-            &installed("1.0.0", b"old", &[]),
-            &repository(),
-            &app,
+            &installed,
+            store.get(APP).unwrap(),
+            &thief,
             &profile(),
             STABLE
         ),
-        UpdateStatus::PublisherChanged
+        UpdateStatus::Blocked(TrustProblem::PublisherChanged)
+    );
+    assert_eq!(
+        plan_install(&thief, store.get(APP), Some(&installed), &profile(), STABLE).unwrap_err(),
+        InstallRefusal::Untrusted(TrustProblem::PublisherChanged)
     );
 }
 
 #[test]
-fn the_same_id_from_another_repository_is_not_an_update() {
-    let app = app_of(vec![release_json("9.0.0", b"other")]);
-    let elsewhere = HttpsUrl::parse("https://elsewhere.example.net/omg-apps.json").unwrap();
+fn the_same_id_from_a_rival_in_another_repository_is_blocked() {
+    let (_dir, store, installed) = installed_from(&app_of(vec![release_json("1.0.0", b"old")]));
+    // Another site, another key, the same id, signed correctly for that site.
+    let rival_site =
+        RepositorySource::parse("https://elsewhere.example.net/omg-apps.json").unwrap();
+    let mut app = unsigned_app(APP, 50, vec![release_json("9.0.0", b"other")]);
+    sign_app(&mut app, &other_key(), rival_site.manifest_url());
+    let rival = Manifest::parse(manifest_json(vec![app]).to_string().as_bytes(), &rival_site)
+        .unwrap()
+        .apps
+        .remove(0);
+    assert_eq!(rival.publisher_key, *other_key().verifying_key().as_bytes());
     assert_eq!(
         check_update(
-            &installed("1.0.0", b"old", &[]),
-            &elsewhere,
-            &app,
+            &installed,
+            store.get(APP).unwrap(),
+            &rival,
             &profile(),
             STABLE
         ),
-        UpdateStatus::OtherSource
+        UpdateStatus::Blocked(TrustProblem::OtherSource)
+    );
+    assert_eq!(
+        plan_install(&rival, store.get(APP), None, &profile(), STABLE).unwrap_err(),
+        InstallRefusal::Untrusted(TrustProblem::OtherSource)
     );
 }
 
 #[test]
 fn a_republished_version_is_flagged() {
-    let app = app_of(vec![
-        release_json("1.0.0", b"swapped"),
-        release_json("1.1.0", b"new"),
-    ]);
+    let (_dir, store, installed) = installed_from(&app_of(vec![release_json("1.0.0", b"old")]));
+    let swapped = app_state(
+        &key(),
+        2,
+        &[],
+        vec![release_json("1.0.0", b"bad"), release_json("1.1.0", b"new")],
+    );
     assert_eq!(
         check_update(
-            &installed("1.0.0", b"original", &[]),
-            &repository(),
-            &app,
+            &installed,
+            store.get(APP).unwrap(),
+            &swapped,
             &profile(),
             STABLE
         ),
-        UpdateStatus::ReleaseChanged
+        UpdateStatus::Blocked(TrustProblem::ReleaseChanged)
+    );
+}
+
+fn state_one() -> AppEntry {
+    // The author has published a bad 1.1.0 and does not know yet.
+    app_state(
+        &key(),
+        2,
+        &[],
+        vec![release_json("1.0.0", b"old"), release_json("1.1.0", b"bad")],
+    )
+}
+
+fn state_two() -> AppEntry {
+    app_state(
+        &key(),
+        3,
+        &["1.1.0"],
+        vec![
+            release_json("1.0.0", b"old"),
+            release_json("1.1.0", b"bad"),
+            release_json("1.1.1", b"fix"),
+        ],
+    )
+}
+
+fn installed_old() -> (tempfile::TempDir, TrustStore, InstalledApp) {
+    let first = app_state(&key(), 1, &[], vec![release_json("1.0.0", b"old")]);
+    installed_from(&first)
+}
+
+#[test]
+fn a_remembered_state_stops_an_older_one() {
+    let (_dir, mut store, installed) = installed_old();
+    let older = app_state(&key(), 1, &[], vec![release_json("1.0.0", b"old")]);
+    store.observe(&older).unwrap();
+    // The state with a higher number is seen once.
+    store.observe(&state_two()).unwrap();
+    // A thief cannot edit it, so replays an old signed state, with the bad release not withdrawn.
+    let replay = app_state(
+        &key(),
+        1,
+        &[],
+        vec![release_json("1.0.0", b"old"), release_json("1.1.0", b"bad")],
+    );
+    assert_eq!(
+        check_update(
+            &installed,
+            store.get(APP).unwrap(),
+            &replay,
+            &profile(),
+            STABLE
+        ),
+        UpdateStatus::Blocked(TrustProblem::StateRolledBack)
+    );
+    assert_eq!(
+        plan_install(
+            &replay,
+            store.get(APP),
+            Some(&installed),
+            &profile(),
+            STABLE
+        )
+        .unwrap_err(),
+        InstallRefusal::Untrusted(TrustProblem::StateRolledBack)
+    );
+    assert!(matches!(
+        store.observe(&replay),
+        Err(TrustError::Problem(TrustProblem::StateRolledBack))
+    ));
+}
+
+#[test]
+fn what_a_static_manifest_cannot_prevent() {
+    // Not a behaviour to want, but one to state: a companion that never saw the withdrawal cannot
+    // know about it. An old state is genuinely signed, so a host can serve it to a companion that
+    // last read before the author withdrew the release, and the bad release is offered.
+    let (_dir, store, installed) = installed_old();
+    let bad_state = state_one();
+    let status = check_update(
+        &installed,
+        store.get(APP).unwrap(),
+        &bad_state,
+        &profile(),
+        STABLE,
+    );
+    let UpdateStatus::UpdateAvailable { release, .. } = status else {
+        panic!("{status:?}");
+    };
+    assert_eq!(release.version.to_string(), "1.1.0");
+    // A fresh install too: the first install trusts what it is shown.
+    let ticket = plan_install(&bad_state, None, None, &profile(), STABLE).unwrap();
+    assert_eq!(ticket.release().version.to_string(), "1.1.0");
+}
+
+#[test]
+fn a_withdrawal_once_seen_stays_even_if_a_later_state_omits_it() {
+    let (_dir, mut store, installed) = installed_old();
+    store.observe(&state_two()).unwrap();
+    // A later genuine state forgets to list it, by mistake or under a stolen key.
+    let later = app_state(
+        &key(),
+        4,
+        &[],
+        vec![release_json("1.0.0", b"old"), release_json("1.1.0", b"bad")],
+    );
+    store.observe(&later).unwrap();
+    let status = check_update(
+        &installed,
+        store.get(APP).unwrap(),
+        &later,
+        &profile(),
+        STABLE,
+    );
+    assert!(
+        matches!(status, UpdateStatus::UpToDate { .. }),
+        "{status:?}"
+    );
+    assert_eq!(
+        plan_install(&later, store.get(APP), Some(&installed), &profile(), STABLE).unwrap_err(),
+        InstallRefusal::NothingToOffer
     );
 }
 
 #[test]
-fn up_to_date_says_about_yanks_and_blocked_releases() {
+fn up_to_date_says_about_withdrawals_and_blocked_releases() {
+    let first = app_state(&key(), 1, &[], vec![release_json("1.0.0", b"old")]);
+    let (_dir, store, installed) = installed_from(&first);
     let mut newer = release_json("2.0.0", b"new");
     newer["min_api"] = json!(5);
-    let mut manifest = manifest_json(vec![app_json(
-        APP,
+    let app = app_state(
         &key(),
+        2,
+        &["1.0.0"],
         vec![release_json("1.0.0", b"old"), newer],
-    )]);
-    yank_first(&mut manifest);
-    let app = parse(&manifest).unwrap().apps.remove(0);
+    );
     let status = check_update(
-        &installed("1.0.0", b"old", &[]),
-        &repository(),
+        &installed,
+        store.get(APP).unwrap(),
         &app,
         &profile(),
         STABLE,
@@ -782,10 +1135,130 @@ fn up_to_date_says_about_yanks_and_blocked_releases() {
     assert_eq!(
         status,
         UpdateStatus::UpToDate {
-            installed_yanked: true,
+            installed_withdrawn: true,
             newer_skipped: vec![(&two, SkipReason::NeedsNewerGlass { min_api: 5 })],
         }
     );
+}
+
+#[test]
+fn two_states_with_one_number_are_refused() {
+    let first = app_state(&key(), 5, &[], vec![release_json("1.0.0", b"old")]);
+    let (_dir, store, installed) = installed_from(&first);
+    let fork = app_state(
+        &key(),
+        5,
+        &[],
+        vec![
+            release_json("1.0.0", b"old"),
+            release_json("9.0.0", b"evil"),
+        ],
+    );
+    assert_eq!(
+        check_update(
+            &installed,
+            store.get(APP).unwrap(),
+            &fork,
+            &profile(),
+            STABLE
+        ),
+        UpdateStatus::Blocked(TrustProblem::StateForked)
+    );
+}
+
+#[test]
+fn uninstalling_forgets_nothing_and_the_memory_survives_a_restart() {
+    let path;
+    let dir = tempfile::tempdir().unwrap();
+    {
+        path = dir.path().join("trust.json");
+        let mut store = TrustStore::open(&path).unwrap();
+        let first = app_state(
+            &key(),
+            2,
+            &["1.5.0"],
+            vec![release_json("1.5.0", b"bad"), release_json("2.0.0", b"new")],
+        );
+        let ticket = plan_install(&first, None, None, &profile(), STABLE).unwrap();
+        store.record_install(&ticket, &verified(&ticket)).unwrap();
+    }
+    // The app is uninstalled: nothing about the store changes. The companion restarts.
+    let mut store = TrustStore::open(&path).unwrap();
+    let record = store.get(APP).unwrap();
+    assert_eq!(record.highest.as_ref().unwrap().0, Version::new(2, 0, 0));
+    assert_eq!(record.withdrawn, [Version::new(1, 5, 0)]);
+
+    // A thief's key is refused on the reinstall, with no installed app to compare with.
+    let thief = app_state(&other_key(), 9, &[], vec![release_json("9.0.0", b"evil")]);
+    assert_eq!(
+        plan_install(&thief, store.get(APP), None, &profile(), STABLE).unwrap_err(),
+        InstallRefusal::Untrusted(TrustProblem::PublisherChanged)
+    );
+    // A real but older release is under the floor, even in a higher genuine state.
+    let older = app_state(&key(), 3, &[], vec![release_json("1.0.0", b"old")]);
+    assert_eq!(
+        plan_install(&older, store.get(APP), None, &profile(), STABLE).unwrap_err(),
+        InstallRefusal::NothingToOffer
+    );
+    assert_eq!(
+        select_release(&older, store.get(APP), &profile(), STABLE).skipped[0].1,
+        SkipReason::BelowInstalledFloor
+    );
+    // The same version may come back, without being a first use.
+    let same = app_state(&key(), 3, &[], vec![release_json("2.0.0", b"new")]);
+    let ticket = plan_install(&same, store.get(APP), None, &profile(), STABLE).unwrap();
+    assert!(!ticket.first_use());
+    // The same version with other bytes may not.
+    let other_bytes = app_state(&key(), 3, &[], vec![release_json("2.0.0", b"evil")]);
+    assert_eq!(
+        plan_install(&other_bytes, store.get(APP), None, &profile(), STABLE).unwrap_err(),
+        InstallRefusal::Untrusted(TrustProblem::ReleaseChanged)
+    );
+
+    // Only the owner's explicit choice clears it, and it is a first use again.
+    store.forget(APP).unwrap();
+    let store = TrustStore::open(&path).unwrap();
+    assert!(store.get(APP).is_none());
+    let ticket = plan_install(&thief, store.get(APP), None, &profile(), STABLE).unwrap();
+    assert!(ticket.first_use());
+}
+
+#[test]
+fn a_damaged_memory_is_an_error_not_an_empty_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.json");
+    assert!(TrustStore::open(&path).unwrap().get(APP).is_none());
+    for bad in [
+        &b"not json"[..],
+        br#"{"schema":2,"apps":[]}"#,
+        br#"{"schema":1}"#,
+    ] {
+        std::fs::write(&path, bad).unwrap();
+        assert!(matches!(TrustStore::open(&path), Err(TrustError::Corrupt)));
+    }
+}
+
+#[test]
+fn an_installed_app_with_no_record_is_refused() {
+    let app = app_of(vec![release_json("1.0.0", b"old")]);
+    let installed = InstalledApp {
+        id: APP.to_owned(),
+        version: Version::new(0, 9, 0),
+        sha256: sha(b"x"),
+        permissions: vec![],
+    };
+    assert_eq!(
+        plan_install(&app, None, Some(&installed), &profile(), STABLE).unwrap_err(),
+        InstallRefusal::InstalledWithoutRecord
+    );
+}
+
+#[test]
+fn observing_an_unknown_app_remembers_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = TrustStore::open(dir.path().join("trust.json")).unwrap();
+    store.observe(&state_one()).unwrap();
+    assert!(store.get(APP).is_none());
 }
 
 // ------------------------------- downloads -------------------------------
@@ -800,6 +1273,10 @@ enum Canned {
     Breaks(Vec<u8>),
     /// Never ends: counts what was read from it.
     Endless(Arc<AtomicU64>),
+    /// Sends one byte at a time, each after a pause.
+    Drip,
+    /// Cancels the control on its first read, then sends these bytes.
+    CancelsThen(FetchControl, Vec<u8>),
 }
 
 #[derive(Default)]
@@ -840,8 +1317,29 @@ impl Read for Endless {
     }
 }
 
+struct Drip;
+
+impl Read for Drip {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        std::thread::sleep(Duration::from_millis(5));
+        buffer[0] = b'.';
+        Ok(1)
+    }
+}
+
+struct CancelsThen(FetchControl, Cursor<Vec<u8>>);
+
+impl Read for CancelsThen {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.0.cancel();
+        // Less than the whole package, so the loop has to come back for more.
+        let room = buffer.len().min(1);
+        self.1.read(&mut buffer[..room])
+    }
+}
+
 impl Fetcher for TableFetcher {
-    fn get(&self, url: &HttpsUrl) -> io::Result<FetchResponse> {
+    fn get(&self, url: &HttpsUrl, _control: &FetchControl) -> io::Result<FetchResponse> {
         self.asked.lock().unwrap().push(url.to_string());
         Ok(match self.table.get(url.as_str()).cloned() {
             None => FetchResponse::Status(404),
@@ -853,6 +1351,10 @@ impl Fetcher for TableFetcher {
                 FetchResponse::Body(Box::new(Broken(Cursor::new(bytes))))
             }
             Some(Canned::Endless(count)) => FetchResponse::Body(Box::new(Endless(count))),
+            Some(Canned::Drip) => FetchResponse::Body(Box::new(Drip)),
+            Some(Canned::CancelsThen(control, bytes)) => {
+                FetchResponse::Body(Box::new(CancelsThen(control, Cursor::new(bytes))))
+            }
         })
     }
 }
@@ -862,6 +1364,14 @@ const PACKAGE_URL: &str = "https://example.org/glass/tally-1.0.0.omgapp";
 
 fn package_app() -> AppEntry {
     app_of(vec![release_json("1.0.0", PACKAGE)])
+}
+
+fn ticket_for(app: &AppEntry) -> InstallTicket<'_> {
+    plan_install(app, None, None, &profile(), STABLE).unwrap()
+}
+
+fn long_enough() -> FetchControl {
+    FetchControl::with_timeout(Duration::from_secs(60))
 }
 
 fn files(dir: &std::path::Path) -> Vec<String> {
@@ -874,26 +1384,33 @@ fn files(dir: &std::path::Path) -> Vec<String> {
 }
 
 /// Runs a download into a fresh store, returning the result and what is on disk.
-fn download(fetcher: &TableFetcher) -> (Result<VerifiedPackage, DownloadError>, Vec<String>) {
+fn download_with(
+    fetcher: &TableFetcher,
+    control: &FetchControl,
+) -> (Result<VerifiedPackage, DownloadError>, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     let store = PackageStore::open(dir.path()).unwrap();
     let app = package_app();
-    let release = &app.releases[0];
-    let mut sink = store.begin(&release.sha256).unwrap();
-    let result = fetch_package(fetcher, &app, release, &mut sink);
+    let ticket = ticket_for(&app);
+    let mut sink = store.begin(&ticket.release().sha256).unwrap();
+    let result = fetch_package(fetcher, &ticket, &mut sink, control);
     drop(sink);
     (result, files(dir.path()))
 }
 
+fn download(fetcher: &TableFetcher) -> (Result<VerifiedPackage, DownloadError>, Vec<String>) {
+    download_with(fetcher, &long_enough())
+}
+
 #[test]
-fn a_good_download_lands_under_its_hash() {
+fn a_good_download_lands_under_its_hash_with_what_the_glass_needs() {
     let dir = tempfile::tempdir().unwrap();
     let store = PackageStore::open(dir.path()).unwrap();
     let app = package_app();
-    let release = &app.releases[0];
+    let ticket = ticket_for(&app);
     let fetcher = TableFetcher::default().with(PACKAGE_URL, Canned::Body(PACKAGE.to_vec()));
-    let mut sink = store.begin(&release.sha256).unwrap();
-    let package = fetch_package(&fetcher, &app, release, &mut sink).unwrap();
+    let mut sink = store.begin(&ticket.release().sha256).unwrap();
+    let package = fetch_package(&fetcher, &ticket, &mut sink, &long_enough()).unwrap();
     drop(sink);
     assert_eq!(package.app_id(), APP);
     assert_eq!(*package.version(), Version::new(1, 0, 0));
@@ -907,6 +1424,16 @@ fn a_good_download_lands_under_its_hash() {
         std::fs::read(store.path_of(&sha(PACKAGE))).unwrap(),
         PACKAGE
     );
+
+    // An AppOffer can be built: the Glass can check this with no manifest.
+    let glass_side = ed25519_dalek::VerifyingKey::from_bytes(package.publisher_key()).unwrap();
+    glass_side
+        .verify(
+            package.statement(),
+            &Signature::from_bytes(package.signature()),
+        )
+        .unwrap();
+
     store.remove(&sha(PACKAGE)).unwrap();
     store.remove(&sha(PACKAGE)).unwrap();
     assert!(files(dir.path()).is_empty());
@@ -965,34 +1492,119 @@ fn a_broken_connection_leaves_nothing_behind() {
 }
 
 #[test]
-fn a_part_file_left_by_a_crash_is_overwritten() {
+fn a_slow_server_runs_out_of_time_and_leaves_nothing_behind() {
+    let (result, left) = download_with(
+        &TableFetcher::default().with(PACKAGE_URL, Canned::Drip),
+        &FetchControl::with_timeout(Duration::from_millis(30)),
+    );
+    assert!(matches!(result, Err(DownloadError::DeadlineExceeded)));
+    assert!(left.is_empty(), "{left:?}");
+
+    let fetcher = TableFetcher::default().with(PACKAGE_URL, Canned::Body(PACKAGE.to_vec()));
+    let (result, _) = download_with(&fetcher, &FetchControl::with_timeout(Duration::ZERO));
+    assert!(matches!(result, Err(DownloadError::DeadlineExceeded)));
+    assert!(fetcher.asked().is_empty(), "no request once out of time");
+}
+
+#[test]
+fn a_download_can_be_cancelled() {
+    let control = long_enough();
+    let fetcher = TableFetcher::default().with(
+        PACKAGE_URL,
+        Canned::CancelsThen(control.clone(), PACKAGE.to_vec()),
+    );
+    let (result, left) = download_with(&fetcher, &control);
+    assert!(matches!(result, Err(DownloadError::Cancelled)));
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn the_usual_deadlines_grow_with_the_size() {
+    let small = FetchControl::for_package(1).remaining();
+    let big = FetchControl::for_package(MAX_PACKAGE_BYTES).remaining();
+    assert!(small <= Duration::from_secs(60));
+    assert!(big > Duration::from_secs(4000) && big <= Duration::from_secs(4156));
+    assert!(FetchControl::for_manifest().remaining() <= Duration::from_secs(60));
+}
+
+#[test]
+fn concurrent_downloads_of_one_hash_cannot_corrupt_each_other() {
     let dir = tempfile::tempdir().unwrap();
     let store = PackageStore::open(dir.path()).unwrap();
     let app = package_app();
-    let release = &app.releases[0];
-    let part = dir.path().join(format!("{}.part", to_hex(&release.sha256)));
-    std::fs::write(&part, vec![b'!'; 1000]).unwrap();
+    let ticket = ticket_for(&app);
     let fetcher = TableFetcher::default().with(PACKAGE_URL, Canned::Body(PACKAGE.to_vec()));
-    let mut sink = store.begin(&release.sha256).unwrap();
-    fetch_package(&fetcher, &app, release, &mut sink).unwrap();
-    assert!(!part.exists());
+
+    // A hostile stream started first, a good one second. The good one finishes, and then the
+    // hostile one keeps writing and fails.
+    let mut hostile = store.begin(&ticket.release().sha256).unwrap();
+    let mut good = store.begin(&ticket.release().sha256).unwrap();
+    let package = fetch_package(&fetcher, &ticket, &mut good, &long_enough()).unwrap();
+    hostile.write(&vec![b'X'; 4096]).unwrap();
     assert_eq!(
-        std::fs::read(store.path_of(&release.sha256)).unwrap(),
+        std::fs::read(store.path_of(package.sha256())).unwrap(),
         PACKAGE
     );
+    hostile.abort();
+    assert_eq!(
+        std::fs::read(store.path_of(package.sha256())).unwrap(),
+        PACKAGE
+    );
+    assert_eq!(files(dir.path()).len(), 1);
+}
+
+#[test]
+fn commit_checks_the_file_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PackageStore::open(dir.path()).unwrap();
+    let hash = sha(PACKAGE);
+
+    let mut wrong = store.begin(&hash).unwrap();
+    wrong.write(b"something else").unwrap();
+    assert_eq!(
+        wrong.commit().unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert!(!store.path_of(&hash).exists());
+    wrong.abort();
+    assert!(files(dir.path()).is_empty());
+
+    let mut right = store.begin(&hash).unwrap();
+    for chunk in PACKAGE.chunks(3) {
+        right.write(chunk).unwrap();
+    }
+    right.commit().unwrap();
+    assert_eq!(std::fs::read(store.path_of(&hash)).unwrap(), PACKAGE);
+}
+
+#[test]
+fn parts_left_by_a_crash_are_cleared_on_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PackageStore::open(dir.path()).unwrap();
+    let hash = sha(PACKAGE);
+    let crashed = dir
+        .path()
+        .join(format!("{}.0011223344556677.part", to_hex(&hash)));
+    std::fs::write(&crashed, vec![b'!'; 1000]).unwrap();
+    let mut done = store.begin(&hash).unwrap();
+    done.write(PACKAGE).unwrap();
+    done.commit().unwrap();
+    store.remove_stale_parts().unwrap();
+    assert!(!crashed.exists());
+    assert_eq!(std::fs::read(store.path_of(&hash)).unwrap(), PACKAGE);
 }
 
 #[test]
 fn the_verifier_alone_gives_the_same_answers() {
     let app = package_app();
-    let release = &app.releases[0];
-    let mut verifier = DownloadVerifier::new(&app, release);
+    let ticket = ticket_for(&app);
+    let mut verifier = DownloadVerifier::new(&ticket);
     for chunk in PACKAGE.chunks(3) {
         verifier.push(chunk).unwrap();
     }
     assert_eq!(*verifier.finish().unwrap().sha256(), sha(PACKAGE));
 
-    let mut verifier = DownloadVerifier::new(&app, release);
+    let mut verifier = DownloadVerifier::new(&ticket);
     assert!(matches!(
         verifier.push(&vec![0; PACKAGE.len() + 1]),
         Err(DownloadError::TooLarge)
@@ -1039,101 +1651,164 @@ fn a_redirect_loop_ends() {
 
 #[test]
 fn a_manifest_stream_is_cut_at_the_limit() {
-    let source = RepositorySource::parse(MANIFEST_URL).unwrap();
     let count = Arc::new(AtomicU64::new(0));
     let fetcher = TableFetcher::default().with(MANIFEST_URL, Canned::Endless(count.clone()));
     assert!(matches!(
-        fetch_manifest(&fetcher, &source),
+        fetch_manifest(&fetcher, &source(), &long_enough()),
         Err(DownloadError::TooLarge)
     ));
     assert!(count.load(Ordering::Relaxed) <= MAX_MANIFEST_BYTES as u64 + 8 * 1024);
 
     let fetcher = TableFetcher::default().with(MANIFEST_URL, Canned::Body(b"<html>".to_vec()));
     assert!(matches!(
-        fetch_manifest(&fetcher, &source),
+        fetch_manifest(&fetcher, &source(), &long_enough()),
         Err(DownloadError::Manifest(ManifestError::Malformed { .. }))
     ));
     assert!(matches!(
-        fetch_manifest(&TableFetcher::default(), &source),
+        fetch_manifest(&TableFetcher::default(), &source(), &long_enough()),
         Err(DownloadError::Status(404))
     ));
+    let slow = TableFetcher::default().with(MANIFEST_URL, Canned::Drip);
+    assert!(matches!(
+        fetch_manifest(
+            &slow,
+            &source(),
+            &FetchControl::with_timeout(Duration::from_millis(30))
+        ),
+        Err(DownloadError::DeadlineExceeded)
+    ));
+}
+
+#[test]
+fn a_manifest_may_not_redirect_to_another_site() {
+    // An open redirect on a trusted host must not put someone else's manifest under its name.
+    let evil = "https://evil.example.net/omg-apps.json";
+    let fetcher = TableFetcher::default()
+        .with(MANIFEST_URL, Canned::Redirect(evil))
+        .with(evil, Canned::Body(one_release().to_string().into_bytes()));
+    assert!(matches!(
+        fetch_manifest(&fetcher, &source(), &long_enough()),
+        Err(DownloadError::CrossOriginManifest)
+    ));
+    assert_eq!(fetcher.asked(), [MANIFEST_URL]);
+
+    let other_port = "https://example.org:8443/omg-apps.json";
+    let fetcher = TableFetcher::default().with(MANIFEST_URL, Canned::Redirect(other_port));
+    assert!(matches!(
+        fetch_manifest(&fetcher, &source(), &long_enough()),
+        Err(DownloadError::CrossOriginManifest)
+    ));
+
+    // Inside the site it is fine.
+    let moved = "/new/omg-apps.json";
+    let fetcher = TableFetcher::default()
+        .with(MANIFEST_URL, Canned::Redirect(moved))
+        .with(
+            "https://example.org/new/omg-apps.json",
+            Canned::Body(one_release().to_string().into_bytes()),
+        );
+    assert!(fetch_manifest(&fetcher, &source(), &long_enough()).is_ok());
 }
 
 // ------------------------------- the whole path -------------------------------
 
 #[test]
 fn add_a_github_repository_install_then_update_then_survive_a_takeover() {
-    let raw = "https://raw.githubusercontent.com/someone/tally/HEAD/omg-apps.json";
-    let v1 = b"version one".as_slice();
-    let v2 = b"version two".as_slice();
+    assert!(GITHUB_ASSET_REDIRECT.len() > 900);
+    let raw = "https://raw.githubusercontent.com/some-one/tally/HEAD/omg-apps.json";
+    let v1 = b"old".as_slice();
+    let v2 = b"new".as_slice();
     let url_of =
-        |v: &str| format!("https://github.com/someone/tally/releases/download/v{v}/t.omgapp");
-    let asset = "https://release-assets.example.net/signed/t.omgapp";
-
-    let mut r1 = release_json("1.0.0", v1);
-    r1["url"] = json!(url_of("1.0.0"));
-    let first = manifest_json(vec![app_json(APP, &key(), vec![r1.clone()])]).to_string();
+        |v: &str| format!("https://github.com/Some-One/tally/releases/download/v{v}/t.omgapp");
 
     // Add the repository, the way the owner pastes it.
-    let source = RepositorySource::parse("https://github.com/someone/tally").unwrap();
+    let source = RepositorySource::parse("https://github.com/Some-One/Tally").unwrap();
     assert_eq!(source.manifest_url().as_str(), raw);
-    let fetcher = TableFetcher::default()
-        .with(raw, Canned::Body(first.into_bytes()))
-        .with(&url_of("1.0.0"), Canned::Body(v1.to_vec()));
-    let manifest = fetch_manifest(&fetcher, &source).unwrap();
+    assert_eq!(source.label(), "github.com/some-one/tally");
 
-    // Install: the highest offered release, through the store.
-    let app = manifest.app(APP).unwrap();
-    let release = select_release(app, &profile(), STABLE).best.unwrap();
+    let release = |v: &str, bytes: &[u8]| {
+        let mut r = release_json(v, bytes);
+        r["url"] = json!(url_of(v));
+        r
+    };
+    let published = |signer: &SigningKey, sequence: u64, releases: Vec<Value>| {
+        let mut app = unsigned_app(APP, sequence, releases);
+        sign_app(&mut app, signer, source.manifest_url());
+        manifest_json(vec![app]).to_string().into_bytes()
+    };
+
     let dir = tempfile::tempdir().unwrap();
-    let store = PackageStore::open(dir.path()).unwrap();
-    let mut sink = store.begin(&release.sha256).unwrap();
-    let package = fetch_package(&fetcher, app, release, &mut sink).unwrap();
-    let installed = InstalledApp {
-        id: package.app_id().to_owned(),
-        version: package.version().clone(),
-        repository: source.manifest_url().clone(),
-        publisher_key: app.publisher_key,
-        sha256: *package.sha256(),
-        permissions: release.permissions.clone(),
-    };
+    let packages = PackageStore::open(dir.path().join("packages")).unwrap();
+    let mut trust = TrustStore::open(dir.path().join("trust.json")).unwrap();
 
-    // A new version appears, behind a redirect to the asset host.
-    let mut r2 = release_json("1.1.0", v2);
-    r2["url"] = json!(url_of("1.1.0"));
-    let second =
-        manifest_json(vec![app_json(APP, &key(), vec![r1.clone(), r2.clone()])]).to_string();
-    let redirect: &'static str = asset;
+    // Install, behind the kind of redirect GitHub really answers with.
     let fetcher = TableFetcher::default()
-        .with(raw, Canned::Body(second.into_bytes()))
-        .with(&url_of("1.1.0"), Canned::Redirect(redirect))
-        .with(asset, Canned::Body(v2.to_vec()));
-    let manifest = fetch_manifest(&fetcher, &source).unwrap();
+        .with(
+            raw,
+            Canned::Body(published(&key(), 1, vec![release("1.0.0", v1)])),
+        )
+        .with(&url_of("1.0.0"), Canned::Redirect(GITHUB_ASSET_REDIRECT))
+        .with(GITHUB_ASSET_REDIRECT, Canned::Body(v1.to_vec()));
+    let manifest = fetch_manifest(&fetcher, &source, &FetchControl::for_manifest()).unwrap();
     let app = manifest.app(APP).unwrap();
-    let UpdateStatus::UpdateAvailable { release, .. } =
-        check_update(&installed, source.manifest_url(), app, &profile(), STABLE)
-    else {
-        panic!("no update offered");
-    };
-    let mut sink = store.begin(&release.sha256).unwrap();
-    let updated = fetch_package(&fetcher, app, release, &mut sink).unwrap();
+    let ticket = plan_install(app, trust.get(APP), None, &profile(), STABLE).unwrap();
+    assert!(ticket.first_use());
+    let mut sink = packages.begin(&ticket.release().sha256).unwrap();
+    let control = FetchControl::for_package(ticket.release().size);
+    let package = fetch_package(&fetcher, &ticket, &mut sink, &control).unwrap();
+    assert_eq!(fetcher.asked().last().unwrap(), GITHUB_ASSET_REDIRECT);
+    trust.record_install(&ticket, &package).unwrap();
+    let installed = installed_of(&ticket);
+
+    // A new version appears, the same way.
+    let fetcher = TableFetcher::default()
+        .with(
+            raw,
+            Canned::Body(published(
+                &key(),
+                2,
+                vec![release("1.0.0", v1), release("1.1.0", v2)],
+            )),
+        )
+        .with(&url_of("1.1.0"), Canned::Redirect(GITHUB_ASSET_REDIRECT))
+        .with(GITHUB_ASSET_REDIRECT, Canned::Body(v2.to_vec()));
+    let manifest = fetch_manifest(&fetcher, &source, &FetchControl::for_manifest()).unwrap();
+    let app = manifest.app(APP).unwrap();
+    trust.observe(app).unwrap();
+    let ticket = plan_install(app, trust.get(APP), Some(&installed), &profile(), STABLE).unwrap();
+    let mut sink = packages.begin(&ticket.release().sha256).unwrap();
+    let updated = fetch_package(&fetcher, &ticket, &mut sink, &long_enough()).unwrap();
     assert_eq!(*updated.version(), Version::new(1, 1, 0));
-    assert_eq!(std::fs::read(store.path_of(updated.sha256())).unwrap(), v2);
+    assert_eq!(
+        std::fs::read(packages.path_of(updated.sha256())).unwrap(),
+        v2
+    );
+    trust.record_install(&ticket, &updated).unwrap();
+    let installed = installed_of(&ticket);
 
     // The account is stolen: a valid manifest under the thief's key, malicious "update" included.
-    let mut evil = release_json("9.9.9", b"malware");
-    evil["url"] = json!(url_of("9.9.9"));
-    let stolen = manifest_json(vec![app_json(APP, &other_key(), vec![evil])]).to_string();
-    let fetcher = TableFetcher::default().with(raw, Canned::Body(stolen.into_bytes()));
-    let manifest = fetch_manifest(&fetcher, &source).unwrap();
+    let fetcher = TableFetcher::default().with(
+        raw,
+        Canned::Body(published(&other_key(), 99, vec![release("9.9.9", b"evil")])),
+    );
+    let manifest = fetch_manifest(&fetcher, &source, &FetchControl::for_manifest()).unwrap();
+    let stolen = manifest.app(APP).unwrap();
+    assert!(matches!(
+        trust.observe(stolen),
+        Err(TrustError::Problem(TrustProblem::PublisherChanged))
+    ));
     assert_eq!(
         check_update(
             &installed,
-            source.manifest_url(),
-            manifest.app(APP).unwrap(),
+            trust.get(APP).unwrap(),
+            stolen,
             &profile(),
             STABLE
         ),
-        UpdateStatus::PublisherChanged
+        UpdateStatus::Blocked(TrustProblem::PublisherChanged)
+    );
+    assert_eq!(
+        plan_install(stolen, trust.get(APP), Some(&installed), &profile(), STABLE).unwrap_err(),
+        InstallRefusal::Untrusted(TrustProblem::PublisherChanged)
     );
 }
