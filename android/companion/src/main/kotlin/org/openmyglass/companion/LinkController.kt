@@ -1,8 +1,10 @@
 package org.openmyglass.companion
 
-import org.openmyglass.corebindings.CompanionCore
+import org.openmyglass.corebindings.CompanionCoreInterface
 import org.openmyglass.corebindings.CoreEvent
 import org.openmyglass.corebindings.LinkProfile
+import org.openmyglass.corebindings.ReconnectBackoff
+import org.openmyglass.corebindings.ReconnectBackoffInterface
 import org.openmyglass.corebindings.linkProfileFast
 import java.io.IOException
 import java.net.InetSocketAddress
@@ -23,13 +25,13 @@ interface ByteLink {
     @Throws(IOException::class)
     fun write(bytes: ByteArray)
 
+    /** Blocks, within a limit, until what [write] took has had its chance to leave. */
+    fun flush() = Unit
+
     fun close()
 }
 
-/**
- * Wi-Fi, or USB through `adb reverse`. Bluetooth Classic would be one more [ByteLink], on Android
- * only: nothing shared may assume it, because iOS does not have it.
- */
+/** Wi-Fi, or USB through `adb reverse`. [BleLink] is the everyday one. */
 class TcpLink(host: String, port: Int) : ByteLink {
     private val socket = Socket().apply {
         tcpNoDelay = true
@@ -45,7 +47,13 @@ class TcpLink(host: String, port: Int) : ByteLink {
         }
     }
 
-    override fun close() = socket.close()
+    override fun close() {
+        try {
+            socket.close()
+        } catch (_: IOException) {
+            // It is closed as far as this app can tell.
+        }
+    }
 
     private companion object {
         const val CONNECT_TIMEOUT_MS = 5000
@@ -53,66 +61,154 @@ class TcpLink(host: String, port: Int) : ByteLink {
 }
 
 /**
+ * Opens a link and blocks until it is up. Fails with an [IOException]. It should give up, the same
+ * way, once `cancelled` returns true: nobody wants this link any more.
+ */
+typealias LinkOpener = (cancelled: () -> Boolean) -> ByteLink
+
+/**
  * Keeps a link to the Glass while [open] is set, reconnecting after a loss: notes sync by
  * themselves whenever it comes back. The threads are the two `docs/companion-mobile.md` asks
  * for, plus one that supervises.
  *
  * This lives as long as the app's process. There is no background service yet.
+ *
+ * [onEvents] gets the link the events came from, or null once it has ended. It is also called with
+ * no events each time an attempt ends, because a link that simply dropped has no event of its own
+ * and the screen must still stop saying it is connected.
+ * [onOpenFailed] says why the wanted link did not open, with the id [connect] returned for it. It and
+ * [onEvents] run on the link's threads, so check [wants] once on the screen's thread.
  */
 class LinkController(
-    private val core: CompanionCore,
+    private val core: CompanionCoreInterface,
     private val freeBytes: () -> Long,
-    private val onEvents: (List<CoreEvent>) -> Unit,
+    private val backoff: ReconnectBackoffInterface = ReconnectBackoff(),
+    private val onOpenFailed: (request: Long, why: String) -> Unit = { _, _ -> },
+    private val flushLimitMs: Long = FLUSH_LIMIT_MS,
+    private val onEvents: (events: List<CoreEvent>, from: ByteLink?) -> Unit,
 ) {
+    /** Ends the wait between pumps. */
     private val wake = Semaphore(0)
 
-    @Volatile private var open: (() -> ByteLink)? = null
+    /** Ends the wait between attempts. Only the owner asking for something does that. */
+    private val retry = Semaphore(0)
+
+    /** One per [connect], so that asking again with the same opener is still a new request. */
+    private class Request(val id: Long, val opener: LinkOpener)
+
+    @Volatile private var open: Request? = null
+    private var requests = 0L
 
     @Volatile private var current: ByteLink? = null
     private var supervisor: Thread? = null
 
-    /** Keep a link open with what [opener] returns. */
+    /** The link [disconnectAfterFlush] let finish, and until when, in [System.nanoTime]. */
+    @Volatile private var flushing: Pair<ByteLink, Long>? = null
+
+    /** The link that is open now, whatever its phase, to tell what carries it. */
+    val running: ByteLink? get() = current
+
+    /**
+     * Keep a link open with what [opener] returns, instead of any link there is now. Returns the
+     * request's id, which [wants] and [onOpenFailed] use.
+     */
     @Synchronized
-    fun connect(opener: () -> ByteLink) {
-        open = opener
+    fun connect(opener: LinkOpener): Long {
+        val request = Request(++requests, opener)
+        open = request
+        endCurrent()
         if (supervisor?.isAlive != true) {
             supervisor = Thread({ supervise() }, "omg-link").apply { start() }
         }
+        retry.release()
+        return request.id
     }
+
+    /** The link [connect] returned [request] for is still the one wanted. */
+    fun wants(request: Long) = open?.id == request
 
     /** Close the link and stay down. */
     fun disconnect() {
         open = null
-        current?.close()
+        endCurrent()
+        retry.release()
+    }
+
+    /**
+     * Stay down, after writing what the core has queued. A scan in progress stops at once. A
+     * [connect] or [disconnect] meanwhile waits for the flush, for up to [flushLimitMs], since what
+     * is queued may be an Unpair the Glass has to see.
+     */
+    fun disconnectAfterFlush() {
+        current?.let { flushing = it to System.nanoTime() + flushLimitMs * 1_000_000 }
+        open = null
         wake.release()
+        retry.release()
+    }
+
+    /** Closes the current link, unless it is flushing: then only once its time is up. */
+    private fun endCurrent() {
+        val link = current ?: return
+        val (flushed, until) = flushing ?: (null to 0L)
+        val leftMs = (until - System.nanoTime()) / 1_000_000
+        if (flushed !== link || leftMs <= 0) {
+            link.close()
+            return
+        }
+        // It ends by itself after the flush, and the supervisor then takes the new request.
+        Thread({
+            Thread.sleep(leftMs)
+            if (current === link) link.close()
+        }, "omg-flush-limit").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     /** Call after anything that may have queued bytes in the core. */
     fun poke() = wake.release()
 
     private fun supervise() {
-        var backoffMs = MIN_BACKOFF_MS
         while (true) {
-            val opener = open ?: break
-            try {
-                val link = opener()
+            // Under the lock, so that a connect() either sees this thread gone or is seen here.
+            val request = synchronized(this) {
+                open.also { if (it == null) supervisor = null }
+            } ?: return
+            var lastedMs = 0L
+            openLink(request)?.let { link ->
+                val started = System.nanoTime()
+                // Before the check: connect() sets `open` and then closes `current`, so a link
+                // nobody wants any more is either not run here or closed there.
                 current = link
-                if (open != null) {
-                    runLink(link)
-                    backoffMs = MIN_BACKOFF_MS
-                }
-            } catch (_: IOException) {
-                // The next attempt is below.
+                if (open === request) runLink(link, request) else link.close()
+                current = null
+                lastedMs = (System.nanoTime() - started) / 1_000_000
             }
-            current = null
-            deliver(core.pump().events)
-            if (open == null) break
-            wake.tryAcquire(backoffMs, TimeUnit.MILLISECONDS)
-            backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
+            onEvents(core.pump().events, null)
+            // Emptied before the check: a request after the check ends the wait.
+            retry.drainPermits()
+            if (open === request) {
+                retry.tryAcquire(backoff.nextWaitMs(lastedMs.toULong()).toLong(), TimeUnit.MILLISECONDS)
+            }
+            if (open !== request) backoff.reset()
         }
     }
 
-    private fun runLink(link: ByteLink) {
+    private fun openLink(request: Request): ByteLink? = try {
+        request.opener { open !== request }
+    } catch (e: IOException) {
+        openFailed(request, e)
+    } catch (e: RuntimeException) {
+        // The framework's way of saying the same thing, and no reason to lose the app.
+        openFailed(request, e)
+    }
+
+    private fun openFailed(request: Request, e: Exception): ByteLink? {
+        if (open === request) onOpenFailed(request.id, e.message ?: e.toString())
+        return null
+    }
+
+    private fun runLink(link: ByteLink, request: Request) {
         core.setFreeBytes(freeBytes().toULong())
         // Connecting is the owner's action, so a core with no bond may bond here.
         core.linkUp(link.profile, core.snapshot().bondedTo == null)
@@ -134,13 +230,19 @@ class LinkController(
         }, "omg-read").apply { start() }
 
         try {
-            while (!ended.get() && open != null) {
+            while (!ended.get()) {
                 wake.tryAcquire(PUMP_INTERVAL_MS, TimeUnit.MILLISECONDS)
                 wake.drainPermits()
+                // Read before the pump, so what was queued before the owner stopped, or asked
+                // for another link, still goes.
+                val stopping = open !== request
                 val out = core.pump()
                 if (out.outgoing.isNotEmpty()) link.write(out.outgoing)
-                deliver(out.events)
-                if (out.closeLink) break
+                deliver(out.events, link)
+                if (out.closeLink || stopping) {
+                    link.flush()
+                    break
+                }
             }
         } catch (_: IOException) {
             // Handled below like any other end.
@@ -151,14 +253,14 @@ class LinkController(
         }
     }
 
-    private fun deliver(events: List<CoreEvent>) {
-        if (events.isNotEmpty()) onEvents(events)
+    private fun deliver(events: List<CoreEvent>, from: ByteLink) {
+        if (events.isNotEmpty()) onEvents(events, from)
     }
 
     private companion object {
+        /** Above BleLink's own limits on a flush, so that it gives up before this does. */
+        const val FLUSH_LIMIT_MS = 5_000L
         const val PUMP_INTERVAL_MS = 200L
         const val READ_BUFFER = 64 * 1024
-        const val MIN_BACKOFF_MS = 1000L
-        const val MAX_BACKOFF_MS = 30_000L
     }
 }

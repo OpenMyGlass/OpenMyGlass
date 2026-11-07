@@ -2,6 +2,7 @@ package org.openmyglass.companion
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
@@ -31,6 +32,7 @@ import android.widget.Switch
 import android.widget.TextView
 import org.openmyglass.corebindings.CompanionCore
 import org.openmyglass.corebindings.CoreEvent
+import org.openmyglass.corebindings.CoreSnapshot
 import org.openmyglass.corebindings.GlassRadio
 import org.openmyglass.corebindings.GlassSettings
 import org.openmyglass.corebindings.LinkPhase
@@ -86,20 +88,43 @@ class MainActivity : Activity() {
             AndroidStt(engineContext),
             AndroidTts(engineContext),
         )
-        link = LinkController(core, { filesDir.usableSpace }) { events ->
-            main.post { onEvents(events) }
+        link = LinkController(
+            core,
+            { filesDir.usableSpace },
+            onOpenFailed = { request, why ->
+                main.post {
+                    // The owner may have asked for something else since.
+                    if (link.wants(request)) {
+                        lastProblem = why
+                        refreshStatus()
+                    }
+                }
+            },
+        ) { events, from ->
+            // Read now: by the time the post runs, another link may be the current one.
+            val bleAddress = (from as? BleLink)?.address
+            main.post { onEvents(events, bleAddress) }
         }
         setContentView(buildUi())
-        // Needs the window's decor, which setContentView creates.
-        window.insetsController?.setSystemBarsAppearance(
-            WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
-            WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
-        )
+        // Needs the window's decor, which setContentView creates. Android 10 keeps its default bars.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            window.insetsController?.setSystemBarsAppearance(
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                    WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                    WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+            )
+        }
         refreshAll()
-        // A bonded phone goes back to its Glass by itself, so waiting notes sync.
-        if (core.snapshot().bondedTo != null) connect()
+        // A bonded phone goes back to its Glass by itself, over the link it last used, so waiting
+        // notes sync. It does not ask for permissions unasked.
+        if (core.snapshot().bondedTo != null) {
+            if (prefs.getString(KEY_LINK, LINK_TCP) == LINK_BLE) {
+                if (BleLink.missingPermissions(this).isEmpty()) connectBle()
+            } else {
+                connect()
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -113,24 +138,64 @@ class MainActivity : Activity() {
     private fun connect() {
         val text = address.text.toString().trim()
         val host = text.substringBeforeLast(':')
-        val port = text.substringAfterLast(':').toIntOrNull()
+        val port = text.substringAfterLast(':').toIntOrNull()?.takeIf { it in 1..65535 }
         if (host.isEmpty() || port == null) {
             status.text = "Address must be host:port"
             return
         }
-        prefs.edit().putString(KEY_ADDRESS, text).apply()
+        prefs.edit().putString(KEY_ADDRESS, text).putString(KEY_LINK, LINK_TCP).apply()
+        linkNote = null
+        lastProblem = null
         link.connect { TcpLink(host, port) }
         refreshStatus()
     }
 
-    private fun onEvents(events: List<CoreEvent>) {
+    /** What is going on while no link is up, set while a BLE link is wanted. */
+    private var linkNote: String? = null
+
+    /** The link in use is over Bluetooth. Wanting one, or having had one, does not count. */
+    private fun overBluetooth(s: CoreSnapshot = core.snapshot()) =
+        s.phase == LinkPhase.RUNNING && link.running is BleLink
+
+    /** Finds the Glass by its service: no address to type. Asks for the permissions first. */
+    private fun connectBle() {
+        val missing = BleLink.missingPermissions(this)
+        if (missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), REQUEST_BLUETOOTH)
+            return
+        }
+        prefs.edit().putString(KEY_LINK, LINK_BLE).apply()
+        linkNote = "Looking for the Glass over Bluetooth"
+        lastProblem = null
+        val known = prefs.getString(KEY_BLE_ADDRESS, null)
+            .takeIf { core.snapshot().bondedTo != null }
+        link.connect { cancelled -> BleLink.open(applicationContext, known, cancelled) }
+        refreshStatus()
+    }
+
+    private fun bluetoothAnswered() {
+        if (BleLink.missingPermissions(this).isEmpty()) {
+            connectBle()
+        } else {
+            lastProblem = "Bluetooth needs these permissions to find the Glass"
+            refreshStatus()
+        }
+    }
+
+    private fun onEvents(events: List<CoreEvent>, bleAddress: String?) {
         var notes = false
         for (e in events) {
             when (e) {
                 is CoreEvent.SettingsChanged -> showSettings(e.settings)
                 is CoreEvent.NotesChanged, is CoreEvent.NoteSynced -> notes = true
                 is CoreEvent.LinkClosed -> e.reason?.let { lastProblem = it }
-                is CoreEvent.LinkRunning -> lastProblem = null
+                is CoreEvent.LinkRunning -> {
+                    lastProblem = null
+                    // This Glass passed the handshake: the next scan looks for it alone.
+                    bleAddress?.let {
+                        prefs.edit().putString(KEY_BLE_ADDRESS, it).apply()
+                    }
+                }
                 is CoreEvent.NoteDeferred -> lastProblem = "Note waiting: ${e.reason}"
                 is CoreEvent.NoteRefused -> lastProblem = "Note refused: ${e.reason}"
                 else -> Unit
@@ -155,9 +220,11 @@ class MainActivity : Activity() {
         status.text = buildString {
             append(
                 when (s.phase) {
-                    LinkPhase.DOWN -> "Not connected"
+                    LinkPhase.DOWN -> linkNote ?: "Not connected"
                     LinkPhase.HANDSHAKE -> "Connecting"
-                    LinkPhase.RUNNING -> "Connected to ${g.name ?: "Glass"}"
+                    LinkPhase.RUNNING ->
+                        "Connected to ${g.name ?: "Glass"}" +
+                            if (overBluetooth(s)) " over Bluetooth" else ""
                 },
             )
             s.bondedTo?.let { append("\nPaired with $it") }
@@ -166,9 +233,11 @@ class MainActivity : Activity() {
             g.pendingNotes?.let { append("\nNotes waiting on the Glass: $it") }
             lastProblem?.let { append("\n$it") }
         }
-        wifi.setShown(g.wifiOn)
-        bluetooth.setShown(g.bluetoothOn)
-        airplane.setShown(g.airplaneMode)
+        // The core keeps the last values after a link ends, and a change would go nowhere then.
+        val up = s.phase == LinkPhase.RUNNING
+        wifi.setShown(g.wifiOn.takeIf { up })
+        bluetooth.setShown(g.bluetoothOn.takeIf { up })
+        airplane.setShown(g.airplaneMode.takeIf { up })
     }
 
     private fun org.openmyglass.corebindings.GlassState.battery_line(): String? =
@@ -190,14 +259,27 @@ class MainActivity : Activity() {
         root.addView(
             row(
                 button("Connect") { connect() },
+                button("Bluetooth") { connectBle() },
                 button("Disconnect") {
+                    linkNote = null
+                    lastProblem = null
                     link.disconnect()
                     refreshStatus()
                 },
                 button("Unpair") {
-                    core.unpair()
-                    link.poke()
-                    main.postDelayed({ link.disconnect(); refreshStatus() }, 300)
+                    // If this phone cannot forget the bond, the core tells the Glass nothing and
+                    // the link stays, so both ends still agree.
+                    try {
+                        core.unpair()
+                        prefs.edit().remove(KEY_BLE_ADDRESS).apply()
+                        lastProblem = null
+                        linkNote = null
+                        // The Glass forgets this phone only if the core's last frame reaches it.
+                        link.disconnectAfterFlush()
+                    } catch (e: org.openmyglass.corebindings.CoreFailure) {
+                        lastProblem = "Could not forget the Glass on this phone: ${e.message}"
+                    }
+                    refreshStatus()
                 },
             ),
         )
@@ -233,9 +315,18 @@ class MainActivity : Activity() {
     private fun buildGlassPage(): View {
         settingsBox = column()
         heading("Radios")
-        wifi = plainSwitch("Wi-Fi") { core.setRadio(GlassRadio.WIFI, it); link.poke() }
-        bluetooth = plainSwitch("Bluetooth") { core.setRadio(GlassRadio.BLUETOOTH, it); link.poke() }
-        airplane = plainSwitch("Airplane mode") { core.setAirplaneMode(it); link.poke() }
+        wifi = plainSwitch("Wi-Fi") { on -> whenRunning { core.setRadio(GlassRadio.WIFI, on) } }
+        // On the Glass, Bluetooth runs when it is wanted and airplane mode is off.
+        bluetooth = plainSwitch("Bluetooth") { on ->
+            confirmIfItDropsTheLink(!on, "Turning Bluetooth off", "turn Bluetooth back on") {
+                whenRunning { core.setRadio(GlassRadio.BLUETOOTH, on) }
+            }
+        }
+        airplane = plainSwitch("Airplane mode") { on ->
+            confirmIfItDropsTheLink(on, "Turning airplane mode on", "turn airplane mode off") {
+                whenRunning { core.setAirplaneMode(on) }
+            }
+        }
 
         heading("Screen and waking")
         number("brightness", "Brightness", 0, 100, { it.brightness }) { GlassSettings(brightness = it) }
@@ -302,8 +393,18 @@ class MainActivity : Activity() {
 
     private fun send(change: GlassSettings) {
         if (showing) return
-        core.changeSettings(change)
-        link.poke()
+        whenRunning { core.changeSettings(change) }
+    }
+
+    /** The core drops a change with no running link, so say so instead. */
+    private fun whenRunning(change: () -> Unit) {
+        if (core.snapshot().phase == LinkPhase.RUNNING) {
+            change()
+            link.poke()
+        } else {
+            lastProblem = "Not sent: the Glass is not connected"
+            refreshStatus()
+        }
     }
 
     private fun heading(text: String) {
@@ -314,6 +415,27 @@ class MainActivity : Activity() {
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
             },
         )
+    }
+
+    /**
+     * This phone reaches the Glass over the radio the owner is about to turn off, and only the
+     * Glass itself can then turn it back on: ask first, and on "no" show what the Glass reports.
+     */
+    private fun confirmIfItDropsTheLink(dropsRadio: Boolean, what: String, undo: String, apply: () -> Unit) {
+        if (!dropsRadio || !overBluetooth()) {
+            apply()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Disconnect from the Glass?")
+            .setMessage(
+                "This phone is connected over Bluetooth, so $what will end the connection. " +
+                    "To connect again, $undo from the settings on the Glass.",
+            )
+            .setPositiveButton("Continue") { _, _ -> apply() }
+            .setNegativeButton("Cancel") { _, _ -> refreshStatus() }
+            .setOnCancelListener { refreshStatus() }
+            .show()
     }
 
     private fun plainSwitch(label: String, onChange: (Boolean) -> Unit): Switch {
@@ -527,6 +649,7 @@ class MainActivity : Activity() {
         if (requestCode == REQUEST_MIC && results.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             toggleRecording()
         }
+        if (requestCode == REQUEST_BLUETOOTH) bluetoothAnswered()
     }
 
     private fun showDraftFiles() {
@@ -634,12 +757,17 @@ class MainActivity : Activity() {
 
     private companion object {
         const val KEY_ADDRESS = "address"
+        const val KEY_LINK = "link"
+        const val KEY_BLE_ADDRESS = "ble_address"
+        const val LINK_TCP = "tcp"
+        const val LINK_BLE = "ble"
 
         /** The other end of `adb reverse tcp:7700 tcp:7700`, until the Glass is reachable. */
         const val DEFAULT_ADDRESS = "127.0.0.1:7700"
         const val REQUEST_PHOTOS = 1
         const val REQUEST_VIDEO = 2
         const val REQUEST_MIC = 3
+        const val REQUEST_BLUETOOTH = 4
         val LOCALE_NAMES = mapOf(
             NoteLocale.IT to "Italiano",
             NoteLocale.EN to "English",
