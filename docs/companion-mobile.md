@@ -2,7 +2,7 @@
 
 A shared Rust core with thin native frontends, on Android and iOS from the start. This page covers how a phone app uses the core. The core itself is in [`companion-rust-core.md`](companion-rust-core.md), and notes in [`companion-notes-sync.md`](companion-notes-sync.md).
 
-Status: `omg-ffi` is tested on the host against the simulated Glass over TCP, and the Android app has run on a phone against a Glass over Wi-Fi. It has run on no iOS device, and Swift has only had its bindings generated and the Rust side compile-checked for `aarch64-apple-ios`.
+Status: `omg-ffi` is tested on the host against the simulated Glass over TCP, and the Android app has run on a phone against a Glass over Wi-Fi. On iOS, the app in [`ios/`](../ios/) has run in the simulator against the simulated Glass over TCP: it pairs, links again on the bond, and receives a note. It has run on no iOS device, and has no Bluetooth yet.
 
 ## The binding layer: UniFFI in `omg-ffi`
 

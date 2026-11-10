@@ -15,7 +15,7 @@ Current plan: [`superpowers/plans/2026-10-19-phase-0-2-reverse-engineering.md`](
 | 5 — Notifications | 🔄 5a done: phone notifications on Glass (read, dismiss both ways, actions), filter and settings, verified on the emulator ([`notifications.md`](notifications.md)); 5b done: dictated replies, transcribed offline on the phone with Vosk (Italian/English), verified end to end on the emulator; done |
 | 6 — Media | 🔄 6a done: photo/video sync over Wi-Fi (automatic while Glass charges on Wi-Fi, or on demand; resumable, SHA-256 verified, into DCIM/Glass), verified on the emulator ([`media-sync.md`](media-sync.md)); 6b done: on-demand Bluetooth fallback (chunks over the bridge) and delete-after-sync (hash-guarded), verified on the emulator |
 | 7 — ROM and kernel (optional track) | 🔄 hardware-free work done, see [Where we stopped](#where-we-stopped-2026-10-20) |
-| 5 — iOS plan | ⏳ (only on request) |
+| 5 — iOS plan | 🔄 phase 1: `ios/` builds the core as an XCFramework and runs a SwiftUI shell over TCP, verified in the simulator against `omg sim-glass` (pairing, link on the bond, a note received); Bluetooth, speech and the notes screen to do |
 
 ## Phase 0 — Tool inventory (macOS arm64, 2026-10-19)
 
