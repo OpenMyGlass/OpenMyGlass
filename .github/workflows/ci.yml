@@ -160,3 +160,23 @@ jobs:
         run: |
           rustup target add aarch64-apple-ios
           cargo check -p omg-ffi --target aarch64-apple-ios
+
+  # iOS companion shell (ios/): the core as an XCFramework, and the app builds for the simulator.
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+          brew install xcodegen
+      - name: Core XCFramework and Swift bindings
+        run: ios/build-core.sh
+      - name: App builds for the simulator
+        working-directory: ios
+        run: |
+          xcodegen generate
+          xcodebuild -scheme OpenMyGlassCompanion -destination 'generic/platform=iOS Simulator' build
